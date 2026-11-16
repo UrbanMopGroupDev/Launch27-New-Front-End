@@ -44,6 +44,12 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       if (!session) return res.status(401).json({ error: 'Not logged in' });
       const email = session.email.toLowerCase();
       let user = await one(db, 'UPDATE users SET last_seen_at = now() WHERE email = $1 RETURNING *', [email]);
+      // ADMIN_EMAILS is authoritative: someone added to it after their first sign-in is
+      // promoted on their next request. (Never demotes: other admins are set in Support settings.)
+      if (user && user.role !== 'admin' && roleFor(email, false) === 'admin') {
+        user = await one(db, "UPDATE users SET role = 'admin' WHERE id = $1 RETURNING *", [user.id]);
+        await svc.audit(db, null, 'user.promoted', 'user', user.id, { role: 'admin', by: 'ADMIN_EMAILS' });
+      }
       if (!user) {
         const isFirst = !(await one(db, 'SELECT 1 FROM users LIMIT 1'));
         user = await one(db, "INSERT INTO users (email, name, role, status_id, status_since) VALUES ($1,$2,$3,(SELECT id FROM agent_statuses WHERE kind = 'offline' ORDER BY position LIMIT 1), now()) ON CONFLICT (email) DO UPDATE SET last_seen_at = now() RETURNING *", [email, email.split('@')[0].replace(/[._]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()), roleFor(email, isFirst)]);
