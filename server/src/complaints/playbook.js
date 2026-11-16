@@ -1,0 +1,256 @@
+// The Phase 1 playbook report, computed from stored cases. Pure.
+//   - taxonomy: how often each category comes up, typical handling, what kept clients, at what cost
+//   - ladder:   per rung (highest rung used on the case), retention and cost
+//   - reclean vs refund within each category (where our default helped, where it was overkill)
+//   - root causes: complaint rate per 100 visits by journey situation, against the overall rate
+//   - budget baseline: monthly complaint cost as a % of Residential revenue
+//   - data gaps and confidence
+// Every figure carries n; anything resting on fewer than THIN cases is flagged.
+import { categoryLabel, HARD_ROUTES } from './taxonomy.js';
+import { RUNGS, rungIndex } from './settings.js';
+
+export const THIN = 10;
+const r2 = (x) => (x == null ? null : Math.round(x * 100) / 100);
+const share = (a, b) => (b ? Math.round((a / b) * 1000) / 1000 : null);
+const median = (xs) => {
+  if (!xs.length) return null;
+  const s = [...xs].sort((a, b) => a - b);
+  return s[Math.floor(s.length / 2)];
+};
+const confidence = (n) => (n >= 30 ? 'good' : n >= THIN ? 'fair' : n > 0 ? 'thin' : 'none');
+
+function topRung(rs) {
+  let best = null;
+  for (const r of rs) if (r.rung && (best == null || rungIndex(r.rung) > rungIndex(best))) best = r.rung;
+  return best || (rs.some((r) => r.action === 'damage_reimbursement') ? 'damage' : 'L0');
+}
+
+function outcomeStats(list) {
+  const decided = list.filter((c) => c.outcome60 && c.outcome60 !== 'pending');
+  const costs = list.map((c) => c.cost);
+  return {
+    n: list.length,
+    decided: decided.length,
+    saved: share(decided.filter((c) => c.outcome60 === 'saved').length, decided.length),
+    partial: share(decided.filter((c) => c.outcome60 === 'partial_save').length, decided.length),
+    lost: share(decided.filter((c) => c.outcome60 === 'lost').length, decided.length),
+    avg_cost: list.length ? r2(costs.reduce((s, x) => s + x, 0) / list.length) : null,
+    median_cost: r2(median(costs)),
+    confidence: confidence(decided.length),
+  };
+}
+
+export function buildPlaybook({ cases, resolutions, costs, outcomes, visits = [], from, to, settings, today }) {
+  const byCase = (rows) => {
+    const m = new Map();
+    for (const r of rows) {
+      const k = Number(r.case_id);
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(r);
+    }
+    return m;
+  };
+  const R = byCase(resolutions);
+  const K = byCase(costs);
+  const O = byCase(outcomes);
+  const rows = cases.map((c) => {
+    const id = Number(c.id ?? c.case_id);
+    const k = K.get(id) || [];
+    return {
+      ...c,
+      id,
+      rung: topRung(R.get(id) || []),
+      rs: R.get(id) || [],
+      cost: k.reduce((s, x) => s + Number(x.amount), 0),
+      costBy: Object.fromEntries(['refund', 'credit', 'reclean', 'damage'].map((t) => [t, k.filter((x) => x.kind.startsWith(t)).reduce((s, x) => s + Number(x.amount), 0)])),
+      estimatedCost: k.some((x) => x.estimated),
+      outcome60: (O.get(id) || []).find((o) => o.day === 60)?.outcome || null,
+      outcome90: (O.get(id) || []).find((o) => o.day === 90)?.outcome || null,
+      reclean: (R.get(id) || []).some((r) => /^reclean/.test(r.action)),
+      refund: (R.get(id) || []).some((r) => r.action === 'refund'),
+    };
+  });
+  const ladderRows = rows.filter((c) => !c.hard_route);
+
+  // Taxonomy
+  const cats = new Map();
+  for (const c of rows) {
+    if (!cats.has(c.category)) cats.set(c.category, []);
+    cats.get(c.category).push(c);
+  }
+  const taxonomy = [...cats]
+    .map(([key, list]) => {
+      const rungCounts = {};
+      for (const c of list) rungCounts[c.rung] = (rungCounts[c.rung] || 0) + 1;
+      const typical = Object.entries(rungCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+      const byRung = Object.entries(rungCounts).map(([rung, n]) => ({ rung, ...outcomeStats(list.filter((c) => c.rung === rung)), n }));
+      const decidedRungs = byRung.filter((b) => b.decided >= 3 && b.saved != null);
+      // "What actually kept clients at what cost": the cheapest rung whose save rate is within
+      // 10 points of the best rung's, among rungs with at least 3 decided cases.
+      const best = decidedRungs.reduce((m, b) => Math.max(m, b.saved), 0);
+      const cheapestGood = decidedRungs.filter((b) => b.saved >= best - 0.1).sort((a, b) => (a.avg_cost ?? 0) - (b.avg_cost ?? 0))[0] || null;
+      return {
+        key,
+        label: categoryLabel(key),
+        n: list.length,
+        share: share(list.length, rows.length),
+        hard_routed: list.filter((c) => c.hard_route).length,
+        typical_rung: typical,
+        tones: Object.fromEntries(['mild', 'frustrated', 'angry', 'threat_leave', 'threat_review'].map((t) => [t, list.filter((c) => c.tone === t).length])),
+        ...outcomeStats(list),
+        by_rung: byRung.sort((a, b) => rungIndex(a.rung) - rungIndex(b.rung)),
+        cheapest_that_works: cheapestGood ? { rung: cheapestGood.rung, saved: cheapestGood.saved, avg_cost: cheapestGood.avg_cost, n: cheapestGood.decided } : null,
+      };
+    })
+    .sort((a, b) => b.n - a.n);
+
+  // Ladder: cost and retention per rung (hard-routed cases excluded: they're not on the ladder)
+  const ladder = RUNGS.map((r) => ({ ...r, ...outcomeStats(ladderRows.filter((c) => c.rung === r.rung)) }));
+
+  // Reclean vs refund within each category: where the default helped and where it was overkill.
+  const recleanVsRefund = taxonomy
+    .map((t) => {
+      const list = ladderRows.filter((c) => c.category === t.key);
+      const rec = list.filter((c) => c.reclean && !c.refund);
+      const ref = list.filter((c) => c.refund && !c.reclean);
+      const none = list.filter((c) => !c.reclean && !c.refund);
+      const a = outcomeStats(rec);
+      const b = outcomeStats(ref);
+      const z = outcomeStats(none);
+      let verdict = 'not enough cases to compare';
+      if (a.decided >= 3 && z.decided >= 3) {
+        if (a.saved != null && z.saved != null && a.saved <= z.saved + 0.05) verdict = 'reclean kept no more clients than an apology/credit: likely overkill here';
+        else if (b.decided >= 3 && a.saved >= b.saved - 0.05 && (a.avg_cost ?? 0) <= (b.avg_cost ?? 0)) verdict = 'reclean kept clients at least as well as a refund, for less';
+        else if (b.decided >= 3 && b.saved > a.saved + 0.05) verdict = 'refund kept more clients than reclean';
+        else verdict = 'reclean helped compared with doing nothing';
+      }
+      return { key: t.key, label: t.label, reclean: a, refund: b, neither: z, verdict };
+    })
+    .filter((x) => x.reclean.n || x.refund.n);
+
+  // Root causes: complaint rate per 100 visits by the client's situation at the visit.
+  const rootCauses = rootCauseTable(visits, rows, from, to);
+
+  // Budget baseline: monthly complaint cost / Residential revenue (12-month snapshot).
+  const months = new Map();
+  for (const v of visits) {
+    const m = v.date.slice(0, 7);
+    if (!months.has(m)) months.set(m, { month: m, revenue: 0, cost: 0, refunds: 0, credits: 0, recleans: 0, cases: 0 });
+    months.get(m).revenue += v.revenue || 0;
+  }
+  for (const c of rows) {
+    const m = new Date(c.opened_at).toISOString().slice(0, 7);
+    if (!months.has(m)) months.set(m, { month: m, revenue: 0, cost: 0, refunds: 0, credits: 0, recleans: 0, cases: 0 });
+    const x = months.get(m);
+    x.cases++;
+    x.refunds += c.costBy.refund;
+    x.credits += c.costBy.credit;
+    x.recleans += c.costBy.reclean;
+    x.cost += c.costBy.refund + c.costBy.credit + c.costBy.reclean;
+  }
+  const monthly = [...months.values()].filter((m) => m.revenue > 0 && m.month < today.slice(0, 7)).sort((a, b) => a.month.localeCompare(b.month)).map((m) => ({ ...m, revenue: Math.round(m.revenue), cost: r2(m.cost), rate: share(m.cost, m.revenue) }));
+  const rates = monthly.map((m) => m.rate).filter((x) => x != null);
+  const avg = rates.length ? rates.reduce((s, x) => s + x, 0) / rates.length : null;
+  const baseline = {
+    months: monthly,
+    average: avg == null ? null : Math.round(avg * 10000) / 10000,
+    best: monthly.length ? monthly.reduce((a, b) => (b.rate < a.rate ? b : a)) : null,
+    worst: monthly.length ? monthly.reduce((a, b) => (b.rate > a.rate ? b : a)) : null,
+    default_target: avg == null ? null : Math.round(avg * (1 - settings.budget.below_average_by) * 10000) / 10000,
+    caveat: 'Only complaints the engine has found are counted, so this is a floor until the backfill is complete. Revenue is Launch27 booking totals; QuickBooks reconciliation is not connected yet.',
+  };
+
+  // Response and handling
+  const responseHours = rows.filter((c) => c.first_response_at).map((c) => (new Date(c.first_response_at) - new Date(c.opened_at)) / 3_600_000).filter((h) => h >= 0);
+  const decidedBy = {};
+  for (const c of rows) for (const r of c.rs) if (r.decided_by) decidedBy[r.decided_by] = (decidedBy[r.decided_by] || 0) + 1;
+
+  // Data gaps
+  const gaps = [];
+  const n = rows.length;
+  const pct = (x) => `${Math.round((x / Math.max(1, n)) * 100)}%`;
+  const unlinked = rows.filter((c) => !c.l27_customer_id).length;
+  if (unlinked) gaps.push(`${unlinked} of ${n} cases (${pct(unlinked)}) couldn't be matched to a Launch27 client, so they have no journey or outcome.`);
+  const pending = rows.filter((c) => !c.outcome60 || c.outcome60 === 'pending').length;
+  if (pending) gaps.push(`${pending} cases are too recent (or unmatched) for a 60-day outcome.`);
+  const rulesOnly = rows.filter((c) => c.classified_by === 'rules').length;
+  if (rulesOnly) gaps.push(`${rulesOnly} cases were classified by keyword rules only (lower confidence).`);
+  const est = rows.filter((c) => c.estimatedCost).length;
+  if (est) gaps.push(`${est} cases include estimated costs (reclean travel and lost-slot margin are modelled, not invoiced).`);
+  gaps.push('Public reviews: Google reviews are not connected, so LOST is based on churn only. 1–2★ Launch27 ratings are counted as complaints, not as public reviews.');
+  gaps.push(`Client history goes back 12 months (nightly Launch27 sync), so tenure and lifetime spend are capped at 12 months.`);
+
+  return {
+    window: { from, to },
+    totals: { cases: n, hard_routed: rows.filter((c) => c.hard_route).length, by_source: countBy(rows, 'source'), total_cost: r2(rows.reduce((s, c) => s + c.cost, 0)), ...outcomeStats(rows) },
+    taxonomy,
+    ladder,
+    reclean_vs_refund: recleanVsRefund,
+    root_causes: rootCauses,
+    hard_routes: Object.entries(HARD_ROUTES).map(([key, label]) => ({ key, label, n: rows.filter((c) => c.hard_route === key).length })),
+    response: { first_response_median_hours: r2(median(responseHours)), with_response_time: responseHours.length, decided_by: decidedBy },
+    baseline,
+    gaps,
+    thin_threshold: THIN,
+  };
+}
+
+function rootCauseTable(visits, cases, from, to) {
+  if (!visits.length) return null;
+  const inWindow = visits.filter((v) => v.date >= from && v.date <= to);
+  if (!inWindow.length) return null;
+  // Features per visit, from the client's own history.
+  const byCust = new Map();
+  for (const v of [...visits].sort((a, b) => a.at - b.at)) {
+    if (!byCust.has(v.customer_id)) byCust.set(v.customer_id, []);
+    byCust.get(v.customer_id).push(v);
+  }
+  const byCleaner = new Map();
+  const feat = new Map();
+  for (const v of [...visits].sort((a, b) => a.at - b.at)) {
+    const list = byCust.get(v.customer_id);
+    const i = list.indexOf(v);
+    const prev = list[i - 1];
+    const prev3 = list.slice(Math.max(0, i - 3), i).map((x) => x.revenue).filter((x) => x > 0);
+    const team = v.teams.map((t) => t.id).sort().join(',');
+    const cleanerExp = Math.min(...v.teams.map((t) => byCleaner.get(t.id) || 0));
+    for (const t of v.teams) byCleaner.set(t.id, (byCleaner.get(t.id) || 0) + 1);
+    feat.set(v.id, {
+      first_three: i < 3,
+      cleaner_changed: !!prev && prev.teams.map((t) => t.id).sort().join(',') !== team,
+      new_cleaner: cleanerExp < 15,
+      price_up: prev3.length >= 2 && v.revenue > (prev3.reduce((s, x) => s + x, 0) / prev3.length) * 1.05,
+      long_gap: !!prev && v.at - prev.at > 45 * 86_400_000,
+      one_time: /one|once|single/i.test(v.freq || ''),
+    });
+  }
+  const complained = new Set(cases.map((c) => Number(c.l27_booking_id)).filter(Boolean));
+  const labels = {
+    first_three: "Client's first 3 cleans",
+    cleaner_changed: 'Different cleaner from last visit',
+    new_cleaner: 'Cleaner with fewer than 15 visits',
+    price_up: 'Price more than 5% above recent visits',
+    long_gap: 'More than 45 days since last clean',
+    one_time: 'One-time clean',
+  };
+  const all = inWindow.length;
+  const allComplaints = inWindow.filter((v) => complained.has(v.id)).length;
+  const base = all ? allComplaints / all : 0;
+  return {
+    base_rate_per_100: Math.round(base * 10000) / 100,
+    visits: all,
+    linked_complaints: allComplaints,
+    rows: Object.entries(labels).map(([k, label]) => {
+      const seg = inWindow.filter((v) => feat.get(v.id)?.[k]);
+      const c = seg.filter((v) => complained.has(v.id)).length;
+      const rate = seg.length ? c / seg.length : null;
+      return { key: k, label, visits: seg.length, complaints: c, rate_per_100: rate == null ? null : Math.round(rate * 10000) / 100, vs_base: rate != null && base ? Math.round((rate / base) * 100) / 100 : null, confidence: confidence(c) };
+    }),
+  };
+}
+
+function countBy(list, key) {
+  const m = {};
+  for (const x of list) m[x[key]] = (m[x[key]] || 0) + 1;
+  return m;
+}

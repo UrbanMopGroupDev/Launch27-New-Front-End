@@ -10,13 +10,13 @@ import { Icon } from './Icon';
 import { SupportStatus } from '../inbox/SupportStatus';
 import { CommandBar } from '../inbox/CommandBar';
 import { RingCentralPhone } from '../inbox/RingCentralPhone';
-import { useCounts } from '../inbox/util';
+import { useCounts, useInboxMe } from '../inbox/util';
 import { PortalSwitcher } from './PortalSwitcher';
 
 // Sidebar sections. Add a line here for each page rebuilt from docs/API.md.
 // `icon` is a name from components/Icon.tsx.
 // `feature`: shown only to logins the server enables it for (/auth/me features).
-const NAV: { section: string; items: { to: string; label: string; icon: string; feature?: 'utilization' }[] }[] = [
+const NAV: { section: string; items: { to: string; label: string; icon: string; feature?: 'utilization'; lead?: true }[] }[] = [
   {
     section: 'Support',
     items: [
@@ -24,6 +24,7 @@ const NAV: { section: string; items: { to: string; label: string; icon: string; 
       { to: '/supervisor', label: 'Supervisor', icon: 'headset' },
       { to: '/calls', label: 'Calls', icon: 'voice' },
       { to: '/contacts', label: 'Contacts', icon: 'user' },
+      { to: '/complaints', label: 'Complaint playbook', icon: 'alert', lead: true },
       { to: '/inbox-simulator', label: 'Channel simulator', icon: 'flask' },
       { to: '/inbox-settings', label: 'Support settings', icon: 'sliders' },
     ],
@@ -97,6 +98,8 @@ export function Layout({ email }: { email: string }) {
   const queryClient = useQueryClient();
   const canWrite = useCanWrite();
   const me = useMe();
+  const inboxMe = useInboxMe();
+  const isLead = inboxMe.data?.role === 'admin' || inboxMe.data?.role === 'supervisor';
   // Phones: the sidebar becomes a slide-out drawer behind a top bar.
   const [menuOpen, setMenuOpen] = useState(false);
   // Desktop: the sidebar can shrink to an icon rail.
@@ -165,7 +168,7 @@ export function Layout({ email }: { email: string }) {
           {NAV.filter((group) => !(group.section === 'Commercial' && brandView === 'residential')).map((group) => {
             // Rail: every item shows. Expanded: closed sections hide their items, except the current page.
             const open = rail || !closed[group.section];
-            const allowed = group.items.filter((i) => !i.feature || me.data?.features?.[i.feature]);
+            const allowed = group.items.filter((i) => (!i.feature || me.data?.features?.[i.feature]) && (!i.lead || isLead));
             const items = open ? allowed : allowed.filter((i) => i === current);
             return (
               <div key={group.section} className="nav-group">

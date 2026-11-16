@@ -23,6 +23,8 @@ import { createGmailClient, createGmailConnector } from './inbox/email/gmail.js'
 import { createEmailSync } from './inbox/email/sync.js';
 import { createL27Client, createSyncBearer } from './inbox/lookup.js';
 import { OUR_IDENTITIES } from './inbox/seed.js';
+import { createComplaints } from './complaints/service.js';
+import { createClassifier } from './complaints/classify.js';
 
 const config = loadConfig();
 const log = createLogger({ level: config.logLevel, base: { env: config.appEnv, version: config.version } });
@@ -68,9 +70,11 @@ if (await schedule.dataChanged()) onQaChange('data changed since last start');
 // nothing sent and no real mailbox read. SMS isn't connected yet.
 const connectors = {};
 let emailSync = null;
+let gmailForComplaints = null;
 if (config.gmail) {
   const client = createGmailClient({ auth: config.gmail.auth });
   connectors.email = createGmailConnector({ client, mailboxes: config.gmail.mailboxes, fromName: config.gmail.fromName });
+  gmailForComplaints = { client, accounts: config.gmail.mailboxes.accounts };
   const l27Client = createL27Client({ baseUrl: config.l27BaseUrl, fetchImpl });
   const syncBearer = createSyncBearer({ config, fetchImpl });
   emailSync = createEmailSync({
@@ -86,7 +90,19 @@ if (config.gmail) {
 } else if (!config.production) {
   connectors.email = sandboxEmail();
 }
-const app = createApp(config, { db, sessions, fetchImpl, log, jobs, connectors, qa: { store: qaStore, sender: qaSender }, segments, schedule, reports, writes, commercial, placement, commercialPlan });
+// Complaint Resolution Engine (Phase 1: history miner + playbook). Read-only on every source.
+const complaints = createComplaints({
+  db,
+  config,
+  reports,
+  fetchImpl,
+  gmail: gmailForComplaints,
+  classifier: createClassifier({ apiKey: config.anthropicApiKey, log }),
+  l27: createL27Client({ baseUrl: config.l27BaseUrl, fetchImpl }),
+  syncBearer: createSyncBearer({ config, fetchImpl }),
+  log,
+});
+const app = createApp(config, { db, sessions, fetchImpl, log, jobs, connectors, qa: { store: qaStore, sender: qaSender }, segments, schedule, reports, writes, commercial, placement, commercialPlan, complaints });
 if (config.sampleData && config.l27Mode === 'mock') {
   await loadSampleInbox(db, { fetchImpl, baseUrl: config.l27BaseUrl, log: (level, msg, fields) => log[level](msg, fields) }).catch((err) => log.error('sample inbox failed', { error: err.message }));
 }

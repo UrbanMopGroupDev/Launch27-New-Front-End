@@ -100,12 +100,20 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
     if (!running) running = sync(opts).catch(() => null).finally(() => (running = null));
     return running;
   }
-  async function maybeRun() {
+  // Rebuild once a day. Overnight with the sync login where one is set; otherwise (production has
+  // none) when someone opens the reports and they are from before today, with that person's own
+  // read-only Launch27 login, the way the planner keeps itself fresh. At most one try per 30 min.
+  async function maybeRun({ bearer = null } = {}) {
     if (running || now() - lastAttempt < 30 * 60_000) return;
-    if (config.l27Mode !== 'mock' && !(config.l27SyncEmail && config.l27SyncPassword)) return;
+    const syncLogin = config.l27Mode === 'mock' || !!(config.l27SyncEmail && config.l27SyncPassword);
+    if (!bearer && !syncLogin) return;
     const s = await load();
-    const due = !s || (s.today < today() && Number(HOUR.format(new Date(now()))) >= 4);
-    if (due) start();
+    const stale = !s || s.today < today();
+    const due = bearer ? stale : stale && (!s || Number(HOUR.format(new Date(now()))) >= 4);
+    if (due) {
+      log.info('reports: building', { trigger: bearer ? 'viewer' : 'overnight', built_for: s?.today || null });
+      start({ bearer: bearer || undefined });
+    }
   }
 
   async function need() {
@@ -571,7 +579,7 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
     // auto_build: whether the overnight build can run here (it needs a Launch27 sync login in
     // production). Without it, only an admin's "Build now" builds the reports.
     const auto_build = config.l27Mode === 'mock' || !!(config.l27SyncEmail && config.l27SyncPassword);
-    return { taken_at: s?.taken_at || null, running: !!running, last_error: last?.status === 'failed' ? last.error : null, covers_from: s?.from || null, auto_build };
+    return { taken_at: s?.taken_at || null, built_for: s?.today || null, running: !!running, last_error: last?.status === 'failed' ? last.error : null, covers_from: s?.from || null, auto_build };
   }
 
   // Utilization (read-only): of cleaners' open hours from..to, how much is spoken for and how
