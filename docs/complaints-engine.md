@@ -1,11 +1,47 @@
 # Complaint Resolution Engine — Phase 1 plan (draft for Derek's sign-off)
 
-Status: **proposal**. Nothing below has been built or migrated yet. Phase 2 (the
-recommendation card, credit ledger, scoreboard) starts only after sign-off on Phase 1.
+Status: **Phase 1 built** (history miner + playbook), Nov 16 2026. Postgres and redaction
+approved by Derek. Phase 2 (the recommendation card, credit ledger, scoreboard) starts only
+after Derek signs off on the pilot playbook and the taxonomy.
+
+## Setup (production, Railway variables)
+
+| Variable | What | Needed for |
+| --- | --- | --- |
+| `KUSTOMER_API_KEY` | The dedicated read-only "Complaint Engine" key | Kustomer complaint objects + conversations |
+| `KUSTOMER_COMPLAINT_KLASS` | Optional. The complaint object's API name | Only if auto-detection (name contains "complaint") misses |
+| `SLACK_BOT_TOKEN` | Slack app bot token: `channels:history`, `groups:history`, `users:read`; invite the bot to #finance-refunds, #finance-operations-collaboration, #finance-charges | Refund decisions and amounts |
+| `ANTHROPIC_API_KEY` | Optional | Claude classification of **redacted** complaint text; rules-only without it |
+| (existing) `GMAIL_*`, `L27_SYNC_*` | Already set | info@ history; Launch27 12-month visit snapshot |
+
+Then: Support → **Complaint playbook** → *Run the pilot* (admins). Before the first run,
+an admin can call `GET /api/complaints/kustomer/discover` to see the complaint object's
+field names (names and types only, no values) and confirm the mapping.
+
+## How a run works (`server/src/complaints/`)
+
+| Step | File | Notes |
+| --- | --- | --- |
+| Launch27 visits (Residential locations, partners excluded) | `service.js` → reports snapshot | 12 months, nightly |
+| Kustomer complaint objects, customer, conversations ±14/30 days | `sources/kustomer.js` | GET only; 429/5xx retried; fields mapped by name pattern, raw kept |
+| Unhappy Launch27 ratings with a comment | `service.js` | Become cases; deduped against Kustomer (same client, ≤10 days) |
+| info@ threads that read as complaints | `service.js` + Gmail `search` | Read-only; Claude/rules keep only complaints |
+| Refund posts in the finance channels | `sources/slack.js`, `slackRefunds.js` | Linked to the client's case 45 days before → 7 after the post |
+| Classify | `taxonomy.js`, `redact.js`, `classify.js` | Rules always; Claude on redacted text; hard routes from either side stick |
+| Refunds on the booking | `service.js` | Launch27 booking `charges.refunded` wins over the Slack amount |
+| Recleans | `service.js` | A $0 visit within 14 days, or Kustomer "Reclean Scheduled" / our reply; cost = actual cleaner pay + travel + lost-slot margin |
+| Journey, outcomes 30/60/90 | `journey.js` | Outcome rules exactly as briefed |
+| Playbook | `playbook.js` | Every figure carries n; < 10 = thin |
+
+Settings (ladder presets *today* / *target*, roles, budget target, cost assumptions) are in
+`settings.js` and editable on the page's **Rules & budget** tab (admins). Nobody but the
+`owner` role can approve above 50%, whatever the settings say.
 
 Scope: **Residential only** (`brand = 'residential'`). Read-only on every source system.
 
 ---
+
+## Design (as proposed)
 
 ## 1. Where it lives
 
