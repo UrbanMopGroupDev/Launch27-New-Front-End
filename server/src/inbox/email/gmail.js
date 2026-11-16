@@ -122,6 +122,11 @@ export function createGmailClient({ auth, fetchImpl = fetch, now = () => Date.no
       const page = await call(account, 'GET', '/messages', { query: { q, maxResults: max, labelIds: 'INBOX' } });
       return (page.messages || []).map((m) => m.id);
     },
+    /** Read-only search across all mail (archived included), for the complaint history miner. */
+    async search(account, q, { max = 100, pageToken } = {}) {
+      const page = await call(account, 'GET', '/messages', { query: { q, maxResults: max, pageToken } });
+      return { ids: (page.messages || []).map((m) => m.id), next: page.nextPageToken || null };
+    },
     message: (account, id) => call(account, 'GET', `/messages/${encodeURIComponent(id)}`, { query: { format: 'full' } }),
     headers: (account, id, names) => call(account, 'GET', `/messages/${encodeURIComponent(id)}`, { query: { format: 'metadata', metadataHeaders: names } }),
     send: (account, { raw, threadId }) => call(account, 'POST', '/messages/send', { body: { raw: toBase64Url(raw), ...(threadId ? { threadId } : {}) } }),
