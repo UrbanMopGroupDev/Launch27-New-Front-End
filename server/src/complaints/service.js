@@ -63,7 +63,9 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
   }
 
   // ---------- the run ----------
-  async function run({ from, to, userId = null }) {
+  // bearer: the Launch27 login of the admin who started the run. Used when there's no
+  // L27_SYNC_EMAIL service login (production today), the same way "Refresh now" works.
+  async function run({ from, to, userId = null, bearer = null }) {
     const runRow = await one(db, 'INSERT INTO complaint_runs (started_by, window_from, window_to) VALUES ($1,$2,$3) RETURNING id', [userId, from, to]);
     const runLog = [];
     const note = (level, msg, extra = {}) => {
@@ -72,7 +74,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     };
     try {
       const settings = await getSettings();
-      const ctx = await loadContext(note);
+      const ctx = await loadContext(note, bearer);
       const staffNames = (await many(db, 'SELECT name FROM users WHERE name IS NOT NULL')).map((r) => r.name);
       const cases = [];
 
@@ -110,8 +112,17 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     }
   }
 
-  async function loadContext(note) {
-    const snap = await reports.visitsSnapshot();
+  async function loadContext(note, userBearer = null) {
+    let snap;
+    try {
+      snap = await reports.visitsSnapshot();
+    } catch (err) {
+      // No Launch27 history yet (no nightly sync login): build it now with the runner's login.
+      if (!userBearer || err.status !== 409) throw err;
+      note('info', 'Launch27 history not built yet: building it now with your Launch27 login (a few minutes)');
+      await reports.sync({ bearer: userBearer });
+      snap = await reports.visitsSnapshot();
+    }
     const overrides = new Map((await many(db, 'SELECT location_id, brand FROM brand_locations')).map((r) => [Number(r.location_id), r.brand]));
     const brandOf = (v) => (overrides.has(Number(v.location_id)) ? overrides.get(Number(v.location_id)) : suggestBrand(v.location_name));
     const visits = snap.visits.filter((v) => brandOf(v) === 'residential' && !v.partner_kind);
@@ -123,7 +134,8 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       if (!byName.has(k)) byName.set(k, new Set());
       byName.get(k).add(id);
     }
-    const bearer = syncBearer ? await syncBearer().catch(() => null) : null;
+    const bearer = (syncBearer ? await syncBearer().catch(() => null) : null) || userBearer;
+    if (!bearer) note('warn', 'No Launch27 login for lookups: clients are matched by name only and Launch27 refund amounts are skipped');
     return { snap, visits, byCustomer, byName, bearer, cleanerStatsAt: cleanerStatsIndex(visits), econ: unitEconomics(visits, now() - 90 * DAY) };
   }
 
@@ -467,9 +479,9 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
   }
 
   // ---------- reads for the UI ----------
-  function start({ from, to, userId }) {
+  function start({ from, to, userId, bearer = null }) {
     if (running) throw Object.assign(new Error('A run is already going'), { status: 409 });
-    running = run({ from, to, userId }).catch((err) => ({ error: err.message })).finally(() => (running = null));
+    running = run({ from, to, userId, bearer }).catch((err) => ({ error: err.message })).finally(() => (running = null));
     return { started: true };
   }
 

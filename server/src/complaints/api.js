@@ -47,7 +47,7 @@ export function registerComplaintRoutes(r, { complaints, needRole, wrap, now = (
   r.post('/complaints/run', admin, h(async (req, res) => {
     const w = { from: DAY.test(req.body?.from || '') ? req.body.from : null, to: DAY.test(req.body?.to || '') ? req.body.to : null };
     const def = await windowOf({ query: {} });
-    res.status(202).json(complaints.start({ from: w.from || def.from, to: w.to || def.to, userId: req.user.id }));
+    res.status(202).json(complaints.start({ from: w.from || def.from, to: w.to || def.to, userId: req.user.id, bearer: req.bearer }));
   }));
   r.get('/complaints/kustomer/discover', admin, h(async (req, res) => res.json(await complaints.kustomerDiscover())));
   r.get('/complaints/settings', lead, h(async (req, res) => res.json({ settings: await complaints.getSettings(), rungs: RUNGS, presets: APPROVAL_PRESETS, categories: CATEGORY_KEYS, hard_routes: HARD_ROUTES })));

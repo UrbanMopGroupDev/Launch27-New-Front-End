@@ -267,3 +267,25 @@ describe('complaints: end to end on the synthetic Launch27', () => {
     await db.close();
   });
 });
+
+describe('complaints: production without a Launch27 sync login', () => {
+  test("a run builds the Launch27 history with the admin's own login", async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    await schedule.sync();
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await assert.rejects(() => reports.visitsSnapshot(), /not been built/);
+    const login = await (await fetchImpl(`${config.l27BaseUrl}/latest/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'admin@example.com', password: 'demo' }) })).json();
+    const complaints = createComplaints({ db, config, reports, fetchImpl, log: quiet });
+    const to = new Date().toISOString().slice(0, 10);
+    const from = new Date(Date.now() - 182 * 86_400_000).toISOString().slice(0, 10);
+    const r = await complaints.run({ from, to, bearer: login.bearer });
+    assert.ok(r.cases >= 0);
+    const st = await complaints.status();
+    assert.equal(st.last_run.status, 'done');
+    assert.ok(st.last_run.log.some((l) => /building it now/.test(l.msg)));
+    await db.close();
+  });
+});
