@@ -97,9 +97,11 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
     if (!running) running = sync(opts).catch(() => null).finally(() => (running = null));
     return running;
   }
+  // Production without the read-only sync login: no automatic builds, only admin "Build now".
+  const noSyncLogin = () => config.l27Mode !== 'mock' && !(config.l27SyncEmail && config.l27SyncPassword);
   async function maybeRun() {
     if (running || now() - lastAttempt < 30 * 60_000) return;
-    if (config.l27Mode !== 'mock' && !(config.l27SyncEmail && config.l27SyncPassword)) return;
+    if (noSyncLogin()) return;
     const s = await load();
     const due = !s || (s.today < today() && Number(HOUR.format(new Date(now()))) >= 4);
     if (due) start();
@@ -107,6 +109,7 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
 
   async function need() {
     const s = await load();
+    if (!s && noSyncLogin()) throw Object.assign(new Error('Reports can\'t build automatically: the Launch27 sync login (L27_SYNC_EMAIL / L27_SYNC_PASSWORD) isn\'t set on this server. An admin can click "Build now" to build them with their own login.'), { status: 409 });
     if (!s) throw Object.assign(new Error('Reports have not been built yet. They build automatically overnight, or click "Refresh now".'), { status: 409 });
     return s;
   }
@@ -321,7 +324,7 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
   async function status() {
     const s = await load();
     const last = (await db.query('SELECT status, error, taken_at FROM report_snapshots ORDER BY id DESC LIMIT 1')).rows[0];
-    return { taken_at: s?.taken_at || null, running: !!running, last_error: last?.status === 'failed' ? last.error : null, covers_from: s?.from || null };
+    return { taken_at: s?.taken_at || null, running: !!running, last_error: last?.status === 'failed' ? last.error : null, covers_from: s?.from || null, needs_sync_login: noSyncLogin() };
   }
 
   // Utilization (read-only): of cleaners' open hours from..to, how much is spoken for and how

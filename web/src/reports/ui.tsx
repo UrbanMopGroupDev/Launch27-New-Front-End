@@ -25,7 +25,13 @@ export function ReportStatusLine() {
   const when = s.taken_at ? new Date(s.taken_at).toLocaleString('en-CA', { timeZone: 'America/Toronto', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : null;
   return (
     <span className="muted small sch-status">
-      {s.running ? 'Building from Launch27…' : when ? `Built ${when} from the last 12 months of Launch27 · rebuilds overnight` : 'Not built yet'}
+      {s.running
+        ? 'Building from Launch27…'
+        : when
+          ? `Built ${when} from the last 12 months of Launch27 · ${s.needs_sync_login ? 'no overnight rebuild until the Launch27 sync login is set' : 'rebuilds overnight'}`
+          : s.needs_sync_login
+            ? 'Not built: the Launch27 sync login (L27_SYNC_EMAIL / L27_SYNC_PASSWORD) isn\'t set, so it can\'t build automatically. An admin can build it now.'
+            : 'Not built yet'}
       {s.last_error && <span className="warn"> · last build failed: {s.last_error}</span>}
       {me.data?.role === 'admin' && !s.running && <button className="link" disabled={refresh.isPending} onClick={() => refresh.mutate()}>Refresh now</button>}
     </span>
