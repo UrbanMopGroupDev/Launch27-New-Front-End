@@ -87,7 +87,21 @@ EXPECT_ENV=production node scripts/smoke.mjs https://app.example.com
 
 They run automatically after each successful Railway deployment (GitHub
 `deployment_status` event, `.github/workflows/smoke.yml`) and can be started by hand from
-the Actions tab.
+the Actions tab (with a URL and, optionally, the environment the app must report).
+
+Railway's deployment status links to its dashboard, not the app, so the workflow maps the
+GitHub deployment environment (e.g. `UrbanMop Platform - Dev / development`, read from the
+part after the last `/`) to an app URL held in repository variables (Settings → Secrets and
+variables → Actions → Variables):
+
+| Variable | Example |
+|---|---|
+| `SMOKE_URL_DEVELOPMENT` | the dev service's public URL |
+| `SMOKE_URL_STAGING` | the QA service's public URL |
+| `SMOKE_URL_PRODUCTION` | `https://web-production-27677.up.railway.app` |
+
+If the environment's variable is unset, the run is skipped with a notice rather than failing.
+`EXPECT_ENV` is passed as `development`, `staging` or `production`, matching `/healthz`.
 
 ## Rollback
 
