@@ -568,7 +568,10 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
   async function status() {
     const s = await load();
     const last = (await db.query('SELECT status, error, taken_at FROM report_snapshots ORDER BY id DESC LIMIT 1')).rows[0];
-    return { taken_at: s?.taken_at || null, running: !!running, last_error: last?.status === 'failed' ? last.error : null, covers_from: s?.from || null };
+    // auto_build: whether the overnight build can run here (it needs a Launch27 sync login in
+    // production). Without it, only an admin's "Build now" builds the reports.
+    const auto_build = config.l27Mode === 'mock' || !!(config.l27SyncEmail && config.l27SyncPassword);
+    return { taken_at: s?.taken_at || null, running: !!running, last_error: last?.status === 'failed' ? last.error : null, covers_from: s?.from || null, auto_build };
   }
 
   // Utilization (read-only): of cleaners' open hours from..to, how much is spoken for and how
