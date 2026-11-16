@@ -54,6 +54,61 @@ export interface CleanerRow {
   on_time: number | null;
   late_avg: number | null;
   ran_long: number | null;
+  enroute: number | null;
+  km_per_visit: number | null;
+  rated: number;
+  happy: number | null;
+  unhappy: number;
+  keeps: number | null;
+  clients_started: number;
+  revenue: number;
+  earned?: number | null;
+  onsite_hours: number;
+  booked_hours: number;
+  status: string;
+  status_label: string;
+  assignable: boolean;
+  area: string | null;
+  color: string;
+  is_new: boolean;
+  hours_type: string | null;
+  hours_per_week: number | null;
+  hours_filled: number | null;
+  flags: Flag[];
+}
+
+export interface CleanersReport {
+  taken_at: string;
+  period: Period;
+  admin: boolean;
+  team: { cleaners: number; median_visits: number | null; max_visits: number; on_time: number | null; check_ins: number; happy: number | null; rated_share: number | null; revenue: number; earned?: number; flagged: number };
+  rows: CleanerRow[];
+}
+
+export interface CleanerReport {
+  taken_at: string;
+  period: Period;
+  admin: boolean;
+  cleaner: { id: number; name: string; status: string; status_label: string; area: string | null; color: string; tags: string[]; hours_type: string | null; phone: string | null; weekly_hours: number | null; first_seen: string | null };
+  stats: Omit<CleanerRow, 'status' | 'status_label' | 'assignable' | 'area' | 'color' | 'is_new' | 'hours_type' | 'flags'> & { booked_next4: number | null; capacity_next4: number | null; per_hour?: number | null };
+  flags: Flag[];
+  series: { week: string; visits: number; on_time: number | null; happy: number | null }[];
+  clients: { customer_id: number; customer: string; rhythm: string; since: string | null; cleans: number; last_rating: { r: number; comment: string | null; date: string } | null }[];
+  lost: { customer: string; stopped: boolean; to: string | null }[];
+  ratings: { date: string; customer: string; r: number; comment: string | null }[];
+  last40: { date: string; late: number; long: boolean; enroute: boolean; customer: string }[];
+}
+
+export interface ChurnClient { customer_id: number; customer: string; last_clean: string; days_since: number; freq: string | null; cleans: number; status: 'churned' | 'at_risk'; churned_on: string | null }
+
+// Cleaner reports 2.0: Leslie's report plus engagement, churn, margin, re-cleans and reliability.
+export interface CleanerRow2 {
+  id: number;
+  name: string;
+  visits: number;
+  on_time: number | null;
+  late_avg: number | null;
+  ran_long: number | null;
   finished_early: number | null;
   early_n: number;
   residential: number;
@@ -83,30 +138,42 @@ export interface CleanerRow {
   ratings_count: number | null;
   reliability: RowReliability;
   google_reviews: number;
+  // 2.0
+  engagement: number | null;
+  churned: number | null;
+  at_risk: number | null;
+  moved: number;
+  recleans: number;
+  complaints_n: number;
+  reliability2: number | null;
+  margin_dollars?: number;
   flags: Flag[];
 }
 
-export interface CleanersReport {
+export interface CleanersReport2 {
   taken_at: string;
   period: Period;
   admin: boolean;
   change_log_start: string;
-  team: { cleaners: number; median_visits: number | null; max_visits: number; on_time: number | null; check_ins: number; happy: number | null; rated_share: number | null; revenue: number; earned?: number; flagged: number; runs_long_median: number | null };
-  rows: CleanerRow[];
+  team: { cleaners: number; median_visits: number | null; max_visits: number; on_time: number | null; check_ins: number; happy: number | null; rated_share: number | null; revenue: number; earned?: number; flagged: number; runs_long_median: number | null; engagement: number | null; feedback_hours: number | null; margin?: { dollars: number; share: number } | null; churned: number | null; at_risk: number | null };
+  churn_known: boolean;
+  churn_days: number;
+  rows: CleanerRow2[];
 }
 
-export interface CleanerReport {
+export interface CleanerReport2 {
   taken_at: string;
   period: Period;
   admin: boolean;
   change_log_start: string;
   cleaner: { id: number; name: string; status: string; status_label: string; area: string | null; color: string; tags: string[]; hours_type: string | null; phone: string | null; weekly_hours: number | null; first_seen: string | null; start_date: string | null; start_known: boolean; stars: number | null; ratings_count: number | null; restrictive: { tag: string; kind: string }[] };
-  stats: Omit<CleanerRow, 'status' | 'status_label' | 'assignable' | 'area' | 'color' | 'is_new' | 'hours_type' | 'flags' | 'stars' | 'ratings_count' | 'reliability' | 'google_reviews'> & { booked_next4: number | null; capacity_next4: number | null; per_hour?: number | null };
+  stats: Omit<CleanerRow2, 'status' | 'status_label' | 'assignable' | 'area' | 'color' | 'is_new' | 'hours_type' | 'flags' | 'stars' | 'ratings_count' | 'reliability' | 'google_reviews'> & { booked_next4: number | null; capacity_next4: number | null; per_hour?: number | null };
   team: { runs_long_median: number | null };
   reliability: Reliability;
   finished_early: { date: string; customer: string; short_min: number; visit_id: number }[];
   complaints: { id: number; subject: string | null; date: string; outcome: string | null; status: string | null; booking_id: number | null }[];
   google_reviews: GoogleReview[];
+  churn: { known: boolean; days: number; clients: ChurnClient[] };
   raise?: RaiseReview;
   flags: Flag[];
   series: { week: string; visits: number; on_time: number | null; happy: number | null }[];
@@ -163,6 +230,8 @@ export const reportsApi = {
   scheduling: (period: Period, locations?: number[] | null) => call<SchedulingReport>('GET', `/scheduling?period=${period}${locations ? `&locations=${locations.join(',')}` : ''}`),
   cleaners: (period: Period, locations?: number[] | null) => call<CleanersReport>('GET', `/cleaners?period=${period}${locations ? `&locations=${locations.join(',')}` : ''}`),
   cleaner: (id: number, period: Period) => call<CleanerReport>('GET', `/cleaners/${id}?period=${period}`),
+  cleaners2: (period: Period, locations?: number[] | null) => call<CleanersReport2>('GET', `/cleaners2?period=${period}${locations ? `&locations=${locations.join(',')}` : ''}`),
+  cleaner2: (id: number, period: Period) => call<CleanerReport2>('GET', `/cleaners2/${id}?period=${period}`),
   refresh: () => call<{ running: boolean }>('POST', '/refresh'),
   recordDrop: (d: { cleaner_id: number; visit_key: string; booking_id?: number | null; customer?: string | null; visit_at: string; reason: string }) => call<{ id: number }>('POST', '/drops', d),
   codeChange: (changeId: number, reason: string) => call<{ coded: number }>('POST', `/changes/${changeId}/reason`, { reason }),

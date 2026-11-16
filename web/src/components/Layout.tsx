@@ -64,6 +64,7 @@ const NAV: { section: string; items: { to: string; label: string; icon: string; 
       { to: '/reports/scheduling', label: 'Scheduling insights', icon: 'route' },
       { to: '/reports/utilization', label: 'Utilization', icon: 'trend', feature: 'utilization' },
       { to: '/reports/cleaners', label: 'Cleaner reports', icon: 'users' },
+      { to: '/reports/cleaners-2', label: 'Cleaner reports 2.0', icon: 'users' },
       { to: '/feedback', label: 'Customer feedback', icon: 'star' },
     ],
   },
