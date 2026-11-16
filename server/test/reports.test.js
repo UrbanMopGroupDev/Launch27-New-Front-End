@@ -104,3 +104,40 @@ describe('reports: service on the sample Launch27', () => {
     assert.ok(comSched.kpis.same_cleaner_visits < sc.kpis.same_cleaner_visits);
   });
 });
+
+describe('reports: keep themselves fresh without a sync login', () => {
+  test('opening the reports rebuilds a build from before today with the viewer\'s login', async () => {
+    const db = await openDb();
+    const config = { ...loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' }), l27Mode: 'live', l27SyncEmail: null, l27SyncPassword: null };
+    const mock = createMockLaunch27({ password: 'demo' });
+    const bearers = [];
+    const fetchImpl = (url, init) => {
+      const auth = init?.headers?.authorization;
+      if (auth) bearers.push(auth);
+      return mock(url, { ...init, headers: { ...init?.headers, authorization: 'Bearer mock-bearer' } });
+    };
+    let clock = Date.parse('2026-11-12T17:00:00Z');
+    const reports = createReports({ db, config, fetchImpl: mock, log: quiet, now: () => clock });
+    // No sync login and nobody looking: nothing builds.
+    await reports.maybeRun();
+    assert.equal((await reports.status()).running, false);
+    assert.equal((await reports.status()).auto_build, false);
+    // Someone opens the reports: built with their login.
+    const r2 = createReports({ db, config, fetchImpl, log: quiet, now: () => clock });
+    await r2.maybeRun({ bearer: 'viewer-token' });
+    while ((await r2.status()).running) await new Promise((r) => setTimeout(r, 20));
+    assert.ok(bearers.length && bearers.every((b) => b === 'Bearer viewer-token'));
+    const built = await r2.status();
+    assert.equal(built.built_for, '2026-11-12');
+    // Same day: no rebuild.
+    clock += 3600_000;
+    await r2.maybeRun({ bearer: 'viewer-token' });
+    assert.equal((await r2.status()).running, false);
+    // Next day: rebuilds on the next look.
+    clock = Date.parse('2026-11-13T15:00:00Z');
+    await r2.maybeRun({ bearer: 'viewer-token' });
+    while ((await r2.status()).running) await new Promise((r) => setTimeout(r, 20));
+    assert.equal((await r2.status()).built_for, '2026-11-13');
+    await db.close();
+  });
+});

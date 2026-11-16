@@ -1144,7 +1144,12 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     });
     const period = (req) => (['4w', '13w', '12m'].includes(req.query.period) ? req.query.period : '13w');
     const admin = (req) => req.user.role === 'admin';
-    r.get('/reports/status', rep(async (req, res) => res.json(await reports.status())));
+    // Opening the reports keeps them fresh: a build from before today is rebuilt in the background
+    // with this person's own (read-only) Launch27 login. The page polls this while it runs.
+    r.get('/reports/status', rep(async (req, res) => {
+      await reports.maybeRun({ bearer: req.bearer }).catch((err) => log.warn?.('reports build on view failed', { error: err.message }));
+      res.json(await reports.status());
+    }));
     const repLocs = (req) => (req.query.locations ? String(req.query.locations).split(',').map(Number).filter((n) => Number.isInteger(n) && n >= 0) : null);
     r.get('/reports/scheduling', rep(async (req, res) => res.json(await reports.scheduling(period(req), { locations: repLocs(req) }))));
     r.get('/reports/cleaners', rep(async (req, res) => res.json(await reports.cleaners(period(req), { admin: admin(req), locations: repLocs(req) }))));
