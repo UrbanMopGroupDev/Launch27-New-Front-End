@@ -1,7 +1,7 @@
 // Raise readiness on cleaner reports: the acceptance checks from the spec.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { slimReportVisit, timing, indexVisits, cleanerStats, cleanerRow, flagsFor, teamLong } from '../src/reports/compute.js';
+import { V2, slimReportVisit, timing, indexVisits, cleanerStats, cleanerRow, flagsFor, teamLong } from '../src/reports/compute.js';
 import { classifyDrop, ladderOf, raiseReview, rateHistory, reliability, reliabilityWeeks, restrictiveTags, slackSummary, torontoInstant } from '../src/reports/raise.js';
 import { RAISE_THRESHOLDS } from '../src/reports/raise-config.js';
 import { createReports } from '../src/reports/service.js';
@@ -107,14 +107,14 @@ describe('raise: timing rules', () => {
   test('homemaking on time = start + 10 min; residential = first 15 min of the window', () => {
     const home = V('2026-10-05', 1, [[7, 120]], { service: 'Carefor Homemaking', checkinAfter: 15, duration: 120 });
     assert.equal(home.partner_kind, 'homemaking');
-    assert.equal(timing(home, home.teams[0]).onTime, false);
+    assert.equal(timing(home, home.teams[0], V2).onTime, false);
     const homeOk = V('2026-10-05', 1, [[7, 120]], { service: 'Carefor Homemaking', checkinAfter: 9, duration: 120 });
-    assert.equal(timing(homeOk, homeOk.teams[0]).onTime, true);
+    assert.equal(timing(homeOk, homeOk.teams[0], V2).onTime, true);
     const res = V('2026-10-05', 2, [[7, 180]], { checkinAfter: 15 });
-    assert.equal(timing(res, res.teams[0]).onTime, true);
+    assert.equal(timing(res, res.teams[0], V2).onTime, true);
     const resLate = V('2026-10-05', 2, [[7, 180]], { checkinAfter: 40 });
-    assert.equal(timing(resLate, resLate.teams[0]).onTime, false);
-    assert.equal(timing(resLate, resLate.teams[0]).late, 25, 'minutes past the 15-minute mark');
+    assert.equal(timing(resLate, resLate.teams[0], V2).onTime, false);
+    assert.equal(timing(resLate, resLate.teams[0], V2).late, 25, 'minutes past the 15-minute mark');
   });
 
   test('finished early excludes homemaking and split team jobs', () => {
@@ -123,13 +123,13 @@ describe('raise: timing rules', () => {
     const split = V('2026-10-07', 3, [[7, 30], [8, 30]]);
     const fine = V('2026-10-08', 4, [[7, 170]]);
     const company = V('2026-10-09', 5, [[7, 100]], { company: 'Smith Property Group' });
-    assert.equal(timing(early, early.teams[0]).early, true);
-    assert.equal(timing(home, home.teams[0]).early, null);
-    assert.equal(timing(split, split.teams[0]).early, null);
-    assert.equal(timing(fine, fine.teams[0]).early, false);
-    assert.equal(timing(company, company.teams[0]).early, true, 'a company-named client is still residential');
+    assert.equal(timing(early, early.teams[0], V2).early, true);
+    assert.equal(timing(home, home.teams[0], V2).early, null);
+    assert.equal(timing(split, split.teams[0], V2).early, null);
+    assert.equal(timing(fine, fine.teams[0], V2).early, false);
+    assert.equal(timing(company, company.teams[0], V2).early, true, 'a company-named client is still residential');
     const visits = [early, home, split, fine, company];
-    const st = cleanerStats(visits, indexVisits(visits), '2026-10-01', '2026-10-31', '2026-11-12').get(7);
+    const st = cleanerStats(visits, indexVisits(visits), '2026-10-01', '2026-10-31', '2026-11-12', V2).get(7);
     assert.equal(st.residential, 3);
     assert.equal(st.early, 2);
     assert.equal(cleanerRow(st).finished_early, 2 / 3);
@@ -137,7 +137,7 @@ describe('raise: timing rules', () => {
 
   test('missing check-outs are counted', () => {
     const v = V('2026-10-05', 1, [[7, null]]);
-    const st = cleanerStats([v], indexVisits([v]), '2026-10-01', '2026-10-31', '2026-11-12').get(7);
+    const st = cleanerStats([v], indexVisits([v]), '2026-10-01', '2026-10-31', '2026-11-12', V2).get(7);
     assert.deepEqual(st.missing.map((m) => m.kind), ['missing_checkout']);
   });
 
@@ -145,8 +145,8 @@ describe('raise: timing rules', () => {
     const mk = (n) => ({ last40: Array.from({ length: 40 }, (_, i) => ({ late: 0, long: i < n * 40, early: false })), unhappyRecent: 0 });
     const stats = new Map([[1, mk(0.5)], [2, mk(0.55)], [3, mk(0.6)], [4, mk(0.9)]]);
     const team = teamLong(stats);
-    assert.equal(flagsFor(stats.get(1), null, team).some((f) => f.kind === 'long'), false, 'everyone runs long: not a flag');
-    assert.equal(flagsFor(stats.get(4), null, team).some((f) => f.kind === 'long'), true);
+    assert.equal(flagsFor(stats.get(1), null, team, V2).some((f) => f.kind === 'long'), false, 'everyone runs long: not a flag');
+    assert.equal(flagsFor(stats.get(4), null, team, V2).some((f) => f.kind === 'long'), true);
   });
 });
 
@@ -261,14 +261,14 @@ describe('raise: service on the sample Launch27', () => {
     const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
     const fetchImpl = createMockLaunch27({ password: 'demo' });
     const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
-    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet, now: () => Date.parse('2026-11-12T17:00:00Z') });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
     await schedule.sync();
     await reports.sync();
-    const agent = await reports.cleaners('4w', { admin: false });
+    const agent = await reports.cleaners2('4w', { admin: false });
     assert.ok(agent.rows.every((r) => r.raise === undefined && r.margin === undefined));
     assert.ok(agent.rows.every((r) => typeof r.reliability.issues === 'number' && typeof r.google_reviews === 'number'));
     // The scorecard stays a scorecard: no raise verdicts on it, even for admins.
-    const admin = await reports.cleaners('4w', { admin: true });
+    const admin = await reports.cleaners2('4w', { admin: true });
     assert.ok(admin.rows.every((r) => r.raise === undefined));
     const someone = admin.rows.find((r) => r.visits >= 20);
 
@@ -279,19 +279,19 @@ describe('raise: service on the sample Launch27', () => {
     await db.query("UPDATE cleaner_drops SET dropped_at = '2026-11-11T14:30:00Z' WHERE visit_key = '999001'");
     await reports.addReview(someone.id, { review_date: '2026-11-01', reviewer: 'A. Client', link: 'https://g.co/x' }, null);
     await assert.rejects(() => reports.addReview(someone.id, { review_date: '', reviewer: 'x' }, null), /date/);
-    const one = await reports.cleaner(someone.id, '13w', { admin: true });
+    const one = await reports.cleaner2(someone.id, '13w', { admin: true });
     assert.equal(one.reliability.no_shows, 1);
     assert.equal(one.raise.verdict === 'not_yet' || ['ceiling', 'ladder', 'thin'].includes(one.raise.verdict), true);
     assert.equal(one.raise.underlying, 'not_yet');
     assert.equal(one.google_reviews.length, 1);
     assert.ok(one.raise.rate && one.raise.rate.current > 0);
     assert.equal(typeof one.raise.summary, 'string');
-    const notAdmin = await reports.cleaner(someone.id, '13w', { admin: false });
+    const notAdmin = await reports.cleaner2(someone.id, '13w', { admin: false });
     assert.equal(notAdmin.raise, undefined);
     assert.equal(notAdmin.stats.margin, undefined);
 
     // Synthetic data: a raise in August, a cleaner at the ceiling, an employee on the ladder.
-    const all = await Promise.all(admin.rows.map((r) => reports.cleaner(r.id, '13w', { admin: true })));
+    const all = await Promise.all(admin.rows.map((r) => reports.cleaner2(r.id, '13w', { admin: true })));
     assert.ok(all.some((c) => c.raise.rate?.previous != null && c.raise.rate.changed_on >= '2026-08-01'));
     assert.ok(all.some((c) => c.raise.verdict === 'ceiling'));
     await assert.rejects(() => reports.recordDrop({ cleaner_id: someone.id, visit_key: 'x', visit_at: '2026-11-11T14:00:00Z', reason: 'because' }, null), /reason/);
@@ -321,7 +321,7 @@ describe('raise: monthly raise check', () => {
     assert.equal((await notes('derek@example.com')).length, ready.length);
     assert.equal((await notes('leslie@example.com')).length, ready.length);
     assert.equal((await notes('grace@example.com')).length, 0, 'never to non-admins');
-    assert.match((await notes('derek@example.com'))[0].link, /^\/reports\/cleaners\/\d+#raise$/);
+    assert.match((await notes('derek@example.com'))[0].link, /^\/reports\/cleaners-2\/\d+#raise$/);
     assert.match((await notes('derek@example.com'))[0].text, /^Raise check: .+ looks ready for /);
 
     // Once a month: later ticks the same month send nothing more.
@@ -337,5 +337,59 @@ describe('raise: monthly raise check', () => {
     assert.equal(dec.month, '2026-12', 'runs again in a new month');
     assert.equal((await notes('leslie@example.com')).length, ready.length, 'Leslie not included this time');
     assert.equal((await notes('derek@example.com')).length, ready.length + dec.cleaners.length);
+  });
+});
+
+describe('Cleaner reports 2.0 next to Leslie\'s', () => {
+  test("Leslie's rules are unchanged: on time = by the window end + 5 min; runs long is absolute", () => {
+    const v = V('2026-10-05', 1, [[7, 180]], { checkinAfter: 40 });
+    assert.equal(timing(v, v.teams[0]).onTime, true, "Leslie's: 40 min in is inside the 60-min window");
+    assert.equal(timing(v, v.teams[0], V2).onTime, false, '2.0: past the first 15 minutes');
+    const mk = (n) => ({ last40: Array.from({ length: 40 }, (_, i) => ({ late: 0, long: i < n * 40, early: false })), unhappyRecent: 0 });
+    const stats = new Map([[1, mk(0.5)], [2, mk(0.55)], [3, mk(0.6)]]);
+    assert.equal(flagsFor(stats.get(1), null, teamLong(stats)).some((f) => f.label === 'Often runs long'), true, "Leslie's flag is absolute");
+  });
+
+  test('2.0 adds engagement, churn, re-cleans, reliability and margin; Leslie\'s report is untouched', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await schedule.sync();
+    await reports.sync();
+
+    // Leslie's report: none of the 2.0 fields.
+    const v1 = await reports.cleaners('13w', { admin: true });
+    assert.ok(v1.rows.every((r) => r.engagement === undefined && r.churned === undefined && r.reliability === undefined && r.google_reviews === undefined));
+    assert.equal(v1.team.engagement, undefined);
+
+    const someone = v1.rows.find((r) => r.visits >= 20);
+    await reports.recordDrop({ cleaner_id: someone.id, visit_key: 'ns1', visit_at: '2026-11-10T14:00:00Z', reason: 'cleaner_no_show' }, null);
+    await reports.recordDrop({ cleaner_id: someone.id, visit_key: 'lm1', visit_at: '2026-11-11T14:00:00Z', reason: 'cleaner_personal' }, null);
+    await db.query("INSERT INTO conversations (channel, cleaner_id, cleaner_name, subject, complaint) VALUES ('email', $1, 'x', 'Missed the kitchen', $2::jsonb), ('email', $1, 'x', 'Late', $3::jsonb)", [someone.id, JSON.stringify({ outcome: 'return clean', status: 'open' }), JSON.stringify({ outcome: 'credit', status: 'open' })]);
+
+    const asAgent = await reports.cleaners2('13w', { admin: false });
+    assert.ok(asAgent.rows.every((r) => r.margin_dollars === undefined && r.earned === undefined), 'margin and pay stay admin-only');
+    const v2 = await reports.cleaners2('13w', { admin: true });
+    assert.equal(v2.churn_known, true);
+    assert.equal(v2.churn_days, 60);
+    assert.ok(v2.team.engagement > 0 && v2.team.engagement < 1);
+    assert.equal(typeof v2.team.feedback_hours, 'number');
+    assert.ok(v2.team.margin.share > 0);
+    for (const r of v2.rows) {
+      assert.equal(r.engagement, r.visits ? Math.round((r.rated / r.visits) * 1000) / 1000 : null);
+      assert.ok(r.churned >= 0 && r.at_risk >= 0);
+    }
+    const row = v2.rows.find((r) => r.id === someone.id);
+    assert.equal(row.reliability2, 2, 'one no-show + one last-minute cancellation');
+    assert.equal(row.recleans, 1);
+    assert.equal(row.complaints_n, 2);
+    assert.ok(row.margin_dollars > 0);
+
+    const one = await reports.cleaner2(someone.id, '13w', { admin: true });
+    assert.equal(one.churn.known, true);
+    assert.ok(Array.isArray(one.churn.clients));
+    assert.equal(one.stats.recleans, 1);
   });
 });
