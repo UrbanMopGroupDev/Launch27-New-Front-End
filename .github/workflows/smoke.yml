@@ -1,5 +1,11 @@
 # Post-deploy smoke test. Runs when Railway reports a successful deployment through
 # GitHub's deployment status, or by hand against any URL.
+#
+# Railway's deployment status carries a link to its dashboard, not to the app, so the app's
+# base URL comes from repository variables keyed by environment:
+#   SMOKE_URL_DEVELOPMENT, SMOKE_URL_STAGING, SMOKE_URL_PRODUCTION
+# (Settings → Secrets and variables → Actions → Variables). An environment with no URL
+# configured is skipped with a notice instead of failing.
 name: Smoke test
 
 on:
@@ -9,6 +15,10 @@ on:
       url:
         description: Base URL to test (e.g. https://qa.example.com)
         required: true
+      expect_env:
+        description: Environment the app must report (development, staging or production). Leave empty to skip the check.
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -19,12 +29,76 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Resolve target
+        id: target
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_URL: ${{ github.event.inputs.url }}
+          INPUT_EXPECT_ENV: ${{ github.event.inputs.expect_env }}
+          DEPLOY_ENV: ${{ github.event.deployment.environment }}
+          URL_DEVELOPMENT: ${{ vars.SMOKE_URL_DEVELOPMENT }}
+          URL_STAGING: ${{ vars.SMOKE_URL_STAGING }}
+          URL_PRODUCTION: ${{ vars.SMOKE_URL_PRODUCTION }}
+        run: |
+          # Map any spelling of an environment to development | staging | production.
+          canon() {
+            case "$(echo "$1" | tr '[:upper:]' '[:lower:]' | xargs)" in
+              production|prod) echo production ;;
+              staging|stage|qa) echo staging ;;
+              development|dev) echo development ;;
+              *) echo "" ;;
+            esac
+          }
+
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            url="$INPUT_URL"
+            expect=""
+            if [ -n "$INPUT_EXPECT_ENV" ]; then
+              expect="$(canon "$INPUT_EXPECT_ENV")"
+              if [ -z "$expect" ]; then
+                echo "::error::expect_env '$INPUT_EXPECT_ENV' is not development, staging or production"
+                exit 1
+              fi
+            fi
+          else
+            # Railway names GitHub environments "<project> - <env> / <railway env>",
+            # e.g. "UrbanMop Platform - Dev / development". Use the part after the last "/",
+            # falling back to the whole name.
+            expect="$(canon "${DEPLOY_ENV##*/}")"
+            [ -z "$expect" ] && expect="$(canon "$DEPLOY_ENV")"
+            if [ -z "$expect" ]; then
+              echo "::notice::Smoke test skipped: deployment environment '$DEPLOY_ENV' is not development, staging or production."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            case "$expect" in
+              development) url="$URL_DEVELOPMENT" ;;
+              staging) url="$URL_STAGING" ;;
+              production) url="$URL_PRODUCTION" ;;
+            esac
+            if [ -z "$url" ]; then
+              var="SMOKE_URL_$(echo "$expect" | tr '[:lower:]' '[:upper:]')"
+              echo "::notice::Smoke test skipped: no app URL for '$expect' (deployment environment '$DEPLOY_ENV'). Set the repository variable $var."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          echo "Testing $url (expecting env: ${expect:-any})"
+          {
+            echo "skip=false"
+            echo "url=$url"
+            echo "expect_env=$expect"
+          } >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
+        if: steps.target.outputs.skip != 'true'
       - uses: actions/setup-node@v4
+        if: steps.target.outputs.skip != 'true'
         with:
           node-version: 22
       - name: Smoke test
+        if: steps.target.outputs.skip != 'true'
         env:
-          SMOKE_URL: ${{ github.event.inputs.url || github.event.deployment_status.environment_url || github.event.deployment_status.target_url }}
-          EXPECT_ENV: ${{ github.event.deployment.environment }}
+          SMOKE_URL: ${{ steps.target.outputs.url }}
+          EXPECT_ENV: ${{ steps.target.outputs.expect_env }}
         run: node scripts/smoke.mjs "$SMOKE_URL"
