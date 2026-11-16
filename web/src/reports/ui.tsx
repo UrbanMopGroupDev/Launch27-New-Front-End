@@ -1,4 +1,5 @@
 // Shared pieces for the reports pages.
+import { useEffect, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useInboxMe } from '../inbox/util';
 import { reportsApi, type Period } from './api';
@@ -15,17 +16,30 @@ export function PeriodPicker({ value, onChange }: { value: Period; onChange: (p:
   );
 }
 
+// Status of the reports build, polled while a build runs; when one finishes, the open report reloads.
+function useReportStatus() {
+  const queryClient = useQueryClient();
+  const status = useQuery({ queryKey: ['reports', 'status'], queryFn: reportsApi.status, refetchInterval: (q) => (q.state.data?.running ? 5000 : 120_000) });
+  const wasRunning = useRef(false);
+  const running = !!status.data?.running;
+  useEffect(() => {
+    if (wasRunning.current && !running) queryClient.invalidateQueries({ predicate: (q) => q.queryKey[0] === 'reports' && q.queryKey[1] !== 'status' });
+    wasRunning.current = running;
+  }, [running, queryClient]);
+  return status;
+}
+
 export function ReportStatusLine() {
   const queryClient = useQueryClient();
   const me = useInboxMe();
-  const status = useQuery({ queryKey: ['reports', 'status'], queryFn: reportsApi.status, refetchInterval: (q) => (q.state.data?.running ? 5000 : 120_000) });
+  const status = useReportStatus();
   const refresh = useMutation({ mutationFn: reportsApi.refresh, onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['reports', 'status'] }); setTimeout(() => queryClient.invalidateQueries({ queryKey: ['reports'] }), 8000); } });
   const s = status.data;
   if (!s) return null;
   const when = s.taken_at ? new Date(s.taken_at).toLocaleString('en-CA', { timeZone: 'America/Toronto', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : null;
   return (
     <span className="muted small sch-status">
-      {s.running ? 'Building from Launch27…' : when ? `Built ${when} from the last 12 months of Launch27 · rebuilds overnight` : 'Not built yet'}
+      {s.running ? 'Updating from Launch27… about 3 minutes' : when ? `Built ${when} from the last 12 months of Launch27 · ${s.auto_build ? 'rebuilds overnight' : 'updates the first time someone opens the reports each day'}` : 'Not built yet'}
       {s.last_error && <span className="warn"> · last build failed: {s.last_error}</span>}
       {me.data?.role === 'admin' && !s.running && <button className="link" disabled={refresh.isPending} onClick={() => refresh.mutate()}>Refresh now</button>}
     </span>
@@ -56,19 +70,19 @@ export function Spark({ values, warn }: { values: (number | null)[]; warn?: bool
 export function NotBuilt({ message }: { message: string }) {
   const queryClient = useQueryClient();
   const me = useInboxMe();
-  const status = useQuery({ queryKey: ['reports', 'status'], queryFn: reportsApi.status });
-  const refresh = useMutation({ mutationFn: reportsApi.refresh, onSuccess: () => setTimeout(() => queryClient.invalidateQueries({ queryKey: ['reports'] }), 8000) });
+  const status = useReportStatus();
+  const refresh = useMutation({ mutationFn: reportsApi.refresh, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['reports', 'status'] }) });
   const admin = me.data?.role === 'admin';
   const s = status.data;
   return (
     <section className="card seg-empty">
       <h2>{s?.running ? 'Building the reports…' : 'Reports not built yet'}</h2>
       {s?.running ? (
-        <p className="muted">Reading the last 12 months from Launch27. This takes a few minutes; the page fills in when it's done.</p>
+        <p className="muted">Reading the last 12 months from Launch27. This takes about 3 minutes; the page fills in by itself when it's done.</p>
       ) : s?.last_error ? (
         <p className="warn">The last build failed: {s.last_error}</p>
       ) : s && !s.auto_build ? (
-        <p className="muted">The overnight build is off here: no Launch27 sync login is set (L27_SYNC_EMAIL and L27_SYNC_PASSWORD). {admin ? 'Click Build now to build them with your own Launch27 login.' : 'Ask an admin to click Build now, or to set the sync login.'}</p>
+        <p className="muted">The reports build the first time someone opens them each day, with that person's Launch27 login. If nothing starts, {admin ? 'click Build now.' : 'ask an admin to click Build now.'}</p>
       ) : (
         <p className="muted">{message}</p>
       )}

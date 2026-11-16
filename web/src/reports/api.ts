@@ -146,7 +146,7 @@ export interface UtilizationReport {
   };
 }
 
-export interface ReportStatus { taken_at: string | null; running: boolean; last_error: string | null; covers_from: string | null; auto_build?: boolean }
+export interface ReportStatus { taken_at: string | null; built_for?: string | null; running: boolean; last_error: string | null; covers_from: string | null; auto_build?: boolean }
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api/reports${path}`, { method, credentials: 'same-origin', ...(body !== undefined ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}) });
