@@ -1924,6 +1924,11 @@ a.rep-factor:hover b { text-decoration: underline; }
 
 /* Complaint playbook */
 .cmp-runbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.cmp-runstate { margin: 10px 0 0; padding: 8px 12px; border-radius: 6px; background: var(--bg); border-left: 3px solid var(--accent); font-size: 13px; }
+.cmp-runstate.ok { border-left-color: var(--ok); }
+.cmp-runstate.warn { border-left-color: var(--warn); }
+.cmp-runstate.neg { border-left-color: var(--danger); }
+.cmp-problems { margin: 6px 0 0; padding-left: 18px; }
 .cmp-sources { list-style: none; padding: 0; margin: 10px 0 4px; display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 4px 16px; }
 .cmp-sources .dot.ok { background: var(--ok); }
 .cmp-sources .dot.warn { background: var(--warn); }

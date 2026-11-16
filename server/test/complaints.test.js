@@ -8,7 +8,7 @@ import { redact } from '../src/complaints/redact.js';
 import { outcomeAt, journeyAt, recleanCost } from '../src/complaints/journey.js';
 import { normalizeSettings, canApprove, rungForRefund, budgetStatus, DEFAULT_SETTINGS } from '../src/complaints/settings.js';
 import { buildPlaybook } from '../src/complaints/playbook.js';
-import { mapStatus, toCase, discover } from '../src/complaints/sources/kustomer.js';
+import { mapStatus, toCase, discover, createKustomerClient, findListing } from '../src/complaints/sources/kustomer.js';
 import { createComplaints } from '../src/complaints/service.js';
 import { createReports } from '../src/reports/service.js';
 import { createSchedule } from '../src/schedule/service.js';
@@ -287,5 +287,34 @@ describe('complaints: production without a Launch27 sync login', () => {
     assert.equal(st.last_run.status, 'done');
     assert.ok(st.last_run.log.some((l) => /building it now/.test(l.msg)));
     await db.close();
+  });
+});
+
+describe('complaints: Kustomer listing fallbacks', () => {
+  const res = (status, body) => ({ ok: status < 300, status, headers: { get: () => null }, json: async () => body });
+  test('a refused listing shape falls through to the next, and Kustomer\'s reason is kept', async () => {
+    const calls = [];
+    const fetchImpl = async (url) => {
+      const u = new URL(url);
+      calls.push(u.pathname + u.search);
+      if (u.pathname === '/v1/klasses') return res(200, { data: [{ id: 'k123', attributes: { name: 'complaint' } }] });
+      if (u.pathname === '/v1/klasses/complaint/kobjects') return res(400, { errors: [{ title: 'Bad Request', detail: 'use the klass id, not name (ask a@b.com)' }] });
+      if (u.pathname === '/v1/klasses/k123/kobjects') return res(200, { data: [{ id: 'o1', attributes: { createdAt: '2026-10-01T00:00:00Z', custom: { statusStr: 'For Review' } } }], links: { next: null } });
+      return res(404, {});
+    };
+    const client = createKustomerClient({ apiKey: 'x', fetchImpl, sleep: async () => {} });
+    const d = await discover(client);
+    assert.equal(d.listing.label, 'by id');
+    assert.equal(d.attempts.length, 3);
+    assert.match(d.attempts[0].error, /400 \(Bad Request: use the klass id/);
+    assert.ok(!JSON.stringify(d).includes('a@b.com'), 'emails masked in error text');
+    assert.equal(d.sample_count, 1);
+  });
+  test('when nothing works, every attempt says why', async () => {
+    const fetchImpl = async () => res(403, { errors: [{ title: 'Forbidden', detail: 'missing org.permission.kobject.read' }] });
+    const client = createKustomerClient({ apiKey: 'x', fetchImpl, sleep: async () => {} });
+    const f = await findListing(client, { id: 'k1', name: 'complaint' });
+    assert.equal(f.listing, null);
+    assert.ok(f.attempts.every((a) => /403 \(Forbidden: missing org.permission.kobject.read\)/.test(a.error)));
   });
 });
