@@ -28,9 +28,9 @@ export function ReportStatusLine() {
       {s.running
         ? 'Building from Launch27…'
         : when
-          ? `Built ${when} from the last 12 months of Launch27 · ${s.needs_sync_login ? 'no overnight rebuild until the Launch27 sync login is set' : 'rebuilds overnight'}`
-          : s.needs_sync_login
-            ? 'Not built: the Launch27 sync login (L27_SYNC_EMAIL / L27_SYNC_PASSWORD) isn\'t set, so it can\'t build automatically. An admin can build it now.'
+          ? `Built ${when} from the last 12 months of Launch27 · ${s.auto_build === false ? 'no overnight rebuild until the Launch27 sync login is set' : 'rebuilds overnight'}`
+          : s.auto_build === false
+            ? 'Not built: no Launch27 sync login is set (L27_SYNC_EMAIL / L27_SYNC_PASSWORD), so it can\'t build automatically'
             : 'Not built yet'}
       {s.last_error && <span className="warn"> · last build failed: {s.last_error}</span>}
       {me.data?.role === 'admin' && !s.running && <button className="link" disabled={refresh.isPending} onClick={() => refresh.mutate()}>Refresh now</button>}
@@ -62,12 +62,23 @@ export function Spark({ values, warn }: { values: (number | null)[]; warn?: bool
 export function NotBuilt({ message }: { message: string }) {
   const queryClient = useQueryClient();
   const me = useInboxMe();
+  const status = useQuery({ queryKey: ['reports', 'status'], queryFn: reportsApi.status });
   const refresh = useMutation({ mutationFn: reportsApi.refresh, onSuccess: () => setTimeout(() => queryClient.invalidateQueries({ queryKey: ['reports'] }), 8000) });
+  const admin = me.data?.role === 'admin';
+  const s = status.data;
   return (
     <section className="card seg-empty">
-      <h2>Reports not built yet</h2>
-      <p className="muted">{message}</p>
-      {me.data?.role === 'admin' && <button disabled={refresh.isPending} onClick={() => refresh.mutate()}>Build now</button>}
+      <h2>{s?.running ? 'Building the reports…' : 'Reports not built yet'}</h2>
+      {s?.running ? (
+        <p className="muted">Reading the last 12 months from Launch27. This takes a few minutes; the page fills in when it's done.</p>
+      ) : s?.last_error ? (
+        <p className="warn">The last build failed: {s.last_error}</p>
+      ) : s && !s.auto_build ? (
+        <p className="muted">The overnight build is off here: no Launch27 sync login is set (L27_SYNC_EMAIL and L27_SYNC_PASSWORD). {admin ? 'Click Build now to build them with your own Launch27 login.' : 'Ask an admin to click Build now, or to set the sync login.'}</p>
+      ) : (
+        <p className="muted">{message}</p>
+      )}
+      {admin && !s?.running && <button disabled={refresh.isPending} onClick={() => refresh.mutate()}>Build now</button>}
     </section>
   );
 }
