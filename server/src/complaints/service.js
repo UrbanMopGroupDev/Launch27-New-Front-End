@@ -270,7 +270,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
   // A refund post → the matching case (same client, complaint 45 days before to 7 after the
   // post), or a new Slack-only case when no other source saw the complaint.
   async function linkRefund(p, sourceId, ctx) {
-    const custId = customerByName(ctx, p.client_name);
+    const custId = p.other_profile ? null : customerByName(ctx, p.client_name);
     const postedMs = Date.parse(p.posted_at);
     let caseRow = null;
     if (custId) {

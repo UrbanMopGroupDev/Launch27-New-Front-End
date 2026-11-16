@@ -28,6 +28,7 @@ describe('complaints: Slack refund posts', () => {
     assert.equal(p.amount, 203.71);
     assert.equal(p.service_date, '2026-08-07');
     assert.equal(p.decided_by, 'Jose');
+    assert.equal(p.approved_by, null, 'a request is not an approval');
   });
   test('"Refunded X for 50% -252.17" (no dollar sign) and review mention', () => {
     const p = parseRefundPost({ text: 'Refunded Dana Pike for 50% -252.17 for the negative experience, threatened us for negative Google Review. Updated the booking', ts: ts('2025-05-05T17:47:00Z'), user_name: 'Jose' });
@@ -63,6 +64,19 @@ describe('complaints: Slack refund posts', () => {
     assert.equal(reasonKind('This is the difference of the amount she paid via affirm vs service amount'), 'billing_adjustment');
     assert.equal(parseRefundPost({ text: 'Hi Jose, could you kindly confirm if the refund for Ian Wu of $49.32 was due to unsatisfactory experience?', ts: ts('2026-01-14T14:31:00Z') }).kind, 'question');
     assert.equal(parseRefundPost({ text: '<@U0X|Vincent> has joined the channel', ts: ts('2026-01-14T14:31:00Z') }), null);
+  });
+  test('new channel style: approvals by Derek or the GM, partner profiles flagged', () => {
+    const a = parseRefundPost({ text: 'Hi, <@U0X|Vincent>. Good afternoon! Please process a partial refund of $140 for *Lena Ortiz’s* November 10 appointment. This refund has been approved by <@U0D|Derek Chiu>. Thank you!', ts: ts('2026-11-12T19:15:00Z'), user_name: 'Grace' });
+    assert.equal(a.client_name, 'Lena Ortiz');
+    assert.equal(a.amount, 140);
+    assert.equal(a.service_date, '2026-11-10');
+    assert.equal(a.approved_by, 'Derek Chiu');
+    assert.equal(a.decided_by, 'Grace');
+    const b = parseRefundPost({ text: 'Please process the *$45.57* refund for Nora Dale’s appointment on November 13. She is Jon Mott’s partner, and they were dissatisfied with the appointment on October 23, which was under Jon’s profile. The refund was approved by the GM as a gesture of goodwill.', ts: ts('2026-11-11T19:10:00Z'), user_name: 'Grace' });
+    assert.equal(b.approved_by, 'Jose (GM)');
+    assert.equal(b.service_date, '2026-11-13', 'upcoming appointment, same year');
+    assert.equal(b.other_profile, true);
+    assert.equal(b.kind, 'complaint');
   });
   test('no year written: most recent such date before the post', () => {
     const p = parseRefundPost({ text: 'Fyi 20% refund for Hanna Bell due to unsatisfied with the service | Nov 13 service', ts: ts('2025-01-10T22:41:00Z'), user_name: 'Jose' });

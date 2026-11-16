@@ -28,11 +28,13 @@ export function cleanSlackText(text) {
     .trim();
 }
 
-function clientName(t) {
+function clientName(text) {
+  // "Lena Ortiz’s appointment" -> "Lena Ortiz appointment" (O'Shea is left alone).
+  const t = text.replace(/(\p{L})['’]s\b/gu, '$1');
   const pats = [
     /\b[Rr]efunded\s+(?:client\s+)?([A-Z][\p{L}'-]+(?:\s+[A-Z][\p{L}'-]+){0,2})/u,
-    /\b(?:for|to)\s+(?:[Cc]lient\s+|the client\s+)?([A-Z][\p{L}'-]+(?:\s+[A-Z][\p{L}'-]+){0,2})(?=\s*(?:,|\.|-|–|\(|for\b|due\b|regarding\b|on\b|service\b|date\b|\||$))/u,
-    /\b[Cc]lient(?:'s name is|:)?\s+([A-Z][\p{L}'-]+(?:\s+[A-Z][\p{L}'-]+){0,2})/u,
+    /\b(?:for|to)\s+(?:[Cc]lient\s+|the client\s+)?([A-Z][\p{L}'-]+(?:\s+[A-Z][\p{L}'-]+){0,2})(?=\s*(?:,|\.|-|–|\(|for\b|due\b|regarding\b|on\b|service\b|date\b|\||$)|\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d|\s+(?:appointment|booking|clean)\b)/u,
+    /\b[Cc]lient(?:'?s? name is|:)?\s+([A-Z][\p{L}'-]+(?:\s+[A-Z][\p{L}'-]+){0,2})/u,
   ];
   for (const re of pats) {
     for (const m of t.matchAll(new RegExp(re.source, 'gu'))) {
@@ -50,8 +52,9 @@ function serviceDate(t, postedAt) {
   const day = Number(m[2]);
   const posted = new Date(postedAt);
   let year = m[3] ? Number(m[3]) : posted.getUTCFullYear();
-  // No year written: the most recent such date on or before the post.
-  if (!m[3] && Date.UTC(year, month, day) > posted.getTime() + 86_400_000) year -= 1;
+  // No year written: the nearest such date. Refunds are sometimes applied to an upcoming
+  // appointment, so up to 31 days after the post counts as this year.
+  if (!m[3] && Date.UTC(year, month, day) > posted.getTime() + 31 * 86_400_000) year -= 1;
   const d = new Date(Date.UTC(year, month, day));
   return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
 }
@@ -102,6 +105,8 @@ export function parseRefundPost(msg) {
   const kind = isQuestion ? 'question' : reasonKind(t);
   const author = msg.user_name || null;
   const approvedByDerek = /\bderek\b.{0,40}\bapprov|approv.{0,40}\bderek\b/i.test(t) || /^derek/i.test(author || '');
+  // "approved by the GM" / "approved by GM @Jose": the GM role, today Jose.
+  const approvedByGm = /approv\w*\s+by\s+(?:the\s+)?(?:gm\b|@?jose\b)/i.test(t);
   const parsed = {
     kind,
     client_name: clientName(t),
@@ -112,7 +117,9 @@ export function parseRefundPost(msg) {
     cleaner_recovery,
     review_related: /\b(google )?review\b/i.test(t),
     decided_by: author,
-    approved_by: approvedByDerek ? 'Derek Chiu' : /\b(fyi|processed|refunded)\b/i.test(t) ? author : null,
+    approved_by: approvedByDerek ? 'Derek Chiu' : approvedByGm ? 'Jose (GM)' : /^(fyi\b|refunded\b|update\b)|\bI (?:have |already )?(?:processed|refunded)\b|\bhas been (?:processed|refunded)\b/i.test(t) ? author : null,
+    // Refund booked under someone else's profile ("she is X's partner"): don't trust the name match.
+    other_profile: /\b(partner|spouse|husband|wife|roommate|under [\p{L}' ]{2,40}(?:'|’)s profile)\b/iu.test(t),
     posted_at: postedAt,
   };
   if (!parsed.client_name || (parsed.amount == null && parsed.pct == null)) parsed.kind = isQuestion ? 'question' : 'unparsed';
