@@ -10,7 +10,19 @@ if (!base) {
   console.error('usage: node scripts/smoke.mjs <base-url>');
   process.exit(2);
 }
-const expectEnv = (process.env.EXPECT_ENV || '').toLowerCase();
+// Same aliases as resolveAppEnv in server/src/config.js.
+const ALIASES = { qa: 'staging', stage: 'staging', dev: 'development', prod: 'production' };
+const rawExpect = (process.env.EXPECT_ENV || '').trim().toLowerCase();
+const expectEnv = ALIASES[rawExpect] || rawExpect;
+if (expectEnv && !['development', 'staging', 'production'].includes(expectEnv)) {
+  console.error(`EXPECT_ENV must be development, staging or production, got "${process.env.EXPECT_ENV}"`);
+  process.exit(2);
+}
+// Railway's deployment status links to its dashboard (railway.com/project/...), not the app.
+if (/^https?:\/\/(www\.)?railway\.(com|app)(\/|$)/i.test(base)) {
+  console.error(`${base} is the Railway dashboard, not the app. Use the service's public URL.`);
+  process.exit(2);
+}
 const failures = [];
 
 async function get(path, attempts = 6) {
@@ -43,9 +55,11 @@ const must = (cond, msg) => {
 await check('GET /healthz is 200', async () => {
   const r = await get('/healthz');
   must(r.status === 200, `status ${r.status}`);
+  const type = r.headers.get('content-type') || '';
+  must(type.includes('application/json'), `expected JSON, got ${type || 'no content type'} (is this the app's URL?)`);
   const body = await r.json();
   console.log(`     env=${body.env} version=${body.version || 'unknown'}`);
-  if (expectEnv) must(body.env === expectEnv || (expectEnv === 'qa' && body.env === 'staging'), `expected env ${expectEnv}, got ${body.env}`);
+  if (expectEnv) must(body.env === expectEnv, `expected env ${expectEnv}, got ${body.env}`);
 });
 
 await check('GET /readyz is 200 (database, migrations, worker)', async () => {

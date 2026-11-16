@@ -1914,3 +1914,20 @@ a.rep-factor:hover b { text-decoration: underline; }
 .wf-accounts { max-width: 720px; }
 .ut-sent summary { cursor: pointer; margin-top: 2px; }
 .ut-sent-body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--text-2); padding: 6px 0 2px; line-height: 1.5; }
+
+/* Complaint playbook */
+.cmp-runbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.cmp-sources { list-style: none; padding: 0; margin: 10px 0 4px; display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 4px 16px; }
+.cmp-sources .dot.ok { background: var(--ok); }
+.cmp-sources .dot.warn { background: var(--warn); }
+.cmp-filter { display: flex; gap: 12px; align-items: center; padding: 10px 14px; }
+.cmp-cases tbody tr { cursor: pointer; }
+.cmp-cases tr.selected { background: var(--bg); }
+.cmp-detail h3 { font-size: 13px; margin: 14px 0 6px; }
+.cmp-bars { display: flex; align-items: flex-end; gap: 6px; height: 140px; padding: 8px 0; }
+.cmp-bar { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; min-width: 0; }
+.cmp-bar span { width: 100%; max-width: 36px; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 2px; }
+.cmp-bar small { font-size: 10px; color: var(--muted); margin-top: 3px; }
+.cmp-rules { border: 0; padding: 0; margin: 0; min-width: 0; }
+.cmp-rules label.cmp-slider { display: flex; flex-direction: row; gap: 12px; align-items: center; flex-wrap: wrap; text-align: left; }
+.cmp-rules label.cmp-slider input { flex: 1; min-width: 180px; width: auto; }

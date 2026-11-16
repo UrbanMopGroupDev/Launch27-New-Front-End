@@ -223,6 +223,14 @@ export function loadConfig(env = process.env) {
     // Bookings from placement are written as this Launch27 staff user (live only; mock signs in itself).
     l27PlacementEmail: l27Mode === 'live' ? env.L27_PLACEMENT_EMAIL || null : null,
     l27PlacementPassword: l27Mode === 'live' ? env.L27_PLACEMENT_PASSWORD || null : null,
+    // Complaint Resolution Engine (docs/complaints-engine.md). Real sources are read in
+    // production only, so dev and QA never pull real complaint text. All read-only.
+    kustomerApiKey: isProd ? env.KUSTOMER_API_KEY || null : null,
+    kustomerComplaintKlass: env.KUSTOMER_COMPLAINT_KLASS || null,
+    slackBotToken: isProd ? env.SLACK_BOT_TOKEN || null : null,
+    slackChannels: parseSlackChannels(env.COMPLAINT_SLACK_CHANNELS),
+    // Claude classification of redacted complaint text. Optional; rules-only without it.
+    anthropicApiKey: isProd ? env.ANTHROPIC_API_KEY || null : null,
     warnings,
   };
 }
@@ -260,4 +268,15 @@ export function canSeeUtilization(config, email) {
   if (!config?.utilizationEnabled) return false;
   const list = config.utilizationEmails || [];
   return !list.length || list.includes(String(email || '').toLowerCase());
+}
+
+// "C04469ZQMC1=finance-refunds,C06JZHD9G83=finance-operations-collaboration" -> { id: label }.
+// Empty = the default finance channels (src/complaints/sources/slack.js).
+function parseSlackChannels(value) {
+  const out = {};
+  for (const part of String(value || '').split(',')) {
+    const [id, label] = part.split('=').map((s) => s && s.trim());
+    if (id && /^[CG][A-Z0-9]{6,}$/.test(id)) out[id] = label || id;
+  }
+  return Object.keys(out).length ? out : null;
 }
