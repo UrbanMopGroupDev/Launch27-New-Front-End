@@ -78,8 +78,6 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       const settings = await getSettings();
       const ctx = await loadContext(note, bearer);
       const staffNames = (await many(db, 'SELECT name FROM users WHERE name IS NOT NULL')).map((r) => r.name);
-      const cases = [];
-
       const guarded = async (label, fn) => {
         try {
           return await fn();
@@ -88,25 +86,32 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
           return [];
         }
       };
-      if (config.kustomerApiKey) cases.push(...(await guarded('Kustomer', () => fromKustomer(from, to, ctx, note))));
-      else note('warn', 'Kustomer skipped: KUSTOMER_API_KEY is not set');
-      cases.push(...fromRatings(from, to, ctx));
-      note('info', `Launch27 unhappy ratings: ${cases.filter((c) => c.source === 'launch27_rating').length}`);
-      if (gmail) cases.push(...(await guarded('info@ email', () => fromGmail(from, to, ctx, note))));
-      else note('warn', 'info@ email skipped: Gmail is not connected in this environment');
+      // Each source is classified and saved as soon as it's read, so a run that's cut off
+      // (a release restarts the app) keeps every source it finished.
+      let saved = 0;
+      const save = async (label, cases) => {
+        let kept = 0;
+        for (const c of cases) {
+          const rules = classifyRules(c.text, { claimAmount: c.claim_amount });
+          let model = null;
+          if (classifier && c.text) model = await classifier(redact(c.text, { names: [c.customer_name, ...(c.cleaner_names || []), ...staffNames] }));
+          c.cls = mergeClassification(rules, model);
+          if (c.source === 'gmail' && model && model.is_complaint === false) continue;
+          if (c.source === 'gmail' && !model && (c.cls.category === 'other' || c.cls.tone === 'mild')) continue;
+          c.id = await upsertCase(c);
+          kept++;
+        }
+        saved += kept;
+        note('info', `${label}: ${kept} complaint case${kept === 1 ? '' : 's'} saved`);
+      };
 
-      // Classify and store cases, then attach Slack refunds (which need the cases to match).
-      for (const c of cases) {
-        const rules = classifyRules(c.text, { claimAmount: c.claim_amount });
-        let model = null;
-        if (classifier && c.text) model = await classifier(redact(c.text, { names: [c.customer_name, ...(c.cleaner_names || []), ...staffNames] }));
-        c.cls = mergeClassification(rules, model);
-        if (c.source === 'gmail' && model && model.is_complaint === false) c.skip = true;
-        if (c.source === 'gmail' && !model && (rules.category === 'other' || rules.tone === 'mild')) c.skip = true;
-      }
-      const kept = cases.filter((c) => !c.skip);
-      note('info', `cases found: ${kept.length} (${Object.entries(countBy(kept, 'source')).map(([k, v]) => `${k} ${v}`).join(', ')})`);
-      for (const c of kept) c.id = await upsertCase(c);
+      if (config.kustomerApiKey) await save('Kustomer', await guarded('Kustomer', () => fromKustomer(from, to, ctx, note)));
+      else note('warn', 'Kustomer skipped: KUSTOMER_API_KEY is not set');
+      const ratings = fromRatings(from, to, ctx);
+      note('info', `Launch27 unhappy ratings: ${ratings.length}`);
+      await save('Launch27 ratings', ratings);
+      if (gmail) await save('info@ email', await guarded('info@ email', () => fromGmail(from, to, ctx, note)));
+      else note('warn', 'info@ email skipped: Gmail is not connected in this environment');
       await markDuplicates();
 
       if (config.slackBotToken) await guarded('Slack', () => fromSlack(from, to, ctx, note));
@@ -116,7 +121,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       // 'partial': it finished, but a source failed (shown on the page with the reason).
       const status = runLog.some((l) => l.level === 'error') ? 'partial' : 'done';
       await db.query('UPDATE complaint_runs SET finished_at = now(), status = $3, log = $2::jsonb WHERE id = $1', [runRow.id, json(runLog), status]);
-      return { run_id: Number(runRow.id), cases: kept.length };
+      return { run_id: Number(runRow.id), cases: saved };
     } catch (err) {
       note('error', `run failed: ${err.message}`);
       await db.query("UPDATE complaint_runs SET finished_at = now(), status = 'failed', log = $2::jsonb WHERE id = $1", [runRow.id, json(runLog)]);
@@ -532,6 +537,13 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     return { started: true };
   }
 
+  // A run lives in this process: a restart (every release) ends it. Called at startup, so a
+  // run that was cut off shows as interrupted instead of running forever. Everything it saved stays.
+  async function markInterrupted() {
+    const r = await db.query("UPDATE complaint_runs SET status = 'interrupted', finished_at = now(), log = log || $1::jsonb WHERE status = 'running' RETURNING id", [json([{ at: new Date(now()).toISOString(), level: 'warn', msg: 'Interrupted: the app restarted (a release) before the run finished. Cases saved before then are kept; run again for the rest.' }])]);
+    return r.rows.length;
+  }
+
   async function status() {
     const last = await one(db, 'SELECT id, started_at, finished_at, status, window_from, window_to, log FROM complaint_runs ORDER BY id DESC LIMIT 1');
     return { running: !!running, sources: sources(), last_run: last };
@@ -599,11 +611,6 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     return buildPlaybook({ cases, resolutions, costs, outcomes, visits, from, to, settings, today: isoDay(now()) });
   }
 
-  return { getSettings, saveSettings, kustomerDiscover, start, run, status, listCases, getCase, setCategory, playbook, sources };
+  return { getSettings, saveSettings, kustomerDiscover, start, run, status, markInterrupted, listCases, getCase, setCategory, playbook, sources };
 }
 
-function countBy(list, key) {
-  const m = {};
-  for (const x of list) m[x[key]] = (m[x[key]] || 0) + 1;
-  return m;
-}
