@@ -232,40 +232,71 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     return out;
   }
 
+  // info@ in month-long windows: one Gmail search over six months timed out on production.
+  // A slow search is retried once, a slow or unreadable message is skipped and counted, and
+  // one bad month doesn't lose the others.
   async function fromGmail(from, to, ctx, note) {
-    const after = from.replace(/-/g, '/');
-    const before = isoDay(Date.parse(to) + DAY).replace(/-/g, '/');
-    const q = `after:${after} before:${before} -from:urbanmop.ca -from:launch27.com -from:kustomerapp.com -category:promotions (refund OR complaint OR disappointed OR unhappy OR "not happy" OR missed OR "not clean" OR dirty OR reclean OR "re-clean" OR damaged OR broken OR late OR "no show" OR unacceptable)`;
+    const terms = '-from:urbanmop.ca -from:launch27.com -from:kustomerapp.com -category:promotions (refund OR complaint OR disappointed OR unhappy OR "not happy" OR missed OR "not clean" OR dirty OR reclean OR "re-clean" OR damaged OR broken OR late OR "no show" OR unacceptable)';
+    const gday = (ms) => isoDay(ms).replace(/-/g, '/');
+    const windows = [];
+    for (let a = Date.parse(from); a <= Date.parse(to); a += 31 * DAY) windows.push([a, Math.min(a + 31 * DAY, Date.parse(to) + DAY)]);
+    const retry = async (fn) => {
+      try {
+        return await fn();
+      } catch {
+        return fn();
+      }
+    };
     const out = [];
+    let skipped = 0;
+    let failedWindows = 0;
     for (const account of gmail.accounts.filter((a) => /^info@/.test(a))) {
       const seenThreads = new Set();
-      let pageToken = null;
-      let n = 0;
-      do {
-        const page = await gmail.client.search(account, q, { max: 100, pageToken });
-        for (const id of page.ids) {
-          const m = parseGmailMessage(await gmail.client.message(account, id));
-          if (m.autoSubmitted || !m.from || seenThreads.has(m.threadId)) continue;
-          seenThreads.add(m.threadId);
-          out.push({
-            source: 'gmail',
-            source_id: `${account}:${m.threadId}`,
-            opened_at: (m.date || new Date()).toISOString(),
-            channel: 'email',
-            status: 'resolved',
-            customer_name: m.fromName,
-            customer_email: m.from,
-            emails: [m.from],
-            text: [m.subject, m.body].filter(Boolean).join('\n'),
-            raw: { subject: m.subject },
-          });
-          n++;
+      for (const [a, b] of windows) {
+        const q = `after:${gday(a)} before:${gday(b)} ${terms}`;
+        try {
+          let pageToken = null;
+          let n = 0;
+          do {
+            const page = await retry(() => gmail.client.search(account, q, { max: 100, pageToken }));
+            for (const id of page.ids) {
+              let m;
+              try {
+                m = parseGmailMessage(await retry(() => gmail.client.message(account, id)));
+              } catch {
+                skipped++;
+                continue;
+              }
+              if (m.autoSubmitted || !m.from || seenThreads.has(m.threadId)) continue;
+              seenThreads.add(m.threadId);
+              out.push({
+                source: 'gmail',
+                source_id: `${account}:${m.threadId}`,
+                opened_at: (m.date || new Date()).toISOString(),
+                channel: 'email',
+                status: 'resolved',
+                customer_name: m.fromName,
+                customer_email: m.from,
+                emails: [m.from],
+                text: [m.subject, m.body].filter(Boolean).join('\n'),
+                raw: { subject: m.subject },
+              });
+              n++;
+            }
+            pageToken = page.next;
+          } while (pageToken && n < 1000);
+        } catch (err) {
+          failedWindows++;
+          note('warn', `info@ email: ${gday(a)}–${gday(b)} skipped (${err.message})`);
         }
-        pageToken = page.next;
-      } while (pageToken && n < 2000);
+      }
     }
-    note('info', `info@ email: ${out.length} candidate threads (Claude/rules keep only complaints)`);
-    for (const c of out) c.l27_customer_id = await customerByEmail(ctx, c.emails, []);
+    note('info', `info@ email: ${out.length} candidate threads (Claude/rules keep only complaints)${skipped ? `, ${skipped} messages unreadable` : ''}${failedWindows ? `, ${failedWindows} month(s) skipped` : ''}`);
+    const byEmail = new Map();
+    for (const c of out) {
+      if (!byEmail.has(c.customer_email)) byEmail.set(c.customer_email, await customerByEmail(ctx, c.emails, []).catch(() => null));
+      c.l27_customer_id = byEmail.get(c.customer_email);
+    }
     return out;
   }
 

@@ -298,6 +298,7 @@ describe('complaints: Kustomer listing fallbacks', () => {
       const u = new URL(url);
       calls.push(u.pathname + u.search);
       if (u.pathname === '/v1/klasses') return res(200, { data: [{ id: 'k123', attributes: { name: 'complaint' } }] });
+      if (u.pathname === '/v1/klasses/complaint') return res(400, { errors: [{ title: 'Bad Param', detail: 'badparam' }] });
       if (u.pathname === '/v1/klasses/complaint/kobjects') return res(400, { errors: [{ title: 'Bad Request', detail: 'use the klass id, not name (ask a@b.com)' }] });
       if (u.pathname === '/v1/klasses/k123/kobjects') return res(200, { data: [{ id: 'o1', attributes: { createdAt: '2026-10-01T00:00:00Z', custom: { statusStr: 'For Review' } } }], links: { next: null } });
       return res(404, {});
@@ -305,8 +306,8 @@ describe('complaints: Kustomer listing fallbacks', () => {
     const client = createKustomerClient({ apiKey: 'x', fetchImpl, sleep: async () => {} });
     const d = await discover(client);
     assert.equal(d.listing.label, 'by id');
-    assert.equal(d.attempts.length, 3);
-    assert.match(d.attempts[0].error, /400 \(Bad Request: use the klass id/);
+    assert.equal(d.attempts.length, 4);
+    assert.match(d.attempts[1].error, /400 \(Bad Request: use the klass id/);
     assert.ok(!JSON.stringify(d).includes('a@b.com'), 'emails masked in error text');
     assert.equal(d.sample_count, 1);
   });
@@ -316,5 +317,60 @@ describe('complaints: Kustomer listing fallbacks', () => {
     const f = await findListing(client, { id: 'k1', name: 'complaint' });
     assert.equal(f.listing, null);
     assert.ok(f.attempts.every((a) => /403 \(Forbidden: missing org.permission.kobject.read\)/.test(a.error)));
+  });
+});
+
+describe('complaints: Kustomer documented listing', () => {
+  test('GET /v1/klasses/{name} is used first, and links.next is followed', async () => {
+    const res = (status, body) => ({ ok: status < 300, status, headers: { get: () => null }, json: async () => body });
+    const seen = [];
+    const fetchImpl = async (url) => {
+      const u = new URL(url);
+      seen.push(u.pathname + u.search);
+      if (u.pathname === '/v1/klasses') return res(200, { data: [{ id: 'k1', attributes: { name: 'complaint' } }] });
+      if (u.pathname === '/v1/klasses/complaint' && !u.search) return res(200, { data: [{ id: 'a', attributes: { createdAt: '2026-10-01T00:00:00Z', custom: {} } }], links: { next: '/v1/klasses/complaint?page=2' } });
+      if (u.pathname === '/v1/klasses/complaint' && u.search === '?page=2') return res(200, { data: [{ id: 'b', attributes: { createdAt: '2026-10-05T00:00:00Z', custom: {} } }], links: { next: null } });
+      return res(400, { errors: [{ title: 'Bad Param' }] });
+    };
+    const client = createKustomerClient({ apiKey: 'x', fetchImpl, sleep: async () => {} });
+    const d = await discover(client);
+    assert.equal(d.listing.label, 'documented');
+    const { listComplaints } = await import('../src/complaints/sources/kustomer.js');
+    const ids = [];
+    for await (const o of listComplaints(client, d.listing, { from: '2026-09-01', to: '2026-10-31' })) ids.push(o.id);
+    assert.deepEqual(ids, ['a', 'b']);
+  });
+});
+
+describe('complaints: info@ email by month', () => {
+  test('a month whose search keeps timing out is skipped; the other months are still read', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await schedule.sync();
+    await reports.sync();
+    let searches = 0;
+    const b64 = (s) => Buffer.from(s).toString('base64url');
+    const client = {
+      async search(account, q) {
+        searches++;
+        if (/after:2026\/09\/01/.test(q)) throw new Error('The operation was aborted due to timeout');
+        const m = q.match(/after:(\d{4})\/(\d\d)/);
+        return { ids: [`m-${m[1]}-${m[2]}`], next: null };
+      },
+      async message(account, id) {
+        return { id, threadId: `t-${id}`, internalDate: String(Date.parse('2026-09-15T12:00:00Z')), payload: { mimeType: 'text/plain', headers: [{ name: 'From', value: 'Pat Client <pat@example.com>' }, { name: 'Subject', value: 'Very disappointed' }], body: { data: b64('The kitchen was still dirty and the floors were missed. Unacceptable.') } } };
+      },
+    };
+    const complaints = createComplaints({ db, config, reports, fetchImpl, gmail: { client, accounts: ['info@example.com'] }, log: quiet });
+    await complaints.run({ from: '2026-08-01', to: '2026-10-31' });
+    const st = await complaints.status();
+    const msgs = st.last_run.log.map((l) => l.msg);
+    assert.ok(msgs.some((m) => /2026\/09\/01.*skipped/.test(m)), 'the bad month is reported');
+    assert.ok(msgs.some((m) => /info@ email: [1-9]\d* candidate threads.*1 month\(s\) skipped/.test(m)), msgs.join(' | '));
+    assert.ok(searches >= 4, 'the bad month was retried once and the other months still searched');
+    await db.close();
   });
 });

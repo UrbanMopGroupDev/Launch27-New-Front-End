@@ -62,11 +62,14 @@ export function createKustomerClient({ apiKey, fetchImpl = fetch, sleep = (ms) =
   return { get, pages };
 }
 
-// The request shapes we try for "all objects of this klass", in order. Kustomer's docs weren't
-// reachable when this was written, so the first shape Kustomer accepts is used and remembered.
+// The request shapes we try for "all objects of this klass", in order; the first Kustomer
+// accepts with a list of records is used. The documented one comes first.
 export function listingCandidates(klass) {
   const name = encodeURIComponent(klass.name);
   const out = [
+    // Kustomer's documented "Get KObjects (custom objects)": GET /v1/klasses/{name}
+    // (confirmed from developer.kustomer.com by Derek, Nov 17 2026).
+    { label: 'documented', path: `/v1/klasses/${name}`, query: {} },
     { label: 'by name', path: `/v1/klasses/${name}/kobjects`, query: {} },
     { label: 'by name, paged', path: `/v1/klasses/${name}/kobjects`, query: { page: 1, pageSize: 100 } },
   ];
@@ -80,7 +83,12 @@ export async function findListing(client, klass) {
   for (const c of listingCandidates(klass)) {
     try {
       const body = await client.get(c.path, c.query);
-      attempts.push({ label: c.label, ok: true, rows: Array.isArray(body.data) ? body.data.length : 0 });
+      // A list of records, not the klass definition (a single object).
+      if (!Array.isArray(body?.data)) {
+        attempts.push({ label: c.label, ok: false, error: 'answered, but not with a list of records' });
+        continue;
+      }
+      attempts.push({ label: c.label, ok: true, rows: body.data.length });
       return { listing: c, first: body, attempts };
     } catch (err) {
       attempts.push({ label: c.label, ok: false, error: err.message });
