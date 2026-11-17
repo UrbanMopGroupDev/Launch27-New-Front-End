@@ -298,6 +298,7 @@ describe('complaints: Kustomer listing fallbacks', () => {
       const u = new URL(url);
       calls.push(u.pathname + u.search);
       if (u.pathname === '/v1/klasses') return res(200, { data: [{ id: 'k123', attributes: { name: 'complaint' } }] });
+      if (u.pathname === '/v1/klasses/complaint') return res(400, { errors: [{ title: 'Bad Param', detail: 'badparam' }] });
       if (u.pathname === '/v1/klasses/complaint/kobjects') return res(400, { errors: [{ title: 'Bad Request', detail: 'use the klass id, not name (ask a@b.com)' }] });
       if (u.pathname === '/v1/klasses/k123/kobjects') return res(200, { data: [{ id: 'o1', attributes: { createdAt: '2026-10-01T00:00:00Z', custom: { statusStr: 'For Review' } } }], links: { next: null } });
       return res(404, {});
@@ -305,8 +306,8 @@ describe('complaints: Kustomer listing fallbacks', () => {
     const client = createKustomerClient({ apiKey: 'x', fetchImpl, sleep: async () => {} });
     const d = await discover(client);
     assert.equal(d.listing.label, 'by id');
-    assert.equal(d.attempts.length, 3);
-    assert.match(d.attempts[0].error, /400 \(Bad Request: use the klass id/);
+    assert.equal(d.attempts.length, 4);
+    assert.match(d.attempts[1].error, /400 \(Bad Request: use the klass id/);
     assert.ok(!JSON.stringify(d).includes('a@b.com'), 'emails masked in error text');
     assert.equal(d.sample_count, 1);
   });
@@ -316,5 +317,27 @@ describe('complaints: Kustomer listing fallbacks', () => {
     const f = await findListing(client, { id: 'k1', name: 'complaint' });
     assert.equal(f.listing, null);
     assert.ok(f.attempts.every((a) => /403 \(Forbidden: missing org.permission.kobject.read\)/.test(a.error)));
+  });
+});
+
+describe('complaints: Kustomer documented listing', () => {
+  test('GET /v1/klasses/{name} is used first, and links.next is followed', async () => {
+    const res = (status, body) => ({ ok: status < 300, status, headers: { get: () => null }, json: async () => body });
+    const seen = [];
+    const fetchImpl = async (url) => {
+      const u = new URL(url);
+      seen.push(u.pathname + u.search);
+      if (u.pathname === '/v1/klasses') return res(200, { data: [{ id: 'k1', attributes: { name: 'complaint' } }] });
+      if (u.pathname === '/v1/klasses/complaint' && !u.search) return res(200, { data: [{ id: 'a', attributes: { createdAt: '2026-10-01T00:00:00Z', custom: {} } }], links: { next: '/v1/klasses/complaint?page=2' } });
+      if (u.pathname === '/v1/klasses/complaint' && u.search === '?page=2') return res(200, { data: [{ id: 'b', attributes: { createdAt: '2026-10-05T00:00:00Z', custom: {} } }], links: { next: null } });
+      return res(400, { errors: [{ title: 'Bad Param' }] });
+    };
+    const client = createKustomerClient({ apiKey: 'x', fetchImpl, sleep: async () => {} });
+    const d = await discover(client);
+    assert.equal(d.listing.label, 'documented');
+    const { listComplaints } = await import('../src/complaints/sources/kustomer.js');
+    const ids = [];
+    for await (const o of listComplaints(client, d.listing, { from: '2026-09-01', to: '2026-10-31' })) ids.push(o.id);
+    assert.deepEqual(ids, ['a', 'b']);
   });
 });
