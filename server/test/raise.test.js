@@ -302,8 +302,10 @@ describe('raise: monthly raise check', () => {
   test('a private bell notification per raise-ready cleaner, once a month, admins only', async () => {
     const db = await openDb();
     const config = { ...loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' }), raiseDigestEmails: '' };
-    const fetchImpl = createMockLaunch27({ password: 'demo' });
     let clock = Date.parse('2026-11-12T17:00:00Z'); // 12 pm Toronto
+    // The synthetic Launch27 builds its bookings around "today": pin it to the test's clock,
+    // or who looks raise-ready changes with the real date (it broke on Nov 17).
+    const fetchImpl = createMockLaunch27({ password: 'demo', now: () => clock });
     const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
     const reports = createReports({ db, config, fetchImpl, schedule, log: quiet, now: () => clock });
     await schedule.sync();
