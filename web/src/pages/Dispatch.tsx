@@ -77,16 +77,19 @@ export function DispatchPage() {
   const queryClient = useQueryClient();
   // The day, location and open booking live in the address (?date=…&loc=…&open=…), so coming
   // back from a booking (or reloading, or sharing the link) lands on the same view, not on today.
+  // Each day change is its own history entry, so the browser's Back button steps back through
+  // the days you looked at; opening a booking or switching location just updates the current one.
   const [params, setParams] = useSearchParams();
-  const setUrl = (patch: Record<string, string | null>) => {
+  const setUrl = (patch: Record<string, string | null>, push = false) => {
     const next = new URLSearchParams(params);
     for (const [k, v] of Object.entries(patch)) if (v) next.set(k, v); else next.delete(k);
-    setParams(next, { replace: true });
+    if (next.toString() === params.toString()) return;
+    setParams(next, { replace: !push });
   };
   const today = todayISO();
   const dateParam = params.get('date') || '';
   const date = /^\d{4}-\d{2}-\d{2}$/.test(dateParam) && !Number.isNaN(new Date(`${dateParam}T12:00:00`).getTime()) ? dateParam : today;
-  const setDate = (d: string) => setUrl({ date: d && d !== today ? d : null, open: null, team: null });
+  const setDate = (d: string) => setUrl({ date: d && d !== today ? d : null, open: null, team: null }, true);
   const locParam = params.get('loc');
   const locationId: number | 'all' | null = locParam === 'all' ? 'all' : locParam && Number.isInteger(Number(locParam)) ? Number(locParam) : null;
   const setLocationId = (l: number | 'all' | null) => setUrl({ loc: l === null ? null : String(l) });
