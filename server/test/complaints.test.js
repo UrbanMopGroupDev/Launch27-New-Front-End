@@ -341,3 +341,36 @@ describe('complaints: Kustomer documented listing', () => {
     assert.deepEqual(ids, ['a', 'b']);
   });
 });
+
+describe('complaints: info@ email by month', () => {
+  test('a month whose search keeps timing out is skipped; the other months are still read', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await schedule.sync();
+    await reports.sync();
+    let searches = 0;
+    const b64 = (s) => Buffer.from(s).toString('base64url');
+    const client = {
+      async search(account, q) {
+        searches++;
+        if (/after:2026\/09\/01/.test(q)) throw new Error('The operation was aborted due to timeout');
+        const m = q.match(/after:(\d{4})\/(\d\d)/);
+        return { ids: [`m-${m[1]}-${m[2]}`], next: null };
+      },
+      async message(account, id) {
+        return { id, threadId: `t-${id}`, internalDate: String(Date.parse('2026-09-15T12:00:00Z')), payload: { mimeType: 'text/plain', headers: [{ name: 'From', value: 'Pat Client <pat@example.com>' }, { name: 'Subject', value: 'Very disappointed' }], body: { data: b64('The kitchen was still dirty and the floors were missed. Unacceptable.') } } };
+      },
+    };
+    const complaints = createComplaints({ db, config, reports, fetchImpl, gmail: { client, accounts: ['info@example.com'] }, log: quiet });
+    await complaints.run({ from: '2026-08-01', to: '2026-10-31' });
+    const st = await complaints.status();
+    const msgs = st.last_run.log.map((l) => l.msg);
+    assert.ok(msgs.some((m) => /2026\/09\/01.*skipped/.test(m)), 'the bad month is reported');
+    assert.ok(msgs.some((m) => /info@ email: [1-9]\d* candidate threads.*1 month\(s\) skipped/.test(m)), msgs.join(' | '));
+    assert.ok(searches >= 4, 'the bad month was retried once and the other months still searched');
+    await db.close();
+  });
+});
