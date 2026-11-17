@@ -6,7 +6,7 @@ import { addDays, daysBetween, localDate, mondayOf } from '../schedule/rules.js'
 import { harmonizePartners } from '../commercial/partners.js';
 import { clampRange, utilizationFacts, utilizationReport } from './utilization.js';
 import { UTILIZATION } from './utilization-config.js';
-import { PERIODS, V2, cleanerRow, cleanerStats, emptyStats, mainBefore, flagsFor, indexVisits, median, outsideArea, pct, periodRange, regularClients, round1, sameCleaner, slimReportVisit, teamLong, timing, weeklySeries } from './compute.js';
+import { PERIODS, V2, findRecleans, cleanerRow, cleanerStats, emptyStats, mainBefore, flagsFor, indexVisits, median, outsideArea, pct, periodRange, regularClients, round1, sameCleaner, slimReportVisit, teamLong, timing, weeklySeries } from './compute.js';
 import { CHANGE_LOG_START, CHURN, DROP_REASONS, RAISE_THRESHOLDS } from './raise-config.js';
 import { ladderOf, raiseReview, rateHistory, reliability, reliabilityWeeks, restrictiveTags, slackSummary } from './raise.js';
 
@@ -468,16 +468,49 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
   // 2.0's "Losing clients": recurring clients who churned in the period (not Leslie's keeps).
   const churnFlag = (x) => (x.churned >= CHURN.flagAt ? [{ kind: 'losing', label: 'Losing clients', detail: `${x.churned} recurring client${x.churned === 1 ? '' : 's'} churned this period${x.at_risk ? `, ${x.at_risk} more at risk` : ''}` }] : []);
 
+  // Re-cleans found in the Launch27 visits, per cleaner of the original clean (cached per build).
+  const recleanCache = new Map();
+  function recleansFor(s) {
+    const k = `${s.taken_at}|${s.visits.length}`;
+    if (!recleanCache.has(k)) {
+      recleanCache.clear();
+      recleanCache.set(k, findRecleans(s.byCustomer));
+    }
+    return recleanCache.get(k);
+  }
+
+  // Reliability score: the share of their visits with no reliability issue. Issues are no-shows,
+  // late cancellations (< 24 h), short-notice drops (24–72 h) and visits with a missing check-in
+  // or check-out. Drops are only known from the change log's start (Oct 31, 2026).
+  function reliabilityScore(rel, visits) {
+    const drops = (rel.no_shows || 0) + (rel.last_minute || 0) + (rel.short_notice || 0);
+    const issues = drops + (rel.missing_checks || 0);
+    const base = visits + drops;
+    return {
+      score: base ? Math.round((1 - issues / base) * 1000) / 1000 : null,
+      issues,
+      no_shows: rel.no_shows,
+      late_cancels: rel.last_minute,
+      short_notice: rel.short_notice,
+      missing_checks: rel.missing_checks,
+      drops_known: rel.no_shows != null,
+    };
+  }
+
   // The 2.0 columns for one cleaner.
-  function extras2({ st, row, rel, side, churn, from, today, admin }) {
+  function extras2({ st, row, rel, side, churn, from, today, admin, recleans }) {
     const complaints = (side.complaints.get(st.id) || []).filter((c) => c.date >= from && c.date <= today);
     const lost = churn.known ? churn.byCleaner.get(st.id) || [] : null;
+    const rc = (recleans.get(st.id) || []).filter((e) => e.date >= from && e.date <= today);
     return {
+      reliability_score: reliabilityScore(rel, row.visits),
+      reclean_rate: row.visits ? Math.round((rc.length / row.visits) * 1000) / 1000 : null,
       engagement: row.visits ? Math.round((row.rated / row.visits) * 1000) / 1000 : null,
       churned: lost ? lost.filter((c) => c.status === 'churned' && c.churned_on >= from && c.churned_on <= today).length : null,
       at_risk: lost ? lost.filter((c) => c.status === 'at_risk').length : null,
       moved: (st.lost || []).filter((l) => l.to != null).length,
-      recleans: complaints.filter((c) => c.outcome === 'return clean').length,
+      // Re-cleans from Launch27 (Reclean service or $0 visit after their clean).
+      recleans: rc.length,
       complaints_n: complaints.length,
       // Reliability on 2.0: last-minute cancellations + no-shows only (null = not recorded yet).
       reliability2: rel.no_shows == null ? null : rel.no_shows + rel.last_minute,
@@ -498,6 +531,7 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
     const { ov, util } = await plannerView(locations);
     const info = new Map((ov?.rows || []).map((r) => [r.id, r]));
     const churn = await churnFor(s, today);
+    const recleans = recleansFor(s);
     const rows = [];
     for (const st of stats.values()) {
       const i = info.get(st.id);
@@ -505,7 +539,7 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
       const row = cleanerRow(st, { name: i?.name });
       const rel = reliability({ drops: side.drops.get(st.id) || [], checks: { missing: st.missing, late: [] }, from, to: today });
       const reviews = (side.reviews.get(st.id) || []).filter((g) => g.date >= from && g.date <= today);
-      const extra = extras2({ st, row, rel, side, churn, from, today, admin });
+      const extra = extras2({ st, row, rel, side, churn, from, today, admin, recleans });
       rows.push({
         ...extra,
         ...row,
@@ -576,7 +610,8 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
     const firstSeen = rates?.first || null;
     const rel = reliability({ drops: side.drops.get(cid) || [], checks: { missing: base.missing, late: base.lateList }, from, to: today });
     const churn = await churnFor(s, today);
-    const extra = extras2({ st: base, row, rel, side, churn, from, today, admin });
+    const recleans = recleansFor(s);
+    const extra = extras2({ st: base, row, rel, side, churn, from, today, admin, recleans });
     let raise;
     if (admin) {
       const st13 = stats13.get(cid) || emptyStats(cid, i?.name);
@@ -608,6 +643,7 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
       finished_early: [...base.earlyList].sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 30),
       complaints: (side.complaints.get(cid) || []).filter((c) => c.date >= from),
       google_reviews: side.reviews.get(cid) || [],
+      recleans: (recleans.get(cid) || []).filter((e) => e.date >= from && e.date <= today).sort((a, b) => (a.date < b.date ? 1 : -1)),
       churn: { known: churn.known, days: CHURN.days, clients: churn.known ? (churn.byCleaner.get(cid) || []).filter((c) => c.status === 'at_risk' || c.churned_on >= from) : [] },
       raise,
     };

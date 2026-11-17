@@ -65,6 +65,7 @@ export function slimReportVisit(booking, tt, fb) {
         program: partner?.program || null,
         addr: street || null,
         freq: (booking || b).frequency?.name || null,
+        services,
       };
     })(),
     location_id: Number(b.location?.id ?? b.location_id ?? booking?.location?.id) || null,
@@ -136,6 +137,45 @@ const inRange = (v, from, to) => v.date >= from && v.date <= to;
 export function periodRange(today, period) {
   const days = PERIODS[period] || PERIODS['13w'];
   return { from: addDays(today, -days), to: addDays(today, -1), days };
+}
+
+// Re-cleans from Launch27 (the same rule as the Complaint engine): a visit on the "Reclean"
+// service, or a $0 visit (not prepaid, not a partner), up to RECLEAN_DAYS after the client's
+// last regular clean. Charged to the cleaner(s) of that original clean, not whoever went back.
+export const RECLEAN_DAYS = 14;
+const RECLEAN_SERVICE = /\bre-?clean/i;
+export function isRecleanVisit(v) {
+  if ((v.services || []).some((n) => RECLEAN_SERVICE.test(n))) return 'service';
+  if ((v.revenue || 0) === 0 && !/prepaid/i.test(v.freq || '') && !v.partner_kind) return 'free';
+  return null;
+}
+export function findRecleans(byCustomer, days = RECLEAN_DAYS) {
+  const out = new Map(); // cleaner id -> [{ date, customer, original_date, how, by, visit_id }]
+  for (const list of byCustomer.values()) {
+    for (let i = 0; i < list.length; i++) {
+      const v = list[i];
+      const how = isRecleanVisit(v);
+      if (!how) continue;
+      // The client's last regular clean before it (same day allowed for the Reclean service).
+      let orig = null;
+      for (let j = i - 1; j >= 0; j--) {
+        const p = list[j];
+        const gap = daysBetween(p.date, v.date);
+        if (gap > days) break;
+        if (p.at >= v.at || isRecleanVisit(p)) continue;
+        if (how === 'free' && gap < 1) continue; // same-day $0 rows are usually a split booking
+        orig = p;
+        break;
+      }
+      if (!orig) continue;
+      const ev = { date: v.date, customer: v.customer, original_date: orig.date, how, by: v.teams.map((t) => t.name), visit_id: v.id };
+      for (const t of orig.teams) {
+        if (!out.has(t.id)) out.set(t.id, []);
+        out.get(t.id).push(ev);
+      }
+    }
+  }
+  return out;
 }
 
 // Same-cleaner share for recurring visits in a range (and week by week).

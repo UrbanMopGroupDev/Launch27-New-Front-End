@@ -603,6 +603,8 @@ export function createMockLaunch27({ password = 'demo', now = () => Date.now(), 
     const checkout = new Date(checkin.getTime() + duration * 60_000 * (shortcut ? 0.55 + (h % 15) / 100 : 0.85 + spread * 0.4));
     // Now and then a cleaner forgets to check out.
     const forgotCheckout = h % 67 === 3 && tIdx !== STAR_CLEANER - 9000;
+    // About 1 in 90 past recurring visits is a free re-clean (the Launch27 "Reclean" service, $0).
+    const isReclean = !!sp && past && h % 89 === 7;
     const rate = team ? (RAISED_AUG.has(tIdx) && date < RAISE_DATE ? team.share - 1 : team.share) : 0;
     // About half of visits have the cleaner tapping 'en route' (as in real data), with a drive distance.
     const tapsEnroute = r.next() < 0.5;
@@ -626,7 +628,7 @@ export function createMockLaunch27({ password = 'demo', now = () => Date.now(), 
       phone: c.phone,
       frequency: freq,
       payment_method_info: card ? { code: 'stripe', text: 'visa - 4242', brand: 'visa', last4: '4242' } : { code: 'check', text: 'Cash / cheque' },
-      services: [{ id: svc.id, name: svc.name, price: svc.price, extras: extras.map((x) => ({ ...x, total: x.price, recurring: false })), pricing_parameters: pp, commercial: svc.id === 21 }],
+      services: [{ id: svc.id, name: isReclean ? 'Reclean' : svc.name, price: isReclean ? 0 : svc.price, extras: extras.map((x) => ({ ...x, total: x.price, recurring: false })), pricing_parameters: pp, commercial: svc.id === 21 }],
       teams: unassigned ? [] : [{ id: team.id, title: team.title, image: null, share: rate, hours, earned: Math.round(rate * hours * 100) / 100, fg_color: '#000000', bg_color: team.bg_color }],
       staff_notes: sp?.notes || null,
       customer_notes: r.next() < 0.1 ? 'Please use the side door.' : null,
@@ -640,7 +642,7 @@ export function createMockLaunch27({ password = 'demo', now = () => Date.now(), 
         { id: 267, title: 'Parking on Premise?', type: 'drop_down', values: [{ id: 16, label: 'Yes', name: 'yes', other: '' }] },
         { id: 270, title: 'Any Pets?', type: 'drop_down', values: [{ id: 36, label: 'No Pets', name: 'no', other: '' }] },
       ],
-      summary: { services: svc.price, pricing_parameters: pp.reduce((s, p) => s + p.total, 0), extras: extras.reduce((s, x) => s + x.price, 0), discount, adjustment: 0, revenue, tax: { before_tax: revenue, tax_percent: 13, tax_amount: tax, after_tax: revenue + tax }, tip: 0, total: Math.round((revenue + tax) * 100) / 100 },
+      summary: isReclean ? { services: 0, pricing_parameters: 0, extras: 0, discount: 0, adjustment: 0, revenue: 0, tax: { before_tax: 0, tax_percent: 13, tax_amount: 0, after_tax: 0 }, tip: 0, total: 0 } : { services: svc.price, pricing_parameters: pp.reduce((s, p) => s + p.total, 0), extras: extras.reduce((s, x) => s + x.price, 0), discount, adjustment: 0, revenue, tax: { before_tax: revenue, tax_percent: 13, tax_amount: tax, after_tax: revenue + tax }, tip: 0, total: Math.round((revenue + tax) * 100) / 100 },
       actions: { edit: !past, cancel: !past, late_cancel: false, recurring_cancel: c.frequency.id !== 171 && !past, complete: past },
       time_tracking: tracking,
       charges: { charged, onhold: [], refunded: [], marked_paid: [], outstanding: past && !card ? Math.round((revenue + tax) * 100) / 100 : 0 },

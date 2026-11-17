@@ -1,7 +1,7 @@
 // Raise readiness on cleaner reports: the acceptance checks from the spec.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { V2, slimReportVisit, timing, indexVisits, cleanerStats, cleanerRow, flagsFor, teamLong } from '../src/reports/compute.js';
+import { V2, findRecleans, isRecleanVisit, slimReportVisit, timing, indexVisits, cleanerStats, cleanerRow, flagsFor, teamLong } from '../src/reports/compute.js';
 import { classifyDrop, ladderOf, raiseReview, rateHistory, reliability, reliabilityWeeks, restrictiveTags, slackSummary, torontoInstant } from '../src/reports/raise.js';
 import { RAISE_THRESHOLDS } from '../src/reports/raise-config.js';
 import { createReports } from '../src/reports/service.js';
@@ -385,13 +385,42 @@ describe('Cleaner reports 2.0 next to Leslie\'s', () => {
     }
     const row = v2.rows.find((r) => r.id === someone.id);
     assert.equal(row.reliability2, 2, 'one no-show + one last-minute cancellation');
-    assert.equal(row.recleans, 1);
+    // Reliability score: share of visits (+ dropped ones) with no issue; its parts are kept.
+    const rs = row.reliability_score;
+    assert.equal(rs.no_shows, 1);
+    assert.equal(rs.late_cancels, 1);
+    assert.equal(rs.issues, rs.no_shows + rs.late_cancels + rs.short_notice + rs.missing_checks);
+    assert.equal(rs.score, Math.round((1 - rs.issues / (row.visits + 2)) * 1000) / 1000);
     assert.equal(row.complaints_n, 2);
+    // Re-cleans come from Launch27 (the synthetic data has free "Reclean" visits).
+    assert.ok(v2.rows.reduce((a, r) => a + r.recleans, 0) > 0, 'some re-cleans found in the synthetic Launch27 data');
     assert.ok(row.margin_dollars > 0);
 
     const one = await reports.cleaner2(someone.id, '13w', { admin: true });
     assert.equal(one.churn.known, true);
     assert.ok(Array.isArray(one.churn.clients));
-    assert.equal(one.stats.recleans, 1);
+    assert.equal(one.recleans.length, one.stats.recleans);
+    const withRc = v2.rows.find((r) => r.recleans > 0);
+    const rcPage = await reports.cleaner2(withRc.id, '13w', { admin: true });
+    assert.ok(rcPage.recleans.every((e) => e.original_date <= e.date && e.how), 'each re-clean names the original clean');
+  });
+});
+
+describe('Re-cleans from Launch27', () => {
+  test('a Reclean service or a $0 visit within 14 days is charged to the original cleaner', () => {
+    const mk = (date, team, { revenue = 200, service = 'Standard Cleaning', freq = 'Biweekly', partner_kind = null } = {}) => ({ id: nextId++, date, at: Date.parse(`${date}T14:00:00Z`), customer: 'Client', customer_id: 1, revenue, services: [service], freq, partner_kind, teams: [{ id: team, name: `C${team}` }] });
+    const list = [
+      mk('2026-10-01', 7),
+      mk('2026-10-04', 8, { revenue: 0, service: 'Reclean' }), // Reclean 3 days later by someone else -> charged to 7
+      mk('2026-10-15', 7),
+      mk('2026-10-20', 7, { revenue: 0 }), // $0, 5 days later -> charged to 7
+      mk('2026-11-20', 9, { revenue: 0 }), // $0, 31 days after the last clean -> not a re-clean
+      mk('2026-11-25', 9, { revenue: 0, freq: 'Weekly - Prepaid' }), // prepaid $0 is normal
+    ];
+    const found = findRecleans(new Map([[1, list]]));
+    assert.deepEqual(found.get(7).map((e) => [e.date, e.original_date, e.how]), [['2026-10-04', '2026-10-01', 'service'], ['2026-10-20', '2026-10-15', 'free']]);
+    assert.equal(found.get(8), undefined, 'the cleaner who went back is not charged');
+    assert.equal(found.get(9), undefined);
+    assert.equal(isRecleanVisit(mk('2026-10-01', 7, { revenue: 0, partner_kind: 'homemaking' })), null, 'partner visits are billed differently');
   });
 });

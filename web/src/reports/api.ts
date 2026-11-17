@@ -99,6 +99,7 @@ export interface CleanerReport {
   last40: { date: string; late: number; long: boolean; enroute: boolean; customer: string }[];
 }
 
+export interface RecleanEvent { date: string; customer: string; original_date: string; how: 'service' | 'free'; by: string[]; visit_id: number | null }
 export interface ChurnClient { customer_id: number; customer: string; last_clean: string; days_since: number; freq: string | null; cleans: number; status: 'churned' | 'at_risk'; churned_on: string | null }
 
 // Cleaner reports 2.0: Leslie's report plus engagement, churn, margin, re-cleans and reliability.
@@ -146,6 +147,8 @@ export interface CleanerRow2 {
   recleans: number;
   complaints_n: number;
   reliability2: number | null;
+  reliability_score: { score: number | null; issues: number; no_shows: number | null; late_cancels: number | null; short_notice: number | null; missing_checks: number; drops_known: boolean };
+  reclean_rate: number | null;
   margin_dollars?: number;
   flags: Flag[];
 }
@@ -173,6 +176,7 @@ export interface CleanerReport2 {
   finished_early: { date: string; customer: string; short_min: number; visit_id: number }[];
   complaints: { id: number; subject: string | null; date: string; outcome: string | null; status: string | null; booking_id: number | null }[];
   google_reviews: GoogleReview[];
+  recleans: RecleanEvent[];
   churn: { known: boolean; days: number; clients: ChurnClient[] };
   raise?: RaiseReview;
   flags: Flag[];

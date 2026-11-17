@@ -11,7 +11,7 @@ import { Kpi, NotBuilt, PeriodPicker, ReportStatusLine, Spark, monthYear, weekLa
 const BASE = '/reports/cleaners-2';
 type CleanerRow = CleanerRow2;
 type CleanerReport = CleanerReport2;
-type SortKey = 'name' | 'visits' | 'hours_per_week' | 'hours_filled' | 'on_time' | 'happy' | 'engagement' | 'unhappy' | 'churned' | 'reliability2' | 'recleans' | 'google_reviews' | 'revenue' | 'earned' | 'margin';
+type SortKey = 'name' | 'visits' | 'hours_per_week' | 'hours_filled' | 'on_time' | 'happy' | 'engagement' | 'unhappy' | 'churned' | 'reliability' | 'rel_late' | 'rel_noshow' | 'rel_short' | 'rel_missing' | 'recleans' | 'google_reviews' | 'revenue' | 'earned' | 'margin';
 // [key, label, hover definition]
 const COLS: [SortKey, string, string][] = [
   ['name', 'Cleaner', ''],
@@ -23,16 +23,29 @@ const COLS: [SortKey, string, string][] = [
   ['engagement', 'Engagement', 'Engagement rate = rated visits ÷ visits. How often their clients give feedback.'],
   ['unhappy', 'Unhappy', 'Unhappy ratings in this period.'],
   ['churned', 'Churn', 'Churned = a recurring client with nothing booked ahead (schedule cancelled) and no clean for 60+ days, counted against their regular cleaner at the last clean, in the period it reached 60 days. At risk = nothing booked ahead, under 60 days so far.'],
-  ['reliability2', 'Reliability', 'Last-minute cancellations (under 24 h, cleaner-initiated) + no-shows. Recorded from Oct 31, 2026.'],
-  ['recleans', 'Re-cleans', 'Inbox complaints about them that ended in a return clean, in this period.'],
+  ['reliability', 'Reliability', 'Reliability score: the share of their visits with no issue. Issues = no-shows, late cancellations (under 24 h), short-notice drops (24–72 h) and missing check-ins/outs. Click + to see each. Drops are recorded from Oct 31, 2026.'],
+  ['recleans', 'Re-cleans', 'From Launch27: a Reclean visit, or a $0 visit, within 14 days after their clean. Counted against the cleaner of the original clean, not whoever went back.'],
   ['google_reviews', 'Google reviews', 'Google reviews naming them, recorded on their report, in this period.'],
   ['revenue', 'Revenue', 'Revenue from their visits (split evenly on team jobs).'],
-  ['earned', 'Paid', 'What we paid them for these visits (Launch27 team payments). Admins only.'],
+  ['earned', 'Earned', 'What they earned for these visits (Launch27 team payments). Admins only.'],
   ['margin', 'Margin', 'Revenue − their pay, in $ and as a share of revenue. Homemaking left out. Admins only.'],
 ];
 const ADMIN_COLS: SortKey[] = ['earned', 'margin'];
+// Shown after Reliability when it's expanded.
+const REL_PARTS: [SortKey, string, string][] = [
+  ['rel_late', 'Late cancels', 'They dropped a visit less than 24 hours before it (cleaner-initiated reasons only).'],
+  ['rel_noshow', 'No-shows', "They didn't turn up."],
+  ['rel_short', 'Short notice', 'They dropped a visit 24–72 hours before it.'],
+  ['rel_missing', 'Missing check-ins', 'Visits done with no check-in or no check-out.'],
+];
 
 const sortValue = (r: CleanerRow, k: SortKey): number | string | null => {
+  const rs = r.reliability_score;
+  if (k === 'reliability') return rs.score;
+  if (k === 'rel_late') return rs.late_cancels;
+  if (k === 'rel_noshow') return rs.no_shows;
+  if (k === 'rel_short') return rs.short_notice;
+  if (k === 'rel_missing') return rs.missing_checks;
   if (k === 'churned') return r.churned == null ? null : r.churned * 100 + (r.at_risk || 0);
   if (k === 'margin') return r.margin_dollars ?? null;
   return r[k as keyof CleanerRow] as number | string | null;
@@ -46,12 +59,62 @@ export function VerdictPill({ verdict, label }: { verdict: Verdict; label: strin
   return <span className={`rep-verdict v-${verdict}`}>{label}</span>;
 }
 
+const n = (x: number | null | undefined) => (x == null ? '—' : x || '—');
+
+function Cell({ k, c, admin }: { k: SortKey; c: CleanerRow; admin: boolean }) {
+  const rs = c.reliability_score;
+  switch (k) {
+    case 'name':
+      return (
+        <td className="rep-stick">
+          <div className="sch-who">
+            <span className="sch-dot" style={{ background: c.color }} aria-hidden="true" />
+            <div>
+              <Link to={`${BASE}/${c.id}`} className="seg-name">{c.name}</Link>
+              <div className="muted small">{[c.assignable ? (c.is_new ? 'New hire' : 'Active') : c.status_label, c.area, c.hours_type].filter(Boolean).join(' · ')}{c.flags.length ? ` · ${c.flags.length} flag${c.flags.length === 1 ? '' : 's'}` : ''}</div>
+            </div>
+          </div>
+        </td>
+      );
+    case 'visits': return <td className="num">{c.visits}</td>;
+    case 'hours_per_week': return <td className="num">{c.hours_per_week ?? '—'}</td>;
+    case 'hours_filled': return <td className={`num${c.hours_filled != null && c.hours_filled < 0.5 ? ' warn' : ''}`}>{pct(c.hours_filled)}</td>;
+    case 'on_time': return <td className={`num${c.on_time != null && c.on_time < 0.9 ? ' warn' : ''}`}>{pct(c.on_time)}</td>;
+    case 'happy':
+      return (
+        <td className="num">
+          {pct(c.happy)} <span className="muted small">of {c.rated}</span>
+          {stars(c.stars, c.ratings_count) && <div className="muted small" title="Launch27 star rating (all time)">{stars(c.stars, c.ratings_count)}</div>}
+        </td>
+      );
+    case 'engagement': return <td className="num">{pct(c.engagement)} <span className="muted small">{c.rated}/{c.visits}</span></td>;
+    case 'unhappy': return <td className={`num${c.unhappy >= 2 ? ' warn' : ''}`}>{c.unhappy}</td>;
+    case 'churned': return <td className={`num${c.churned ? ' warn' : ''}`}>{c.churned == null ? '—' : c.churned}{c.at_risk ? <span className="muted small"> · {c.at_risk}</span> : null}</td>;
+    case 'reliability':
+      return (
+        <td className={`num${rs.no_shows ? ' rep-bad' : rs.score != null && rs.score < 0.95 ? ' warn' : ''}`} title={reliabilityTitle(c)}>
+          {pct(rs.score)}<div className="muted small">{rs.issues ? `${rs.issues} issue${rs.issues === 1 ? '' : 's'}` : 'no issues'}</div>
+        </td>
+      );
+    case 'rel_late': return <td className={`num rep-sub${rs.late_cancels ? ' warn' : ''}`}>{rs.drops_known ? n(rs.late_cancels) : '—'}</td>;
+    case 'rel_noshow': return <td className={`num rep-sub${rs.no_shows ? ' rep-bad' : ''}`}>{rs.drops_known ? n(rs.no_shows) : '—'}</td>;
+    case 'rel_short': return <td className="num rep-sub">{rs.drops_known ? n(rs.short_notice) : '—'}</td>;
+    case 'rel_missing': return <td className="num rep-sub">{n(rs.missing_checks)}</td>;
+    case 'recleans': return <td className={`num${c.recleans ? ' warn' : ''}`}>{c.recleans || '—'}{c.recleans && c.reclean_rate != null ? <div className="muted small">{pct(c.reclean_rate, 1)} of visits</div> : null}</td>;
+    case 'google_reviews': return <td className="num">{c.google_reviews || '—'}</td>;
+    case 'revenue': return <td className="num mono">{money(c.revenue)}</td>;
+    case 'earned': return admin ? <td className="num mono">{money(c.earned)}</td> : null;
+    case 'margin': return admin ? <td className="num mono">{money(c.margin_dollars)}<div className="muted small">{pct(c.margin)}</div></td> : null;
+  }
+}
+
 export function CleanerReports2Page() {
   const [period, setPeriod] = useState<Period>('13w');
   const [scope, setScope] = useState<'active' | 'new' | 'flagged' | 'all'>('active');
   const [area, setArea] = useState<string>('');
   const [sort, setSort] = useState<SortKey>('visits');
   const [dir, setDir] = useState(-1);
+  const [relOpen, setRelOpen] = useState(false);
   const brand = useBrand();
   const q = useQuery({ queryKey: ['reports', 'cleaners2', period, brand.locationIds], queryFn: () => reportsApi.cleaners2(period, brand.locationIds), retry: false, placeholderData: (p) => p });
   const r = q.data;
@@ -66,7 +129,7 @@ export function CleanerReports2Page() {
     });
   }, [r, scope, area, sort, dir]);
   const flagged = (r?.rows || []).filter((x) => x.assignable && x.flags.length).slice(0, 9);
-  const cols = COLS.filter(([k]) => !ADMIN_COLS.includes(k) || r?.admin);
+  const cols = COLS.filter(([k]) => !ADMIN_COLS.includes(k) || r?.admin).flatMap((c) => (c[0] === 'reliability' && relOpen ? [c, ...REL_PARTS] : [c]));
   const scopes = [['active', 'Taking bookings'], ['new', 'New hires'], ['flagged', 'Has a flag'], ['all', 'Everyone with visits']] as const;
   return (
     <div className="seg-page">
@@ -83,10 +146,10 @@ export function CleanerReports2Page() {
       {r && (
         <>
           <div className="seg-stats">
+            <Kpi label="Engagement rate" value={pct(r.team.engagement, 1)} note={r.team.feedback_hours != null ? `of visits get rated · typically ${r.team.feedback_hours} h after the clean` : 'of visits get rated'} />
             <Kpi label="Typical cleaner" value={`${r.team.median_visits ?? '—'} visits`} note={`in this period (busiest: ${r.team.max_visits})`} />
             <Kpi label="On time, team" value={pct(r.team.on_time, 1)} note={`${r.team.check_ins} check-ins`} />
             <Kpi label="Happy ratings, team" value={pct(r.team.happy)} note="of rated visits" />
-            <Kpi label="Engagement rate" value={pct(r.team.engagement, 1)} note={r.team.feedback_hours != null ? `of visits get rated · typically ${r.team.feedback_hours} h after the clean` : 'of visits get rated'} />
             <Kpi label="Flagged" value={`${r.team.flagged} cleaner${r.team.flagged === 1 ? '' : 's'}`} note="worth a conversation" tone={r.team.flagged ? 'warn' : undefined} />
             <Kpi label="Churned" value={r.churn_known ? `${r.team.churned} client${r.team.churned === 1 ? '' : 's'}` : '—'} note={r.churn_known ? `${r.team.at_risk} more at risk (nothing booked ahead)` : 'needs the scheduling planner'} tone={r.team.churned ? 'warn' : undefined} />
             {r.admin && <Kpi label="Paid to cleaners" value={money(r.team.earned)} note={`on ${money(r.team.revenue)} revenue`} />}
@@ -121,15 +184,15 @@ export function CleanerReports2Page() {
 
           <section className="card flush">
             <div className="seg-table-head"><h2>Scorecard</h2><span className="muted small">{rows.length} cleaners · click a column to sort, a name for their report</span></div>
-            <div className="table-scroll">
-              <table className="seg-table rep-score">
+            <div className="rep-scroll" tabIndex={0} aria-label="Scorecard (scrolls sideways)">
+              <table className="seg-table rep-score rep-score2">
                 <thead>
                   <tr>
                     {cols.map(([k, l, def]) => (
-                      <th key={k} className={k === 'name' ? '' : 'num'} title={def || undefined}>
+                      <th key={k} className={`${k === 'name' ? 'rep-stick' : 'num'}${k.startsWith('rel_') ? ' rep-sub' : ''}`} title={def || undefined}>
                         <button className="rep-sort" onClick={() => { setDir(sort === k ? -dir : k === 'name' ? 1 : -1); setSort(k); }}>{l}{def ? <span className="rep-def" aria-hidden="true"> ⓘ</span> : null}{sort === k ? (dir < 0 ? ' ↓' : ' ↑') : ''}</button>
                         {k === 'churned' && <span className="rep-th-note">· at risk</span>}
-                        {k === 'reliability2' && <span className="rep-th-note">late cancels + no-shows</span>}
+                        {k === 'reliability' && <button className="rep-expand" aria-expanded={relOpen} onClick={() => setRelOpen(!relOpen)}>{relOpen ? '− hide detail' : '+ detail'}</button>}
                       </th>
                     ))}
                   </tr>
@@ -137,34 +200,7 @@ export function CleanerReports2Page() {
                 <tbody>
                   {rows.map((c) => (
                     <tr key={c.id}>
-                      <td>
-                        <div className="sch-who">
-                          <span className="sch-dot" style={{ background: c.color }} aria-hidden="true" />
-                          <div>
-                            <Link to={`${BASE}/${c.id}`} className="seg-name">{c.name}</Link>
-                            <div className="muted small">{[c.assignable ? (c.is_new ? 'New hire' : 'Active') : c.status_label, c.area, c.hours_type].filter(Boolean).join(' · ')}{c.flags.length ? ` · ${c.flags.length} flag${c.flags.length === 1 ? '' : 's'}` : ''}</div>
-                          </div>
-                        </div>
-                      </td>
-                      <td className="num">{c.visits}</td>
-                      <td className="num">{c.hours_per_week ?? '—'}</td>
-                      <td className={`num${c.hours_filled != null && c.hours_filled < 0.5 ? ' warn' : ''}`}>{pct(c.hours_filled)}</td>
-                      <td className={`num${c.on_time != null && c.on_time < 0.9 ? ' warn' : ''}`}>{pct(c.on_time)}</td>
-                      <td className="num">
-                        {pct(c.happy)} <span className="muted small">of {c.rated}</span>
-                        {stars(c.stars, c.ratings_count) && <div className="muted small" title="Launch27 star rating (all time)">{stars(c.stars, c.ratings_count)}</div>}
-                      </td>
-                      <td className="num">{pct(c.engagement)} <span className="muted small">{c.rated}/{c.visits}</span></td>
-                      <td className={`num${c.unhappy >= 2 ? ' warn' : ''}`}>{c.unhappy}</td>
-                      <td className={`num${c.churned ? ' warn' : ''}`}>{c.churned == null ? '—' : c.churned}{c.at_risk ? <span className="muted small"> · {c.at_risk}</span> : null}</td>
-                      <td className={`num${c.reliability.no_shows ? ' rep-bad' : c.reliability2 ? ' warn' : ''}`} title={reliabilityTitle(c)}>
-                        {c.reliability2 == null ? '—' : c.reliability2}{c.reliability.no_shows ? <span className="small"> · {c.reliability.no_shows} no-show</span> : null}
-                      </td>
-                      <td className={`num${c.recleans ? ' warn' : ''}`}>{c.recleans || '—'}</td>
-                      <td className="num">{c.google_reviews || '—'}</td>
-                      <td className="num mono">{money(c.revenue)}</td>
-                      {r.admin && <td className="num mono">{money(c.earned)}</td>}
-                      {r.admin && <td className="num mono">{money(c.margin_dollars)}<div className="muted small">{pct(c.margin)}</div></td>}
+                      {cols.map(([k]) => <Cell key={k} k={k} c={c} admin={!!r.admin} />)}
                     </tr>
                   ))}
                 </tbody>
@@ -184,9 +220,9 @@ export function CleanerReports2Page() {
 }
 
 function reliabilityTitle(c: CleanerRow) {
-  const r = c.reliability;
-  if (r.no_shows == null) return 'Last-minute cancellations and no-shows are recorded from Oct 31, 2026.';
-  return `${r.no_shows} no-show${r.no_shows === 1 ? '' : 's'}, ${r.last_minute} last-minute cancellation${r.last_minute === 1 ? '' : 's'}${r.partial ? ` (since ${r.covers_from})` : ''}. Also on their report: ${r.short_notice} short-notice drops, ${r.missing_checks} missing check-ins/outs.${r.uncoded ? ` ${r.uncoded} drop${r.uncoded === 1 ? '' : 's'} still need a reason.` : ''}`;
+  const rs = c.reliability_score;
+  const drops = rs.drops_known ? `${rs.no_shows} no-show${rs.no_shows === 1 ? '' : 's'}, ${rs.late_cancels} late cancel${rs.late_cancels === 1 ? '' : 's'}, ${rs.short_notice} short-notice drop${rs.short_notice === 1 ? '' : 's'}` : 'Drops recorded from Oct 31, 2026';
+  return `${drops}, ${rs.missing_checks} missing check-in/out.${c.reliability.uncoded ? ` ${c.reliability.uncoded} drop${c.reliability.uncoded === 1 ? '' : 's'} still need a reason.` : ''}`;
 }
 
 const GRADE_ICON: Record<Grade, string> = { ready: '✓', watch: '△', not_yet: '✗', neutral: '·' };
@@ -354,6 +390,30 @@ function ReviewsCard({ r }: { r: CleanerReport }) {
   );
 }
 
+function RecleansCard({ r }: { r: CleanerReport }) {
+  if (!r.recleans.length) return null;
+  return (
+    <section className="card rep-card" id="recleans">
+      <h2>Re-cleans <span className="muted small">· from Launch27</span></h2>
+      <table className="rep-mini">
+        <thead><tr><th>Re-clean</th><th>Client</th><th>After their clean on</th><th>How we know</th><th>Who went back</th></tr></thead>
+        <tbody>
+          {r.recleans.map((e) => (
+            <tr key={`${e.visit_id}-${e.date}`}>
+              <td>{shortDate(e.date)}</td>
+              <td>{e.customer}</td>
+              <td>{shortDate(e.original_date)}</td>
+              <td className="small">{e.how === 'service' ? 'Reclean service' : '$0 visit'}</td>
+              <td className="small">{e.by.join(' & ') || '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <span className="muted small">A Reclean visit, or a $0 visit that isn't prepaid, within 14 days after their clean. Counted against the cleaner of the original clean. Same rule as the Complaint engine.</span>
+    </section>
+  );
+}
+
 function ChurnCard({ r }: { r: CleanerReport }) {
   const ch = r.churn;
   const churned = ch.clients.filter((x) => x.status === 'churned');
@@ -434,7 +494,8 @@ export function CleanerReport2Page() {
         <div className="card seg-stat"><span className="muted small">Finished early</span><span className={s.finished_early != null && s.finished_early > 0.2 ? 'seg-stat-value rep-warn' : 'seg-stat-value'}>{s.residential ? pct(s.finished_early) : '—'}</span><span className="small">{s.residential ? `${s.early_n} of ${s.residential} residential cleans, 30+ min under` : 'no residential solo cleans'}</span></div>
         <div className="card seg-stat" title="Rated visits ÷ visits"><span className="muted small">Engagement</span><span className="seg-stat-value">{pct(s.engagement)}</span><span className="small">{s.rated} of {s.visits} visits rated</span></div>
         <div className="card seg-stat" title="Recurring clients with nothing booked ahead: churned at 60+ days without a clean, at risk before that"><span className="muted small">Churn</span><span className={s.churned ? 'seg-stat-value rep-warn' : 'seg-stat-value'}>{s.churned == null ? '—' : s.churned}</span><span className="small">{s.churned == null ? 'needs the scheduling planner' : `churned · ${s.at_risk} at risk · ${s.moved} moved to another cleaner`}</span></div>
-        <div className="card seg-stat" title="Last-minute cancellations (under 24 h) + no-shows"><span className="muted small">Reliability</span><span className={s.reliability2 ? 'seg-stat-value rep-warn' : 'seg-stat-value'}>{s.reliability2 == null ? '—' : s.reliability2}</span><span className="small">{r.reliability.no_shows ?? '—'} no-shows · {r.reliability.last_minute ?? '—'} last-minute · {s.recleans} re-clean{s.recleans === 1 ? '' : 's'}</span></div>
+        <div className="card seg-stat" title="Share of their visits with no reliability issue"><span className="muted small">Reliability</span><span className={s.reliability_score.score != null && s.reliability_score.score < 0.95 ? 'seg-stat-value rep-warn' : 'seg-stat-value'}>{pct(s.reliability_score.score)}</span><span className="small">{r.reliability.no_shows ?? '—'} no-shows · {r.reliability.last_minute ?? '—'} late cancels · <a href="#reliability">detail</a></span></div>
+        <div className="card seg-stat" title="Launch27: a Reclean visit, or a $0 visit, within 14 days after their clean"><span className="muted small">Re-cleans</span><span className={s.recleans ? 'seg-stat-value rep-warn' : 'seg-stat-value'}>{s.recleans}</span><span className="small">{s.recleans ? <>{pct(s.reclean_rate, 1)} of visits · <a href="#recleans">which ones</a></> : 'none in this period'}</span></div>
         {r.admin && <div className="card seg-stat" title="Revenue − their pay. Homemaking left out."><span className="muted small">Margin <span className="small">· admins</span></span><span className="seg-stat-value">{money(s.margin_dollars)}</span><span className="small">{pct(s.margin)} of {money(s.revenue)} revenue</span></div>}
         <div className="card seg-stat"><span className="muted small">Drive per visit</span><span className="seg-stat-value">{s.km_per_visit == null ? '—' : `${s.km_per_visit} km`}</span><span className="small">taps en route on {pct(s.enroute)} of visits</span></div>
       </div>
@@ -458,6 +519,7 @@ export function CleanerReport2Page() {
         </div>
       </div>
 
+      <RecleansCard r={r} />
       <ChurnCard r={r} />
 
       {r.raise && <RaisePanel r={r.raise} name={c.name} />}
