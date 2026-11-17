@@ -1,11 +1,11 @@
 // Utilization (read-only report; everyone can see it): of the hours cleaners have open,
-// how much is already spoken for (assigned, unassigned, travel) and how much is left to book.
+// how much is already committed (assigned, unassigned, travel) and how many open hours remain.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { useBrand } from '../brands/useBrand';
 import { brandLabel } from '../brands/ui';
-import { reportsApi, pct, type DataFlag, type UtilFigures, type UtilizationReport } from '../reports/api';
+import { reportsApi, pct, type DataCheck, type DataFlag, type UtilFigures, type UtilizationReport } from '../reports/api';
 import { weekLabel } from '../reports/ui';
 
 const AREAS = ['Central', 'North', 'South', 'East', 'West'];
@@ -44,7 +44,7 @@ export function UtilizationPage() {
         <div className="seg-head">
           <span className="small muted">Reports</span>
           <h1>Utilization{brand.view !== 'both' && <span className="muted"> · {brandLabel(brand.view)}</span>}</h1>
-          <p className="muted">How much of our cleaners' open time is already spoken for, and how much is left to book. Monday to Saturday.</p>
+          <p className="muted">How much of our cleaners' hours are already committed, and how many open hours remain. Monday to Saturday.</p>
         </div>
         {r && <RangePicker value={range || { from: r.from, to: r.to }} onChange={setRange} today={r.today} minFrom={r.min_from || r.today} maxTo={r.max_to} />}
       </header>
@@ -111,6 +111,10 @@ function DataCheckView({ r, area, otherBrand: ob }: { r: UtilizationReport; area
   const [only, setOnly] = useState<DataFlag | null>(null);
   const rows = dc.cleaners.filter((c) => (!area || c.area === area) && (!only || c.flags.some((f) => f.kind === only)));
   const flagged = dc.cleaners.filter((c) => c.flags.length).length;
+  const dsort = useSort<DataCheck['cleaners'][number]>(rows, {
+    name: (c) => c.name, flags: (c) => c.flags.length, status: (c) => c.status_label, area: (c) => c.area,
+    weekly: (c) => c.weekly_hours, available: (c) => c.available_h, booked: (c) => c.booked_h,
+  });
   const when = dc.refreshed_at ? new Date(dc.refreshed_at).toLocaleString('en-CA', { dateStyle: 'medium', timeStyle: 'short' }) : '—';
   return (
     <>
@@ -134,9 +138,9 @@ function DataCheckView({ r, area, otherBrand: ob }: { r: UtilizationReport; area
         <div className="seg-table-head"><h2>By cleaner{area && ` · ${area}`}</h2><span className="muted small">Cleaners taking bookings, plus anyone else with bookings in these dates. Problems first.</span></div>
         <div className="table-scroll">
           <table className="seg-table">
-            <thead><tr><th>Cleaner</th><th>What to check</th><th>Status</th><th>Area</th><th className="num">Weekly hours in Launch27</th><th className="num">Available</th><th className="num">Booked</th></tr></thead>
+            <thead><tr>{dsort.th('name', 'Cleaner')}{dsort.th('flags', 'What to check', true)}{dsort.th('status', 'Status')}{dsort.th('area', 'Area')}{dsort.th('weekly', 'Weekly hours in Launch27', true)}{dsort.th('available', 'Cleaner hours', true)}{dsort.th('booked', 'Booked', true)}</tr></thead>
             <tbody>
-              {rows.map((c) => (
+              {dsort.sorted.map((c) => (
                 <tr key={c.cleaner_id}>
                   <td>
                     <Link to={`/schedule/cleaner/${c.cleaner_id}`} className="seg-name">{c.name}</Link>
@@ -268,29 +272,77 @@ function Calendar({ value, min, max, onChange }: { value: { from: string; to: st
   );
 }
 
+// ---------- sorting: click a column header; click again to reverse ----------
+type SortDir = 'asc' | 'desc';
+function useSort<T>(rows: T[], keys: Record<string, (row: T) => string | number | null | undefined>, initial: string | null = null, initialDir: SortDir = 'desc') {
+  const [sort, setSort] = useState<{ key: string | null; dir: SortDir }>({ key: initial, dir: initialDir });
+  const sorted = useMemo(() => {
+    if (!sort.key || !keys[sort.key]) return rows;
+    const get = keys[sort.key];
+    const m = sort.dir === 'asc' ? 1 : -1;
+    return [...rows].sort((x, y) => {
+      const a = get(x), b = get(y);
+      if (a == null && b == null) return 0;
+      if (a == null) return 1; // blanks last either way
+      if (b == null) return -1;
+      return (typeof a === 'number' && typeof b === 'number' ? a - b : String(a).localeCompare(String(b))) * m;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, sort.key, sort.dir]);
+  const th = (key: string, label: string, num = false) => {
+    const on = sort.key === key;
+    return (
+      <th className={`${num ? 'num ' : ''}ut-sortable`} aria-sort={on ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+        <button type="button" onClick={() => setSort(on ? { key, dir: sort.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: num ? 'desc' : 'asc' })}>
+          {label}<span className="ut-sort-arrow" aria-hidden>{on ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : ' ↕'}</span>
+        </button>
+      </th>
+    );
+  };
+  return { sorted, th };
+}
+
 // ---------- report ----------
+type AreaRow = UtilizationReport['areas'][number];
+type CleanerRowU = UtilizationReport['cleaners'][number];
+type DayRow = UtilFigures & { date: string };
 function Report({ r, area, setArea, otherBrand: ob }: { r: UtilizationReport; area: string | null; setArea: (a: string | null) => void; otherBrand: string }) {
   const a = area ? r.areas.find((x) => x.area === area) : null;
   const f: UtilFigures = a || r.totals;
-  const cleaners = area ? r.cleaners.filter((c) => c.area === area) : r.cleaners;
-  const days = r.by_day.map((d) => ({ date: d.date, ...(area ? d.areas[area] : d) }));
+  const cleaners = useMemo(() => (area ? r.cleaners.filter((c) => c.area === area) : r.cleaners), [r.cleaners, area]);
+  const days = useMemo<DayRow[]>(() => r.by_day.map((d) => ({ ...(area ? d.areas[area] : d), date: d.date })), [r.by_day, area]);
+  const [drill, setDrill] = useState<'unassigned' | 'not_taking' | null>(null);
+  const areaSort = useSort<AreaRow>(r.areas, {
+    area: (x) => x.area, cleaners: (x) => x.cleaners, customers: (x) => x.customers, available: (x) => x.available_h, assigned: (x) => x.assigned_h,
+    unassigned: (x) => x.unassigned_h, travel: (x) => x.travel_h, left: (x) => x.left_h, util: (x) => x.utilization, room: (x) => x.room_bookings,
+  });
+  const daySort = useSort<DayRow>(days, { date: (x) => x.date, available: (x) => x.available_h, committed: (x) => x.spoken_h, left: (x) => x.left_h, util: (x) => x.utilization, room: (x) => x.room_bookings });
+  const cleanerSort = useSort<CleanerRowU>(cleaners, {
+    name: (x) => x.name, area: (x) => x.area, available: (x) => x.available_h, assigned: (x) => x.assigned_h, travel: (x) => x.travel_h,
+    left: (x) => x.left_h, util: (x) => x.utilization, ifleft: (x) => (x.area_short ? 1e9 : x.if_left),
+  }, 'util');
   return (
     <>
-      <Summary r={r} f={f} area={area} />
+      <Summary r={r} f={f} area={area} onDrill={setDrill} drill={drill} />
+      {drill && <NeedsCleaner r={r} area={area} kind={drill} onKind={setDrill} onClose={() => setDrill(null)} />}
       <section className="card flush">
-        <div className="seg-table-head"><h2>By area</h2><span className="muted small">Cleaners by home address; unassigned visits by the client's address. "Room for" = about how many more typical bookings fit. Click a row to focus on it.</span></div>
+        <div className="seg-table-head"><h2>By area</h2><span className="muted small">Cleaners by home address; unassigned visits by the client's address. "Room for" = about how many more typical bookings fit. Click a row to focus on it; click a heading to sort.</span></div>
         <div className="table-scroll">
           <table className="seg-table">
-            <thead><tr><th>Area</th><th className="num">Cleaners</th><th className="num">Customers</th><th className="num">Available</th><th className="num">Assigned</th><th className="num">Unassigned</th><th className="num">Travel</th><th className="num">Left to book</th><th>Utilization</th><th className="num">Room for</th></tr></thead>
+            <thead><tr>{areaSort.th('area', 'Area')}{areaSort.th('cleaners', 'Cleaners', true)}{areaSort.th('customers', 'Customers', true)}{areaSort.th('available', 'Cleaner hours', true)}{areaSort.th('assigned', 'Assigned', true)}{areaSort.th('unassigned', 'Unassigned', true)}{areaSort.th('travel', 'Travel', true)}{areaSort.th('left', 'Open hours remaining', true)}{areaSort.th('util', 'Utilization')}{areaSort.th('room', 'Room for', true)}</tr></thead>
             <tbody>
-              {r.areas.map((x) => (
+              {areaSort.sorted.map((x) => (
                 <tr key={x.area} className={`clickable${area === x.area ? ' ut-row-on' : ''}`} onClick={() => setArea(area === x.area ? null : x.area)}>
                   <td><span className="seg-swatch" style={{ background: AREA_COLOR[x.area] || '#94a3b8' }} /> {x.area}</td>
                   <td className="num">{x.cleaners}</td>
                   <td className="num">{x.customers}</td>
                   <td className="num">{h(x.available_h)}</td>
                   <td className="num">{h(x.assigned_h)}</td>
-                  <td className="num">{h(x.unassigned_h)}{x.unassigned_visits ? <span className="muted small"> · {x.unassigned_visits}</span> : null}</td>
+                  <td className="num">
+                    {x.unassigned_visits ? (
+                      <button type="button" className="ut-link" title="See these bookings" onClick={(e) => { e.stopPropagation(); setArea(x.area); setDrill('unassigned'); }}>{h(x.unassigned_h)} · {x.unassigned_visits}</button>
+                    ) : h(x.unassigned_h)}
+                  </td>
                   <td className="num">{h(x.travel_h)}</td>
                   <td className={`num${x.left_h < 0 ? ' warn' : ''}`}><b>{x.left_h < 0 ? `over by ${h(-x.left_h)}` : h(x.left_h)}</b></td>
                   <td><UtilBar u={x.utilization} /></td>
@@ -307,12 +359,12 @@ function Report({ r, area, setArea, otherBrand: ob }: { r: UtilizationReport; ar
       </section>
 
       <section className="card flush">
-        <div className="seg-table-head"><h2>By day{area && ` · ${area}`}</h2><span className="muted small">Some days fill up before others: book into the days with hours left.</span></div>
+        <div className="seg-table-head"><h2>By day{area && ` · ${area}`}</h2><span className="muted small">Some days fill up before others: book into the days with open hours remaining.</span></div>
         <div className="table-scroll ut-days">
           <table className="seg-table compact">
-            <thead><tr><th>Day</th><th className="num">Available</th><th className="num">Spoken for</th><th className="num">Left to book</th><th>Utilization</th><th className="num">Room for</th></tr></thead>
+            <thead><tr>{daySort.th('date', 'Day')}{daySort.th('available', 'Cleaner hours', true)}{daySort.th('committed', 'Committed', true)}{daySort.th('left', 'Open hours remaining', true)}{daySort.th('util', 'Utilization')}{daySort.th('room', 'Room for', true)}</tr></thead>
             <tbody>
-              {days.map((d) => (
+              {daySort.sorted.map((d) => (
                 <tr key={d.date}>
                   <td>{dayName(d.date)}</td>
                   <td className="num">{h(d.available_h)}</td>
@@ -329,12 +381,12 @@ function Report({ r, area, setArea, otherBrand: ob }: { r: UtilizationReport; ar
       </section>
 
       <section className="card flush">
-        <div className="seg-table-head"><h2>By cleaner{area && ` · ${area}`}</h2><span className="muted small">Fullest first. "If they left" = their booked + travel hours ÷ their area's hours left; over 100% means the area couldn't absorb their work.</span></div>
+        <div className="seg-table-head"><h2>By cleaner{area && ` · ${area}`}</h2><span className="muted small">Fullest first. "If they left" = their booked + travel hours ÷ their area's open hours remaining; over 100% means the area couldn't absorb their work.</span></div>
         <div className="table-scroll">
           <table className="seg-table">
-            <thead><tr><th>Cleaner</th><th>Area</th><th className="num">Available</th><th className="num">Assigned</th><th className="num">Travel</th><th className="num">Left to book</th><th>Utilization</th><th className="num">If they left</th></tr></thead>
+            <thead><tr>{cleanerSort.th('name', 'Cleaner')}{cleanerSort.th('area', 'Area')}{cleanerSort.th('available', 'Cleaner hours', true)}{cleanerSort.th('assigned', 'Assigned', true)}{cleanerSort.th('travel', 'Travel', true)}{cleanerSort.th('left', 'Open hours remaining', true)}{cleanerSort.th('util', 'Utilization')}{cleanerSort.th('ifleft', 'If they left', true)}</tr></thead>
             <tbody>
-              {cleaners.map((x) => (
+              {cleanerSort.sorted.map((x) => (
                 <tr key={x.cleaner_id}>
                   <td><Link to={`/reports/cleaners/${x.cleaner_id}`} className="seg-name">{x.name}</Link>{x.status_label && x.status_label !== 'Active' && <span className="seg-trait">{x.status_label}</span>}</td>
                   <td className="muted">{x.area}</td>
@@ -362,8 +414,57 @@ function Report({ r, area, setArea, otherBrand: ob }: { r: UtilizationReport; ar
   );
 }
 
+// ---------- drill-down: the bookings that still need a cleaner ----------
+type NeedRow = UtilizationReport['needs_cleaner'][number];
+function NeedsCleaner({ r, area, kind, onKind, onClose }: { r: UtilizationReport; area: string | null; kind: 'unassigned' | 'not_taking'; onKind: (k: 'unassigned' | 'not_taking') => void; onClose: () => void }) {
+  const all = useMemo(() => r.needs_cleaner.filter((x) => !area || x.area === area), [r.needs_cleaner, area]);
+  const rows = useMemo(() => all.filter((x) => x.kind === kind), [all, kind]);
+  const counts = { unassigned: all.filter((x) => x.kind === 'unassigned').length, not_taking: all.filter((x) => x.kind === 'not_taking').length };
+  const sort = useSort<NeedRow>(rows, { date: (x) => `${x.date} ${String(x.start).padStart(4, '0')}`, customer: (x) => x.customer, area: (x) => x.area, hours: (x) => x.hours, freq: (x) => x.freq, cleaner: (x) => x.cleaner }, 'date', 'asc');
+  const ref = useRef<HTMLElement>(null);
+  useEffect(() => { ref.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, []);
+  const time = (min: number) => { const hh = Math.floor(min / 60), mm = min % 60; return `${hh % 12 || 12}${mm ? `:${pad(mm)}` : ''}${hh >= 12 ? 'pm' : 'am'}`; };
+  return (
+    <section className="card flush ut-drill" ref={ref}>
+      <div className="seg-table-head">
+        <div>
+          <h2>{kind === 'unassigned' ? 'Bookings with no cleaner yet' : 'Bookings on cleaners not taking bookings'}{area && ` · ${area}`}</h2>
+          <span className="muted small">{dayName(r.from)} – {dayName(r.to)} · Monday to Saturday · {kind === 'unassigned' ? 'these still need a cleaner assigned' : 'their cleaner is on hold / not ready, so these need moving'}</span>
+        </div>
+        <div className="ut-drill-actions">
+          <div className="seg-period" role="tablist">
+            <button className={kind === 'unassigned' ? 'active' : ''} onClick={() => onKind('unassigned')}>No cleaner yet · {counts.unassigned}</button>
+            <button className={kind === 'not_taking' ? 'active' : ''} onClick={() => onKind('not_taking')}>To move · {counts.not_taking}</button>
+          </div>
+          <Link to="/schedule" className="small">Open the Scheduling planner →</Link>
+          <button className="icon-button" aria-label="Close" onClick={onClose}>✕</button>
+        </div>
+      </div>
+      <div className="table-scroll ut-days">
+        <table className="seg-table compact">
+          <thead><tr>{sort.th('date', 'When')}{sort.th('customer', 'Client')}{sort.th('area', 'Area')}{sort.th('hours', 'Length', true)}{sort.th('freq', 'Frequency')}{kind === 'not_taking' && sort.th('cleaner', 'Current cleaner')}<th>Booking</th></tr></thead>
+          <tbody>
+            {sort.sorted.map((x) => (
+              <tr key={`${x.kind}${x.key}`}>
+                <td>{dayName(x.date)} · {time(x.start)}</td>
+                <td>{x.customer || '—'}{x.address && <div className="small muted">{x.address}</div>}</td>
+                <td className="muted">{x.area}</td>
+                <td className="num">{h(x.hours)}</td>
+                <td className="muted">{x.freq || '—'}</td>
+                {kind === 'not_taking' && <td>{x.cleaner || '—'}</td>}
+                <td>{x.booking_id ? <Link to={`/bookings/${x.booking_id}`}>Open</Link> : <span className="muted small" title="A future visit of a recurring booking that Launch27 hasn't created yet">Projected</span>}</td>
+              </tr>
+            ))}
+            {rows.length === 0 && <tr><td colSpan={7} className="muted">None in these dates{area ? ` for ${area}` : ''}.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 // The headline: plain-English sentence, the simple math, one bar.
-function Summary({ r, f, area }: { r: UtilizationReport; f: UtilFigures; area: string | null }) {
+function Summary({ r, f, area, onDrill, drill }: { r: UtilizationReport; f: UtilFigures; area: string | null; onDrill: (k: 'unassigned' | 'not_taking' | null) => void; drill: 'unassigned' | 'not_taking' | null }) {
   const over = f.left_h < 0;
   const parts = [
     { key: 'assigned', label: 'Assigned', value: f.assigned_h, color: PART.assigned },
@@ -378,12 +479,12 @@ function Summary({ r, f, area }: { r: UtilizationReport; f: UtilFigures; area: s
       <span className="muted small">{when} · {area ? `${area} Ottawa` : 'All areas'}</span>
       <div className="ut-headline">
         <div>
-          <span className={`ut-big${over ? ' warn' : ''}`}>{over ? `${r.past ? 'Overbooked' : 'Over'} by ${h(-f.left_h)}` : r.past ? `${h(f.left_h)} went unbooked` : `${h(f.left_h)} left to book`}</span>
+          <span className={`ut-big${over ? ' warn' : ''}`}>{over ? `${r.past ? 'Overbooked' : 'Over'} by ${h(-f.left_h)}` : r.past ? `${h(f.left_h)} went unused` : `${h(f.left_h)} open hours remaining`}</span>
           <span className="ut-sub">
             {over
               ? (r.past ? 'More work was booked than cleaners had open hours.' : 'More work is booked than cleaners have open hours.')
               : r.past
-                ? 'Past dates: open hours that no booking used.'
+                ? 'Past dates: cleaner hours that no booking used.'
                 : f.room_bookings
                 ? <>Room for about <b>{f.room_bookings} more bookings</b> (a typical {h(f.typical_booking_h)} visit plus about {r.avg_leg_min} min of driving).</>
                 : 'No room for another typical booking.'}
@@ -391,41 +492,44 @@ function Summary({ r, f, area }: { r: UtilizationReport; f: UtilFigures; area: s
         </div>
         <div className="ut-util">
           <span className="ut-big">{pct(f.utilization)}</span>
-          <span className="ut-sub">utilized: {h(f.spoken_h)} of {h(f.available_h)} spoken for</span>
+          <span className="ut-sub">utilized: {h(f.spoken_h)} of {h(f.available_h)} committed</span>
         </div>
       </div>
       <div className="ut-math" aria-label="How the hours add up">
-        <MathTile label="Available to assign" value={h(f.available_h)} note={f.closed_h ? `after ${h(f.closed_h)} of closed dates` : 'cleaners taking bookings'} />
+        <MathTile label="Total cleaner hours" value={h(f.available_h)} note={f.closed_h ? `after ${h(f.closed_h)} of closed dates` : 'cleaners taking bookings'} />
         <span className="ut-op">−</span>
         <MathTile label="Assigned" value={h(f.assigned_h)} color={PART.assigned} />
         <span className="ut-op">−</span>
-        <MathTile label="Unassigned" value={h(f.unassigned_h)} note={`${f.unassigned_visits} ${f.unassigned_visits === 1 ? 'visit' : 'visits'} · sales-to-ops handoff gap`} color={PART.unassigned} />
-        {!!f.not_taking_h && <><span className="ut-op">−</span><MathTile label="On cleaners not taking bookings" value={h(f.not_taking_h)} note={`${f.not_taking_visits} ${f.not_taking_visits === 1 ? 'visit' : 'visits'} to move`} color={PART.not_taking} /></>}
+        <MathTile label="Unassigned" onClick={f.unassigned_visits ? () => onDrill(drill === 'unassigned' ? null : 'unassigned') : undefined} active={drill === 'unassigned'} value={h(f.unassigned_h)} note={`${f.unassigned_visits} ${f.unassigned_visits === 1 ? 'visit' : 'visits'} · sales-to-ops handoff gap`} color={PART.unassigned} />
+        {!!f.not_taking_h && <><span className="ut-op">−</span><MathTile label="On cleaners not taking bookings" onClick={() => onDrill(drill === 'not_taking' ? null : 'not_taking')} active={drill === 'not_taking'} value={h(f.not_taking_h)} note={`${f.not_taking_visits} ${f.not_taking_visits === 1 ? 'visit' : 'visits'} to move`} color={PART.not_taking} /></>}
         <span className="ut-op">−</span>
         <MathTile label="Travel (est.)" value={h(f.travel_h)} note="each cleaner's route, home and back" color={PART.travel} />
         <span className="ut-op">=</span>
-        <MathTile label={r.past ? 'Unbooked' : 'Left to book'} value={over ? `−${h(-f.left_h)}` : h(f.left_h)} strong />
+        <MathTile label={r.past ? 'Unused hours' : 'Open hours remaining'} value={over ? `−${h(-f.left_h)}` : h(f.left_h)} strong />
       </div>
-      <div className="ut-bar" role="img" aria-label={`${pct(f.utilization)} of available hours spoken for`}>
+      <div className="ut-bar" role="img" aria-label={`${pct(f.utilization)} of cleaner hours committed`}>
         {parts.map((p) => p.value > 0 && <span key={p.key} title={`${p.label}: ${h(p.value)}`} style={{ width: `${(p.value / scale) * 100}%`, background: p.color }} />)}
-        {!over && f.left_h > 0 && <span className="ut-bar-left" title={`Left to book: ${h(f.left_h)}`} style={{ width: `${(f.left_h / scale) * 100}%` }} />}
+        {!over && f.left_h > 0 && <span className="ut-bar-left" title={`Open hours remaining: ${h(f.left_h)}`} style={{ width: `${(f.left_h / scale) * 100}%` }} />}
       </div>
       <ul className="ut-legend small">
         {parts.map((p) => <li key={p.key}><span className="seg-swatch" style={{ background: p.color }} />{p.label}</li>)}
-        <li><span className="seg-swatch ut-swatch-left" />{r.past ? 'Unbooked' : 'Left to book'}</li>
+        <li><span className="seg-swatch ut-swatch-left" />{r.past ? 'Unused hours' : 'Open hours remaining'}</li>
       </ul>
     </section>
   );
 }
 
-function MathTile({ label, value, note, color, strong }: { label: string; value: string; note?: string; color?: string; strong?: boolean }) {
-  return (
-    <div className={`ut-tile${strong ? ' strong' : ''}`}>
+function MathTile({ label, value, note, color, strong, onClick, active }: { label: string; value: string; note?: string; color?: string; strong?: boolean; onClick?: () => void; active?: boolean }) {
+  const body = (
+    <>
       <span className="muted small">{color && <span className="seg-swatch" style={{ background: color }} />} {label}</span>
       <b>{value}</b>
       {note && <span className="small muted">{note}</span>}
-    </div>
+      {onClick && <span className="small ut-tile-link">{active ? 'Hide the list ▲' : 'See the bookings ▼'}</span>}
+    </>
   );
+  if (onClick) return <button type="button" className={`ut-tile ut-tile-btn${active ? ' active' : ''}`} onClick={onClick} aria-expanded={active}>{body}</button>;
+  return <div className={`ut-tile${strong ? ' strong' : ''}`}>{body}</div>;
 }
 
 function UtilBar({ u }: { u: number | null }) {

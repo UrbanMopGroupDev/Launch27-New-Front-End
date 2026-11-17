@@ -119,14 +119,14 @@ export function utilizationFacts({ today, start = today, cleaners, visits, holid
     const addrArea = areaOf({ lat: v.lat, lng: v.lng });
     if (brand && v.customer_id != null) customers.push({ d: v.date, sunday, customer: v.customer_id, recurring: v.kind !== 'one', area: addrArea });
     if (!v.team_ids.length) {
-      loose.push({ kind: 'unassigned', d: v.date, sunday, brand, area: addrArea, hours: v.duration, travel: 0, key: v.key });
+      loose.push({ kind: 'unassigned', d: v.date, sunday, brand, area: addrArea, hours: v.duration, travel: 0, key: v.key, v });
       continue;
     }
     if (!brand) continue;
     for (const id of v.team_ids) {
       if (takingIds.has(id)) continue;
       const c = byId.get(id);
-      loose.push({ kind: 'not_taking', d: v.date, sunday, brand, area: c?.area || addrArea, hours: share(v, id), travel: 0, cid: id, key: v.key });
+      loose.push({ kind: 'not_taking', d: v.date, sunday, brand, area: c?.area || addrArea, hours: share(v, id), travel: 0, cid: id, key: v.key, v, cleaner: c?.name || null });
     }
   }
   // Visits not on a taking cleaner have no route of their own: one average leg each.
@@ -264,6 +264,7 @@ export function utilizationReport({ facts, from, to, maxTo, minFrom = null, cfg 
     data_check: dataCheck({ facts, inWin, cleaners: allCleaners, source }),
     totals: { ...rounded(all), cleaners: facts.taking.length, customers: new Set(cust.map((x) => x.customer)).size, customers_recurring: new Set(cust.filter((x) => x.recurring).map((x) => x.customer)).size },
     areas, cleaners, by_day: byDay, trend, reconcile,
+    needs_cleaner: needsCleaner(facts, inWin),
   };
 }
 
@@ -328,4 +329,23 @@ export function dataCheck({ facts, inWin, cleaners = [], source = {} }) {
   rows.sort((a, b) => rank(a) - rank(b) || b.booked_h - a.booked_h || a.name.localeCompare(b.name));
   const counts = Object.fromEntries(FLAG_ORDER.map((k) => [k, rows.filter((r) => r.flags.some((f) => f.kind === k)).length]));
   return { refreshed_at: source.full_at || null, read_by: source.cleaners_by || null, counts, labels: FLAG, cleaners: rows };
+}
+
+// The bookings behind "Unassigned" (no cleaner yet) and "On cleaners not taking bookings" (to move),
+// in the chosen dates, Monday to Saturday, for the drill-down list.
+export function needsCleaner(facts, inWin) {
+  const seen = new Set();
+  const out = [];
+  for (const x of facts.loose) {
+    if (x.sunday || !x.brand || !inWin(x.d) || !x.v) continue;
+    const k = `${x.kind}|${x.key}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const v = x.v;
+    out.push({
+      kind: x.kind, key: v.key, booking_id: v.id || null, projected: !v.id, date: v.date, start: v.start, hours: r1(v.duration / 60),
+      customer: v.customer || null, area: x.area, freq: v.freq || null, address: v.addr || null, cleaner: x.cleaner || null,
+    });
+  }
+  return out.sort((a, b) => a.date.localeCompare(b.date) || a.start - b.start).slice(0, 1000);
 }
