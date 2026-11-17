@@ -11,7 +11,7 @@ export interface DispatchBooking {
   arrival_window?: number | string;
   duration?: number; // minutes
   active?: boolean;
-  user?: { id?: number; name?: string; email?: string };
+  user?: { id?: number; name?: string; email?: string; tags_info?: { id: number; name: string }[] | null };
   phone?: string;
   address?: { full_address?: string; street?: string; city?: string; latitude?: number | null; longitude?: number | null };
   location?: { id?: number; name?: string };
