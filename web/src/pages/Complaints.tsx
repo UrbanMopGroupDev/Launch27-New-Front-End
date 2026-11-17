@@ -72,6 +72,7 @@ const RUN_LABEL: Record<string, { text: string; cls: string }> = {
   done: { text: 'Finished', cls: 'ok' },
   partial: { text: 'Finished with problems', cls: 'warn' },
   failed: { text: 'Failed', cls: 'neg' },
+  interrupted: { text: 'Interrupted (the app restarted): run again for the rest', cls: 'warn' },
 };
 const clock = (s: string) => new Date(s).toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' });
 

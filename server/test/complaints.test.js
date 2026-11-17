@@ -374,3 +374,72 @@ describe('complaints: info@ email by month', () => {
     await db.close();
   });
 });
+
+describe('complaints: cut-off runs', () => {
+  test('a run left running by a restart is marked interrupted; what it saved stays', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await schedule.sync();
+    await reports.sync();
+    const complaints = createComplaints({ db, config, reports, fetchImpl, log: quiet });
+    const snap = await reports.visitsSnapshot();
+    const from = new Date(Date.parse(snap.to) - 182 * 86_400_000).toISOString().slice(0, 10);
+    await complaints.run({ from, to: snap.to });
+    const saved = (await complaints.listCases({ from, to: snap.to })).length;
+    assert.ok(saved > 0);
+    // Simulate a restart mid-run: a run row left 'running'.
+    await db.query("INSERT INTO complaint_runs (window_from, window_to, status, log) VALUES ($1, $2, 'running', '[]')", [from, snap.to]);
+    assert.equal(await complaints.markInterrupted(), 1);
+    const st = await complaints.status();
+    assert.equal(st.last_run.status, 'interrupted');
+    assert.match(st.last_run.log.at(-1).msg, /Interrupted/);
+    assert.equal((await complaints.listCases({ from, to: snap.to })).length, saved, 'saved cases are kept');
+    assert.equal(await complaints.markInterrupted(), 0, 'nothing left to mark');
+    assert.ok((await db.query('SELECT log FROM complaint_runs WHERE id = (SELECT min(id) FROM complaint_runs)')).rows[0].log.some((l) => /Launch27 ratings: \d+ complaint cases? saved/.test(l.msg)), 'each source reports what it saved');
+    await db.close();
+  });
+});
+
+describe('complaints: faster classification', () => {
+  test('info@ is screened by rules before Claude, and Claude calls run several at a time', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await schedule.sync();
+    await reports.sync();
+    const b64 = (s) => Buffer.from(s).toString('base64url');
+    const bodies = { a: 'The kitchen was still dirty and the floors were missed. Unacceptable.', b: 'Hi, can we move Tuesday to Wednesday? Thanks', c: 'Really disappointed, the bathroom was skipped again.' };
+    const client = {
+      async search(account, q) {
+        return /after:2026\/10\/01/.test(q) ? { ids: ['a', 'b', 'c'], next: null } : { ids: [], next: null };
+      },
+      async message(account, id) {
+        return { id, threadId: `t-${id}`, internalDate: String(Date.parse('2026-10-05T12:00:00Z')), payload: { mimeType: 'text/plain', headers: [{ name: 'From', value: `Client ${id} <${id}@example.com>` }, { name: 'Subject', value: 'Cleaning' }], body: { data: b64(bodies[id]) } } };
+      },
+    };
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const seen = [];
+    const classifier = async (text) => {
+      seen.push(text);
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 20));
+      inFlight--;
+      return { is_complaint: true, category: 'quality_missed', tone: 'frustrated', severity: 2, areas: [], hard_route: null, summary: 'x', confidence: 0.9 };
+    };
+    const complaints = createComplaints({ db, config, reports, fetchImpl, gmail: { client, accounts: ['info@example.com'] }, classifier, log: quiet });
+    await complaints.run({ from: '2026-10-01', to: '2026-10-31' });
+    assert.ok(!seen.some((t) => /move Tuesday/.test(t)), 'a scheduling email never reaches Claude');
+    assert.ok(seen.some((t) => /bathroom was skipped/.test(t)));
+    assert.ok(maxInFlight > 1, 'Claude calls overlap');
+    const st = await complaints.status();
+    assert.ok(st.last_run.log.some((l) => /info@ email: 2 complaint cases saved \(1 screened out/.test(l.msg)), st.last_run.log.map((l) => l.msg).join(' | '));
+    await db.close();
+  });
+});
