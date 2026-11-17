@@ -1960,3 +1960,17 @@ a.rep-factor:hover b { text-decoration: underline; }
 .ut-link { background: none; border: 0; padding: 0; font: inherit; color: var(--accent-ink); text-decoration: underline; cursor: pointer; }
 .ut-drill .seg-table-head { align-items: flex-start; }
 .ut-drill-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+/* Commercial › Workforce plan: Cleaner details and Where cleaners live */
+.wf-postal { width: 110px; text-transform: uppercase; }
+.wf-hpanel { padding: 4px 16px 12px; display: grid; gap: 8px; }
+.wf-hrow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.wf-hlist { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.wf-hpick { display: inline-flex; flex-direction: row; align-items: center; gap: 6px; margin: 0; font-size: 13.5px; color: var(--text); cursor: pointer; }
+.wf-hpick input { width: auto; margin: 0; }
+.wf-hpick.nohome { opacity: .6; cursor: default; }
+.wf-home-chip { background: #dcfce7; color: #15803d; }
+.wf-homes-map { width: auto; margin: 0 16px 12px; overflow: hidden; }
+.wf-home-label { background: none; border: 0; }
+.wf-home-label span { display: inline-block; transform: translate(-50%, -50%); white-space: nowrap; background: #fff; color: #14532d; border: 1px solid #15803d; border-radius: 6px; padding: 2px 7px; font-size: 12px; font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.15); }
+.wf-pets-note { width: 170px; }

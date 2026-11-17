@@ -4,7 +4,7 @@
 // choices (migration 0017). Never writes to Launch27.
 import { readFileSync } from 'node:fs';
 import { addDays, mondayOf, km } from '../schedule/rules.js';
-import { DEFAULT_SETTINGS, commercialTest, computeSlots, partnerSnapshot, planWeek, suggestSlots, teamStats } from './workforce-core.js';
+import { DEFAULT_SETTINGS, commercialTest, computeSlots, partnerSnapshot, planWeek, suggestSlots, teamStats, withDetails } from './workforce-core.js';
 
 // Centre of each "K" postal area (© GeoNames, CC BY 4.0), to place a new client from a postal code.
 const FSA = JSON.parse(readFileSync(new URL('./data/postal-area-centres.json', import.meta.url), 'utf8'));
@@ -12,6 +12,14 @@ const PARTNER_FILE = readFileSync(new URL('./data/partner-file.html', import.met
 const TRAVEL = { on: true, roadFactor: 1.3, kmh: 35, sameAreaKm: 2, minGap: 10 };
 const STATUSES = ['proposed', 'approved', 'done', 'hold'];
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
+const PET = ['ok', 'no'];
+/** A Canadian postal code, tidied ("k1c2b3" -> "K1C 2B3"); the first three characters alone are accepted. */
+export function tidyPostal(v) {
+  const s = String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (/^[A-Z]\d[A-Z]\d[A-Z]\d$/.test(s)) return `${s.slice(0, 3)} ${s.slice(3)}`;
+  if (/^[A-Z]\d[A-Z]$/.test(s)) return s;
+  return null;
+}
 
 export const fsaOfPostal = (pc) => {
   const s = String(pc || '').toUpperCase().replace(/\s/g, '').slice(0, 3);
@@ -43,15 +51,17 @@ export function createWorkforce({ db, schedule }) {
     if (!s) throw bad('The scheduling planner has not loaded Launch27 yet. Open Scheduling planner and click "Refresh now".', 409);
     if (!locations?.length) throw bad('No Commercial locations: set them under Support settings → Brands.');
     const set = await settings();
-    const rows = (await db.query("SELECT cleaner_id, commercial, to_char(last_day, 'YYYY-MM-DD') AS last_day FROM commercial_cleaners")).rows;
+    const rows = (await db.query("SELECT cleaner_id, commercial, to_char(last_day, 'YYYY-MM-DD') AS last_day, gender, home_postal, pets_dogs, pets_cats, pets_other, pets_note FROM commercial_cleaners")).rows;
     const ticks = new Map(rows.filter((r) => r.commercial !== null).map((r) => [Number(r.cleaner_id), r.commercial]));
     const lastDay = new Map(rows.filter((r) => r.last_day).map((r) => [Number(r.cleaner_id), r.last_day]));
+    const details = new Map(rows.map((r) => [Number(r.cleaner_id), r]));
+    const cleaners = withDetails(s.cleaners, details); // the lead's gender entries win over Launch27's codes
     const moves = (await db.query("SELECT series_key, status, assignee_id, to_char(ends_on, 'YYYY-MM-DD') AS ends_on FROM commercial_moves")).rows;
     const state = new Map(moves.map((m) => [m.series_key, { status: m.status, assignee_id: m.assignee_id == null ? null : Number(m.assignee_id), ends_on: m.ends_on }]));
     const isCom = commercialTest(locations);
-    const team = teamStats({ visits: s.visits, cleaners: s.cleaners, today: s.today, isCom, ticks, lastDay, threshold: set.threshold });
+    const team = teamStats({ visits: s.visits, cleaners, today: s.today, isCom, ticks, lastDay, threshold: set.threshold });
     return {
-      today: s.today, taken_at: s.taken_at, visits: s.visits, cleaners: s.cleaners, windowFor: schedule._window, isCom, team, state, settings: set,
+      today: s.today, taken_at: s.taken_at, visits: s.visits, cleaners, windowFor: schedule._window, isCom, team, state, settings: set, details,
       prefsFor: (id) => s.customers.get(id)?.prefs || null,
     };
   }
@@ -65,7 +75,17 @@ export function createWorkforce({ db, schedule }) {
 
   async function team({ locations }) {
     const ctx = await context(locations);
-    return { today: ctx.today, taken_at: ctx.taken_at, threshold: ctx.settings.threshold, cleaners: ctx.team };
+    // Details stay inside the portal: they are never put into a partner file.
+    const cleaners = ctx.team.map((t) => {
+      const d = ctx.details.get(t.id) || {};
+      const fsa = fsaOfPostal(d.home_postal);
+      return {
+        ...t,
+        home_postal: d.home_postal || null, home_fsa: fsa || null, home_place: fsa ? FSA[fsa][2] : null,
+        pets: { dogs: d.pets_dogs || null, cats: d.pets_cats || null, other: d.pets_other || null, note: d.pets_note || '' },
+      };
+    });
+    return { today: ctx.today, taken_at: ctx.taken_at, threshold: ctx.settings.threshold, cleaners };
   }
 
   async function plan({ week, locations }) {
@@ -113,14 +133,27 @@ export function createWorkforce({ db, schedule }) {
   }
 
   // ---------- the team's choices ----------
-  async function setCleaner(id, { commercial, last_day }, userId = null) {
+  /** The lead's choices for one cleaner. Each field is optional; null clears it. */
+  async function setCleaner(id, { commercial, last_day, gender, home_postal, pets_dogs, pets_cats, pets_other, pets_note } = {}, userId = null) {
     const cid = Number(id);
     if (!Number.isInteger(cid) || cid <= 0) throw bad('No such cleaner.', 404);
     if (commercial !== undefined && commercial !== null && typeof commercial !== 'boolean') throw bad('commercial must be true, false or null.');
     if (last_day !== undefined && last_day !== null && !DATE.test(String(last_day))) throw bad('last_day must be a date (YYYY-MM-DD).');
+    if (gender !== undefined && gender !== null && !['F', 'M'].includes(gender)) throw bad('gender must be F, M or null.');
+    let postal = home_postal;
+    if (postal !== undefined && postal !== null && postal !== '') {
+      postal = tidyPostal(postal);
+      if (!postal) throw bad('Enter a home postal code like K1C 2B3 (the first three characters are enough).');
+    } else if (postal === '') postal = null;
+    const pets = { pets_dogs, pets_cats, pets_other };
+    for (const [k, v] of Object.entries(pets)) if (v !== undefined && v !== null && !PET.includes(v)) throw bad(`${k} must be ok, no or null.`);
+    // Column names below come from this fixed list, never from the request.
+    const changes = [['commercial', commercial], ['last_day', last_day], ['gender', gender], ['home_postal', postal], ...Object.entries(pets),
+      ['pets_note', pets_note === undefined ? undefined : String(pets_note || '').trim().slice(0, 200) || null]].filter(([, v]) => v !== undefined);
     await db.query('INSERT INTO commercial_cleaners (cleaner_id, set_by) VALUES ($1, $2) ON CONFLICT (cleaner_id) DO NOTHING', [cid, userId]);
-    if (commercial !== undefined) await db.query('UPDATE commercial_cleaners SET commercial = $2, set_by = $3, set_at = now() WHERE cleaner_id = $1', [cid, commercial, userId]);
-    if (last_day !== undefined) await db.query('UPDATE commercial_cleaners SET last_day = $2, set_by = $3, set_at = now() WHERE cleaner_id = $1', [cid, last_day, userId]);
+    for (const [col, v] of changes) await db.query(`UPDATE commercial_cleaners SET ${col} = $2, set_by = $3, set_at = now() WHERE cleaner_id = $1`, [cid, v, userId]);
+    // Dispatch and the scheduling planner use the entered gender too.
+    if (gender !== undefined) await schedule.gendersChanged?.();
   }
 
   async function setMove(key, { status, assignee_id, ends_on }, userId = null) {

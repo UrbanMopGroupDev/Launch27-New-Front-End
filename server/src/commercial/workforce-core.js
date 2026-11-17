@@ -104,10 +104,34 @@ export function teamStats({ visits, cleaners, today, isCom, ticks = new Map(), l
       location_ids: s ? [...s.locations.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id) : [],
       has_hours: (c.availability || []).some((r) => !r.date && !r.dayoff && r.start_time && r.end_time),
       last_day: lastDay.get(c.id) || null,
+      // Gender as planned with: the lead's entry (withDetails) wins over the Launch27 team-name code.
+      gender: c.gender || null,
+      gender_launch27: c.gender_launch27 !== undefined ? c.gender_launch27 : c.gender || null,
+      gender_source: c.gender_set ? 'platform' : c.gender ? 'launch27' : null,
     });
   }
   return rows.sort((a, b) => Number(b.commercial) - Number(a.commercial) || b.commercial_hours - a.commercial_hours);
 }
+
+/**
+ * Cleaners with the lead's own entries applied. Launch27 has no gender field (only an (F)/(M)
+ * code in some team names), so a gender entered in the portal replaces it. Returns copies: the
+ * planner's snapshot is shared and must not change.
+ */
+export function withDetails(cleaners, details = new Map()) {
+  return cleaners.map((c) => {
+    const g = details.get(c.id)?.gender;
+    if (!g) return c;
+    // The scheduler may already have applied it; keep Launch27's own value either way.
+    return { ...c, gender: g, gender_launch27: c.gender_launch27 !== undefined ? c.gender_launch27 : c.gender || null, gender_set: true };
+  });
+}
+
+/** The cleaner gender a client asked for (Launch27 tags and Staff Notes): 'F', 'M' or null. */
+export const genderWanted = (prefs) => (prefs?.femaleOnly || prefs?.prefersFemale ? 'F' : prefs?.prefersMale ? 'M' : null);
+/** 0 = fits the client's wish (or there is none), 1 = cleaner's gender unknown, 2 = the other gender. */
+export const genderRank = (wanted, gender) => (!wanted ? 0 : !gender ? 1 : gender === wanted ? 0 : 2);
+const GENDER_FIT = ['match', 'unknown', 'other'];
 
 // ---------- the weekly plan ----------
 /**
@@ -256,9 +280,11 @@ export function planWeek(ctx, weekStart) {
       continue;
     }
     const able = comTeam.map((t) => t.id).filter((id) => feasible(id, s));
-    const scored = able.map((id) => ({ ...who(id), added_km: addedKm(id, s), served: !!served.get(s.account)?.has(id), free: free(id) }));
-    scored.sort((x, y) => Number(y.served) - Number(x.served) || (x.added_km ?? 1e9) - (y.added_km ?? 1e9) || y.free - x.free);
-    a.candidates = scored.slice(0, 4).map(({ free: f, ...rest }) => ({ ...rest, free_hours: r1(f / 60) }));
+    // Best first: the client's gender wish, then knows the account, then least extra driving, then most free time.
+    const wanted = genderWanted(ctx.prefsFor?.(s.customer_id));
+    const scored = able.map((id) => ({ ...who(id), added_km: addedKm(id, s), served: !!served.get(s.account)?.has(id), free: free(id), g: genderRank(wanted, byId.get(id)?.gender) }));
+    scored.sort((x, y) => x.g - y.g || Number(y.served) - Number(x.served) || (x.added_km ?? 1e9) - (y.added_km ?? 1e9) || y.free - x.free);
+    a.candidates = scored.slice(0, 4).map(({ free: f, g, ...rest }) => ({ ...rest, free_hours: r1(f / 60), gender_fit: wanted ? GENDER_FIT[g] : null }));
     const pick = a.assignee && able.includes(a.assignee) ? a.assignee : scored[0]?.id;
     if (pick) {
       a.kind = 'move';
@@ -283,7 +309,11 @@ export function planWeek(ctx, weekStart) {
   };
   const unassignedOut = unassigned.map((s) => {
     const occs = s.occ.filter((o) => !o.cleaners.length);
-    const rank = (pool) => pool.filter((id) => feasible(id, s, occs)).map((id) => ({ ...who(id), near: nearest(id, s, occs) })).sort((x, y) => (x.near?.km ?? 1e9) - (y.near?.km ?? 1e9)).slice(0, 3);
+    const wanted = genderWanted(ctx.prefsFor?.(s.customer_id));
+    const rank = (pool) => pool.filter((id) => feasible(id, s, occs))
+      .map((id) => ({ ...who(id), near: nearest(id, s, occs), g: genderRank(wanted, byId.get(id)?.gender) }))
+      .sort((x, y) => x.g - y.g || (x.near?.km ?? 1e9) - (y.near?.km ?? 1e9)).slice(0, 3)
+      .map(({ g, ...rest }) => ({ ...rest, gender_fit: wanted ? GENDER_FIT[g] : null }));
     const com = rank(comTeam.map((t) => t.id));
     return { ...seriesOut(s), dates: occs.map((o) => o.date), visit_keys: occs.map((o) => o.key), commercial: com, others: com.length ? [] : rank(mixed) };
   });

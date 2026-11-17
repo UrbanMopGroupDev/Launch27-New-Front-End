@@ -18,6 +18,12 @@ describe('customerPrefs', () => {
     expect(soft.prefers).toEqual([]);
   });
 
+  it('reads "no male cleaner" as a wish for a female cleaner', () => {
+    const p = customerPrefs(['NO MALE cleaner']);
+    expect([p.prefersFemale, p.prefersMale]).toEqual([true, false]);
+    expect(customerPrefs(['Prefers male cleaner']).prefersMale).toBe(true);
+  });
+
   it('copes with missing tags', () => {
     expect(prefChips(undefined)).toEqual([]);
     expect(prefChips([null, { name: null }, { name: 'VIP' }])).toEqual([]);

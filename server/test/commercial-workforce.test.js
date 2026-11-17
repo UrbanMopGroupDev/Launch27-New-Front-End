@@ -1,7 +1,9 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { classify, commercialTest, computeSlots, DEFAULT_SETTINGS, partnerSnapshot, planWeek, suggestSlots, teamStats } from '../src/commercial/workforce-core.js';
-import { createWorkforce, fsaOfPostal, nearestFsa } from '../src/commercial/workforce.js';
+import { classify, commercialTest, computeSlots, DEFAULT_SETTINGS, genderRank, genderWanted, partnerSnapshot, planWeek, suggestSlots, teamStats, withDetails } from '../src/commercial/workforce-core.js';
+import { noteHints } from '../src/commercial/partners.js';
+import { customerPrefs } from '../src/schedule/rules.js';
+import { createWorkforce, fsaOfPostal, nearestFsa, tidyPostal } from '../src/commercial/workforce.js';
 import { openDb } from '../src/db/index.js';
 import { loadConfig } from '../src/config.js';
 import { createApp } from '../src/app.js';
@@ -98,6 +100,43 @@ describe('commercial workforce: rules', () => {
     assert.deepEqual([plan.totals.nocover, plan.peak, plan.totals.nocover_hours], [2, { Tue: 2 }, 4]);
   });
 
+  test("the client's gender wish ranks first; a gender entered in the portal replaces Launch27's", () => {
+    const visits = [
+      visit('2026-11-03', 540, 120, [1]), // 1 has served Carefor (would win on "knows the account")
+      visit('2026-11-04', 540, 120, [2], { partner_name: 'OWCS Homemaking', services: ['OWCS Homemaking'] }),
+      res('2026-11-05', 540, 480, [3]), res('2026-11-06', 540, 480, [3]),
+      visit('2026-11-17', 600, 120, [3], { customer_id: -500 }),
+    ];
+    const cleaners = [cleaner(1, 'Knows Him', { gender: 'M' }), cleaner(2, 'New Her', { gender: null }), cleaner(3, 'Res Holder')];
+    const prefs = (p) => ({ prefsFor: () => ({ avoid: [], ...p }) });
+    const pick = (cs, p = {}, details) => {
+      const list = details ? withDetails(cs, details) : cs;
+      const a = planWeek({ ...ctxOf(visits, list), ...prefs(p) }, WEEK).actions[0];
+      return [a.pick.name, a.candidates.map((c) => c.gender_fit)];
+    };
+    // No wish: knowing the account wins, and no gender fit is shown.
+    assert.deepEqual(pick(cleaners), ['Knows Him', [null, null]]);
+    // Wants a female cleaner: unknown gender beats the wrong one.
+    assert.deepEqual(pick(cleaners, { prefersFemale: true }), ['New Her', ['unknown', 'other']]);
+    // The lead enters "F" for cleaner 2 in the portal: now a match.
+    const details = new Map([[2, { gender: 'F' }]]);
+    assert.deepEqual(pick(cleaners, { prefersFemale: true }, details), ['New Her', ['match', 'other']]);
+    const mine = withDetails(cleaners, details);
+    assert.deepEqual([mine[1].gender, mine[1].gender_launch27, mine[1].gender_set, cleaners[1].gender], ['F', null, true, null]); // the snapshot is untouched
+    const team = teamStats({ visits, cleaners: mine, today: TODAY, isCom });
+    assert.deepEqual(team.map((t) => [t.name, t.gender, t.gender_source]).sort(), [['Knows Him', 'M', 'launch27'], ['New Her', 'F', 'platform'], ['Res Holder', 'F', 'launch27']]);
+    assert.deepEqual([genderWanted({ femaleOnly: true }), genderWanted({ prefersMale: true }), genderWanted(null), genderRank('F', 'M'), genderRank(null, 'M')], ['F', 'M', null, 2, 0]);
+  });
+
+  test('"NO male cleaner" in Staff Notes or a tag means a female cleaner', () => {
+    assert.deepEqual(noteHints('11/02/2026: NO MALE cleaner please'), ['prefers female cleaner']);
+    assert.deepEqual(noteHints('Female cleaner requested'), ['prefers female cleaner']);
+    assert.deepEqual(noteHints('Male cleaner requested'), ['prefers male cleaner']);
+    const p = customerPrefs(['No male cleaner']);
+    assert.deepEqual([p.prefersFemale, p.prefersMale], [true, false]);
+    assert.equal(customerPrefs(['Prefers male cleaner']).prefersMale, true);
+  });
+
   test('transition-program clients stay with their cleaner until the program ends', () => {
     const cleaners = [cleaner(1, 'Com'), cleaner(3, 'Res Holder')];
     const prog = { partner_kind: 'program', partner_name: 'Montfort at Home', services: ['Homemaking (MFT @ Home)'], customer_id: -700 };
@@ -177,6 +216,7 @@ describe('commercial workforce: the app on the synthetic Launch27', () => {
   let db;
   let server;
   let base;
+  let schedule;
   const login = async (email) => (await fetch(`${base}/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password: 'demo' }) })).headers.get('set-cookie').split(';')[0];
   const call = async (cookie, path, body, method = body ? 'PUT' : 'GET') => {
     const r = await fetch(`${base}/api/commercial/workforce${path}`, { method, headers: { cookie, 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
@@ -188,7 +228,7 @@ describe('commercial workforce: the app on the synthetic Launch27', () => {
     db = await openDb();
     await seed(db);
     const mock = createMockLaunch27({ password: 'demo' });
-    const schedule = createSchedule({ db, config, fetchImpl: mock, log: quiet });
+    schedule = createSchedule({ db, config, fetchImpl: mock, log: quiet });
     const commercialPlan = createWorkforce({ db, schedule });
     server = createApp(config, { db, fetchImpl: mock, schedule, commercialPlan, log: quiet }).listen(0);
     await new Promise((r) => server.once('listening', r));
@@ -229,6 +269,43 @@ describe('commercial workforce: the app on the synthetic Launch27', () => {
     assert.deepEqual([slots.weeks.length, slots.placed.fsa, slots.grid.length], [4, 'K1C', 3]);
     assert.ok(Array.isArray(slots.suggestions));
     assert.equal((await call(admin, `/slots?${Q}&postal=12345`)).status, 400);
+  });
+
+  test('cleaner details: gender, home postal code and pets are saved in the portal', async () => {
+    const admin = await login('boss@example.com');
+    const team = (await call(admin, `/team?${Q}`)).body;
+    const c = team.cleaners[0];
+    assert.equal((await call(admin, `/cleaners/${c.id}`, { gender: 'M', home_postal: 'k1c2b3', pets_dogs: 'no', pets_cats: 'ok', pets_note: '  allergic to cats? ask first ' })).status, 200);
+    let row = (await call(admin, `/team?${Q}`)).body.cleaners.find((x) => x.id === c.id);
+    assert.deepEqual([row.gender, row.gender_source, row.home_postal, row.home_fsa, row.pets], ['M', 'platform', 'K1C 2B3', 'K1C', { dogs: 'no', cats: 'ok', other: null, note: 'allergic to cats? ask first' }]);
+    assert.ok(row.home_place);
+    // The audit log keeps only the postal area, never the full code.
+    const audit = (await db.query("SELECT detail FROM audit_log WHERE action = 'commercial.cleaner' ORDER BY id DESC LIMIT 1")).rows[0];
+    const logged = JSON.stringify(audit?.detail ?? '');
+    assert.ok(logged.includes('K1C') && !/2B3/i.test(logged));
+    // Clearing goes back to Launch27's code.
+    assert.equal((await call(admin, `/cleaners/${c.id}`, { gender: null, home_postal: '' })).status, 200);
+    row = (await call(admin, `/team?${Q}`)).body.cleaners.find((x) => x.id === c.id);
+    assert.deepEqual([row.gender_source === 'platform', row.home_postal, row.pets.dogs], [false, null, 'no']);
+    for (const bad of [{ gender: 'X' }, { home_postal: '12345' }, { pets_dogs: 'maybe' }]) assert.equal((await call(admin, `/cleaners/${c.id}`, bad)).status, 400);
+    assert.deepEqual([tidyPostal('k1c 2b3'), tidyPostal('K6H'), tidyPostal('90210')], ['K1C 2B3', 'K6H', null]);
+    // The entered gender is used by the scheduler too (Dispatch, scheduling planner); the stored
+    // Launch27 copy keeps Launch27's own value, also after a sync.
+    const l27 = (await schedule._load()).cleaners.find((x) => x.id === c.id).gender;
+    const flip = l27 === 'F' ? 'M' : 'F';
+    await call(admin, `/cleaners/${c.id}`, { gender: flip });
+    assert.equal((await schedule._load()).cleaners.find((x) => x.id === c.id).gender, flip);
+    await schedule.sync();
+    assert.equal((await schedule._load()).cleaners.find((x) => x.id === c.id).gender, flip);
+    const stored = (await db.query('SELECT data FROM schedule_snapshots ORDER BY id DESC LIMIT 1')).rows[0].data;
+    const raw = (typeof stored === 'string' ? JSON.parse(stored) : stored).cleaners.find((x) => x.id === c.id);
+    assert.equal(raw.gender ?? null, l27 ?? null);
+    await call(admin, `/cleaners/${c.id}`, { gender: null });
+    assert.equal((await schedule._load()).cleaners.find((x) => x.id === c.id).gender ?? null, l27 ?? null);
+    // Details never reach a partner file.
+    await call(admin, `/cleaners/${c.id}`, { home_postal: 'K2P 0A1', pets_note: 'SECRET-PET-NOTE' });
+    const file = await call(admin, `/partner-file?${Q}&partner=Carefor`);
+    assert.ok(!file.text.includes('K2P 0A1') && !file.text.includes('SECRET-PET-NOTE'));
   });
 
   test('partner files: leads only, a standalone page with no cleaner names; settings are for leads', async () => {

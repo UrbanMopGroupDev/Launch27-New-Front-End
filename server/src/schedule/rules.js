@@ -124,10 +124,11 @@ export function customerPrefs(tags = []) {
     const p = x.match(/^#?\s*prefer(?:s|red)?\s+(.+)/);
     if (p && !/female|male|consistent|same/.test(p[1])) prefers.push(p[1].replace(/[^a-zÀ-ɏ' -]/gi, '').trim());
   }
+  const noMale = (x) => /\b(no|not|never|without|doesn'?t want|does not want|don'?t want|do not want)\b[^.]*\bmale\b/.test(x) && !/do\s*not\s*(?:assign|send)/.test(x);
   return {
     femaleOnly: lc.some((x) => /female/.test(x) && /only/.test(x)),
-    prefersFemale: lc.some((x) => /female/.test(x)),
-    prefersMale: lc.some((x) => /\bmale\b/.test(x) && !/female/.test(x)),
+    prefersFemale: lc.some((x) => /female/.test(x) || noMale(x)), // "no male cleaner" = a female cleaner, please
+    prefersMale: lc.some((x) => /\bmale\b/.test(x) && !/female/.test(x) && !noMale(x)),
     consistent: lc.some((x) => /consistent|same cleaner/.test(x)),
     prefers,
     avoid,
