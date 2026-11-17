@@ -324,7 +324,7 @@ function CasesTab({ period }: { period: Period }) {
   const [open, setOpen] = useState<number | null>(null);
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: 'opened_at', dir: -1 });
   const q = useQuery({ queryKey: ['complaints', 'cases', category, period.from, period.to], queryFn: () => complaintsApi.cases({ category: category || undefined, from: period.from, to: period.to }), retry: false });
-  const all = q.data || [];
+  const all = useMemo(() => q.data || [], [q.data]);
   const sources = useMemo(() => [...new Set(all.map((c) => c.source))].sort(), [all]);
   const rows = useMemo(() => {
     const list = source ? all.filter((c) => c.source === source) : [...all];
