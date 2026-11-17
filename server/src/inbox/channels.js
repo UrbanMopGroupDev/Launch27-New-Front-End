@@ -34,7 +34,9 @@ export async function sendOutbound(message, connectors = {}) {
   try {
     const res = await connector.send(message);
     // A provider may report its own status (e.g. RingCentral: queued, sent, delivered).
-    return { state: res?.state || 'sent', provider: connector.name, external_id: res?.id ? `${connector.name}:${res.id}` : null, thread_key: res?.thread_key || null, message_id: res?.message_id || null };
+    // A router (several SMS providers) says which one sent it.
+    const provider = res?.provider || connector.name;
+    return { state: res?.state || 'sent', provider, external_id: res?.id ? `${provider}:${res.id}` : null, thread_key: res?.thread_key || null, message_id: res?.message_id || null };
   } catch (err) {
     return { state: 'failed', provider: connector.name, note: err.message };
   }

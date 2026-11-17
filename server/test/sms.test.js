@@ -9,7 +9,8 @@ import { loadConfig } from '../src/config.js';
 import { guardConnectors } from '../src/inbox/channels.js';
 import { createL27Client } from '../src/inbox/lookup.js';
 import { createRingCentralClient, deliveryState } from '../src/inbox/sms/ringcentral.js';
-import { createSmsChannel } from '../src/inbox/sms/service.js';
+import { createRingCentralChannel } from '../src/inbox/sms/ringcentral-channel.js';
+import { createSmsRouter } from '../src/inbox/sms/core.js';
 
 const RC = 'https://platform.ringcentral.test';
 const OTTAWA = UM.smsOttawa; // +16136919880
@@ -137,7 +138,7 @@ describe('RingCentral SMS', () => {
     rc = fakeRingCentral();
     const client = createRingCentralClient({ server: RC, clientId: 'cid', clientSecret: 'csecret', jwt: 'jwt-credential', fetchImpl: rc.fetchImpl, sleep: async () => {} });
     const l27 = createL27Client({ baseUrl: config.l27BaseUrl, fetchImpl: l27Fetch });
-    sms = createSmsChannel({
+    sms = createRingCentralChannel({
       db,
       client,
       smsConfig: { numbers: [OTTAWA, HIRING, NOT_SMS], webhookUrl: 'https://app.example.com/webhooks/ringcentral/sms', webhookToken: TOKEN },
@@ -150,7 +151,7 @@ describe('RingCentral SMS', () => {
       },
     });
     await sms.start();
-    server = createApp(config, { db, fetchImpl: l27Fetch, connectors: { sms: sms.connector }, sms }).listen(0);
+    server = createApp(config, { db, fetchImpl: l27Fetch, connectors: { sms: createSmsRouter([{ name: 'ringcentral', connector: sms.connector, numbers: sms.numbers }]) }, smsProviders: { ringcentral: sms } }).listen(0);
     base = `http://127.0.0.1:${server.address().port}`;
     admin = await login('boss@urbanmop.ca');
     await api(admin, '/api/me'); // first in becomes admin
@@ -167,7 +168,8 @@ describe('RingCentral SMS', () => {
     const ch = (await api(admin, '/api/channels')).body.sms;
     assert.equal(ch.state, 'live');
     assert.equal(ch.provider, 'ringcentral');
-    const r = ch.ringcentral;
+    assert.equal(ch.providers.length, 1);
+    const r = ch.providers.find((p) => p.provider === 'ringcentral');
     assert.equal(r.health_ok, true);
     assert.deepEqual(r.health.extension, { id: '111', number: '101', name: 'Support' });
     assert.deepEqual(r.health.sms_numbers, [OTTAWA, HIRING]);
@@ -221,7 +223,7 @@ describe('RingCentral SMS', () => {
     const ev = (await db.query('SELECT status, payload FROM sms_events ORDER BY id DESC LIMIT 1')).rows[0];
     assert.equal(ev.status, 'done');
     assert.equal(ev.payload, null);
-    const st = (await api(admin, '/api/channels')).body.sms.ringcentral;
+    const st = (await api(admin, '/api/channels')).body.sms.providers.find((p) => p.provider === 'ringcentral');
     assert.ok(st.last_webhook_at && st.last_received_at);
   });
 
@@ -367,13 +369,13 @@ describe('RingCentral SMS', () => {
     assert.notEqual(await subscriptionId(), replaced);
     // Events from an old subscription are ignored.
     await hook(notification(inbound(JANE, OTTAWA, 'From an old subscription'), 'sub-old'));
-    assert.equal((await db.query("SELECT count(*)::int AS n FROM sms_events WHERE payload->>'subject' = 'From an old subscription'")).rows[0].n, 0);
+    assert.equal((await db.query("SELECT count(*)::int AS n FROM sms_events WHERE payload->>'body' = 'From an old subscription'")).rows[0].n, 0);
   });
 
   test('expired credentials: health shows the problem, sends fail clearly, recovery is automatic', async () => {
     rc.tokenFails = true;
     await sms.check();
-    let st = (await api(admin, '/api/channels')).body.sms.ringcentral;
+    let st = (await api(admin, '/api/channels')).body.sms.providers.find((p) => p.provider === 'ringcentral');
     assert.match(st.last_error, /JWT token is expired/);
     rc.revoked.add(`tok${rc.tokens}`); // the current access token stops working too
     const failed = await api(admin, `/api/conversations/${janeConv.id}/messages`, { body: 'While signed out', idempotency_key: 'k-8' });
@@ -381,7 +383,7 @@ describe('RingCentral SMS', () => {
     assert.match(failed.body.meta.note, /sign-in failed/);
     rc.tokenFails = false;
     await sms.check();
-    st = (await api(admin, '/api/channels')).body.sms.ringcentral;
+    st = (await api(admin, '/api/channels')).body.sms.providers.find((p) => p.provider === 'ringcentral');
     assert.equal(st.health_ok, true);
     assert.equal((await api(admin, `/api/conversations/${janeConv.id}/messages`, { body: 'Signed in again', idempotency_key: 'k-9' })).body.delivery_state, 'queued');
   });
@@ -390,28 +392,28 @@ describe('RingCentral SMS', () => {
     rc.scope = 'ReadMessages ReadAccounts';
     rc.revoked.add(`tok${rc.tokens}`);
     await sms.check();
-    const st = (await api(admin, '/api/channels')).body.sms.ringcentral;
+    const st = (await api(admin, '/api/channels')).body.sms.providers.find((p) => p.provider === 'ringcentral');
     assert.equal(st.health_ok, false);
     assert.deepEqual(st.health.missing_scopes, ['SMS', 'WebhookSubscriptions']);
     assert.equal((await api(admin, `/api/conversations/${janeConv.id}/messages`, { body: 'x', idempotency_key: 'k-10' })).body.delivery_state, 'failed');
     rc.scope = 'SMS ReadMessages ReadAccounts SubscriptionWebhook'; // older name of the same permission
     rc.revoked.add(`tok${rc.tokens}`);
     await sms.check();
-    assert.equal((await api(admin, '/api/channels')).body.sms.ringcentral.health_ok, true);
+    assert.equal((await api(admin, '/api/channels')).body.sms.providers.find((p) => p.provider === 'ringcentral').health_ok, true);
   });
 
   test('admins disconnect and reconnect; agents cannot', async () => {
-    assert.equal((await api(agent, '/api/admin/sms/disconnect', {})).status, 403);
-    const off = await api(admin, '/api/admin/sms/disconnect', {});
-    assert.equal(off.body.sms.ringcentral.enabled, false);
-    assert.equal(off.body.sms.ringcentral.has_subscription, false);
+    assert.equal((await api(agent, '/api/admin/sms/ringcentral/disconnect', {})).status, 403);
+    const off = await api(admin, '/api/admin/sms/ringcentral/disconnect', {});
+    assert.equal(off.body.sms.providers.find((p) => p.provider === 'ringcentral').enabled, false);
+    assert.equal(off.body.sms.providers.find((p) => p.provider === 'ringcentral').has_subscription, false);
     const sent = await api(admin, `/api/conversations/${janeConv.id}/messages`, { body: 'While disconnected', idempotency_key: 'k-11' });
     assert.equal(sent.body.delivery_state, 'failed');
     assert.match(sent.body.meta.note, /disconnected/);
     rc.store.push(inbound(JANE, OTTAWA, 'Sent while disconnected'));
-    const on = await api(admin, '/api/admin/sms/connect', {});
-    assert.equal(on.body.sms.ringcentral.enabled, true);
-    assert.equal(on.body.sms.ringcentral.has_subscription, true);
+    const on = await api(admin, '/api/admin/sms/ringcentral/connect', {});
+    assert.equal(on.body.sms.providers.find((p) => p.provider === 'ringcentral').enabled, true);
+    assert.equal(on.body.sms.providers.find((p) => p.provider === 'ringcentral').has_subscription, true);
     // Reconnecting catches up on what arrived meanwhile.
     assert.equal((await db.query("SELECT count(*)::int AS n FROM messages WHERE body = 'Sent while disconnected'")).rows[0].n, 1);
     const audit = (await db.query("SELECT action FROM audit_log WHERE action LIKE 'sms.%' ORDER BY id")).rows.map((r) => r.action);
@@ -424,7 +426,7 @@ describe('SMS in development and QA', () => {
     const rc = fakeRingCentral();
     const db = await openDb();
     const client = createRingCentralClient({ server: RC, clientId: 'cid', clientSecret: 'csecret', jwt: 'jwt-credential', fetchImpl: rc.fetchImpl, sleep: async () => {} });
-    const sms = createSmsChannel({ db, client, smsConfig: { numbers: [OTTAWA] } });
+    const sms = createRingCentralChannel({ db, client, smsConfig: { numbers: [OTTAWA] } });
     const guarded = guardConnectors({ sms: sms.connector }, 'sandbox');
     assert.equal(guarded.sms.sandbox, true);
     await guarded.sms.send({ channel: 'sms', from: OTTAWA, to: JANE, body: 'hi' });

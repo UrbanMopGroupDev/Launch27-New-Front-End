@@ -127,7 +127,7 @@ within a minute, matched to the Launch27 customer, but **nothing can be emailed 
 the platform**: email replies and new email conversations are refused, and Gmail is asked only
 for read access (`EMAIL_SENDING_ENABLED` in `server/src/inbox/channels.js`). Dev and QA run a sandbox email channel (recorded, never
 sent, no mailbox read). Setup and how it works: [docs/email.md](docs/email.md); status in
-Support settings → Channels. **SMS runs on RingCentral** (production): customers and cleaners text the business numbers,
+Support settings → Channels. **SMS runs on RingCentral and/or Twilio** (production; each number belongs to one provider): customers and cleaners text the business numbers,
 the texts arrive in the inbox matched to the Launch27 customer or cleaner and routed by the
 routing rules, and agents reply from the inbox. Unknown or shared numbers go to *Who is this?*.
 Dev and QA never send texts (sandbox); the Channel simulator (`/inbox-simulator`) runs the same

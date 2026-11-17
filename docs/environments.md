@@ -10,6 +10,7 @@
 | Launch27 writes | to the in-memory fake only | to the in-memory fake only | only if `L27_ALLOW_WRITES=true` |
 | SMS / email / notifications | sandbox (never sent) | sandbox (never sent) | `NOTIFICATIONS_MODE` |
 | SMS (RingCentral) | sandbox platform only; never sent | sandbox platform only; never sent | production platform, sent (docs/sms.md) |
+| SMS (Twilio) | ignored (`TWILIO_*` not read) | ignored (`TWILIO_*` not read) | sent and received (docs/sms.md) |
 | Email mailboxes (Gmail) | never read (`GMAIL_*` ignored) | never read (`GMAIL_*` ignored) | read every minute (docs/email.md) |
 | RingCentral | sandbox server only | sandbox server only | production server |
 | Channel simulator | on | on | off |

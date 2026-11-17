@@ -27,7 +27,7 @@ export function diffRules(before, after) {
 }
 const many = async (q, sql, p) => (await q.query(sql, p)).rows;
 
-export function createInboxRouter({ db, sessions, cookieName, config, l27, connectors = {}, log = (lvl, msg, f) => console.error(msg, f), qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, complaints = null, sms = null }) {
+export function createInboxRouter({ db, sessions, cookieName, config, l27, connectors = {}, log = (lvl, msg, f) => console.error(msg, f), qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, complaints = null, smsProviders = {} }) {
   const r = express.Router();
   r.use(express.json({ limit: '1mb' }));
 
@@ -169,14 +169,14 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     return {
       // state: how mail is read (live Gmail, sandbox, or not connected). read_only: sending is off.
       email: !email ? { state: 'not_connected', provider: null, accounts: [], read_only: !EMAIL_SENDING_ENABLED } : { state: email.sandbox ? 'sandbox' : 'live', provider: email.name, send_from: email.identities || OUR_IDENTITIES.email, accounts, read_only: !EMAIL_SENDING_ENABLED },
-      sms: !connectors.sms ? { state: 'not_connected', provider: null } : { state: connectors.sms.sandbox ? 'sandbox' : 'live', provider: connectors.sms.name, ringcentral: sms ? await smsDetail() : null },
+      sms: !connectors.sms ? { state: 'not_connected', provider: null, providers: [] } : { state: connectors.sms.sandbox ? 'sandbox' : 'live', provider: connectors.sms.name, providers: await Promise.all(Object.values(smsProviders).map(smsDetail)) },
     };
   }
 
-  // RingCentral SMS: connection, numbers and the queue each number's texts go to (from the
+  // Each SMS provider: connection, numbers and the queue each number's texts go to (from the
   // routing rules, so the screen always matches what really happens).
-  async function smsDetail() {
-    const st = await sms.status();
+  async function smsDetail(provider) {
+    const st = await provider.status();
     const rules = await many(db, 'SELECT * FROM routing_rules');
     const queues = new Map((await many(db, 'SELECT slug, name FROM queues')).map((q) => [q.slug, q.name]));
     const numbers = [...new Set([...(st.health?.sms_numbers || []), ...st.configured_numbers])];
@@ -188,16 +188,15 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       }),
     };
   }
-  if (sms) {
-    const smsAction = (fn) => wrap(async (req, res) => {
-      await fn();
-      await svc.audit(db, req.user.id, `sms.${req.path.split('/').pop()}`, 'channel', 'sms', {});
-      res.json(await channelStatus());
-    });
-    r.post('/admin/sms/check', needRole('admin'), smsAction(() => sms.check()));
-    r.post('/admin/sms/disconnect', needRole('admin'), smsAction(() => sms.disconnect()));
-    r.post('/admin/sms/connect', needRole('admin'), smsAction(() => sms.connect()));
-  }
+  // Admins: check, disconnect or reconnect one provider (credentials stay in Railway).
+  r.post('/admin/sms/:provider/:action', needRole('admin'), wrap(async (req, res) => {
+    const provider = Object.hasOwn(smsProviders, req.params.provider) ? smsProviders[req.params.provider] : null;
+    const actions = { check: 'check', disconnect: 'disconnect', connect: 'connect' };
+    if (!provider || !Object.hasOwn(actions, req.params.action)) throw new svc.InboxError(404, 'Unknown SMS provider or action');
+    await provider[actions[req.params.action]]();
+    await svc.audit(db, req.user.id, `sms.${req.params.action}`, 'channel', `sms:${req.params.provider}`, {});
+    res.json(await channelStatus());
+  }));
 
   r.get('/channels', wrap(async (req, res) => res.json(await channelStatus())));
 
