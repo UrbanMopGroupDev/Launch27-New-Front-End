@@ -18,11 +18,22 @@ export class KustomerError extends Error {
   }
 }
 
+// Kustomer's error body says why a request was refused ({ errors: [{ title, detail }] }).
+// Kept short, with any email or phone masked, so it can be shown to an admin.
+async function errorDetail(res) {
+  const body = await res.json().catch(() => null);
+  const e = Array.isArray(body?.errors) ? body.errors[0] : body;
+  const text = [e?.title, e?.detail, e?.code, e?.message].filter((x) => typeof x === 'string' && x.trim()).join(': ');
+  return text.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[email]').replace(/\+?\d[\d\s().-]{8,}\d/g, '[phone]').slice(0, 300) || null;
+}
+
 export function createKustomerClient({ apiKey, fetchImpl = fetch, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), baseUrl = BASE }) {
-  async function get(path, query = {}) {
-    const qs = new URLSearchParams(Object.entries(query).filter(([, v]) => v != null && v !== '').map(([k, v]) => [k, String(v)])).toString();
+  // pathOrLink may already carry a query string (a JSON:API links.next).
+  async function get(pathOrLink, query = {}) {
+    const u = new URL(pathOrLink, baseUrl);
+    for (const [k, v] of Object.entries(query)) if (v != null && v !== '') u.searchParams.set(k, String(v));
     for (let attempt = 0; ; attempt++) {
-      const res = await fetchImpl(`${baseUrl}${path}${qs ? `?${qs}` : ''}`, { method: 'GET', headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' }, signal: AbortSignal.timeout(30_000) });
+      const res = await fetchImpl(u.toString(), { method: 'GET', headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' }, signal: AbortSignal.timeout(30_000) });
       if (res.status === 429 && attempt < 5) {
         await sleep(Math.min(60, Number(res.headers.get('retry-after')) || 2 ** attempt) * 1000);
         continue;
@@ -31,35 +42,67 @@ export function createKustomerClient({ apiKey, fetchImpl = fetch, sleep = (ms) =
         await sleep(1000 * 2 ** attempt);
         continue;
       }
-      if (!res.ok) throw new KustomerError(res.status, `Kustomer ${path.replace(/\/[0-9a-f]{24}/g, '/:id')} returned ${res.status}`);
+      if (!res.ok) {
+        const detail = await errorDetail(res);
+        throw new KustomerError(res.status, `Kustomer ${u.pathname.replace(/\/[0-9a-f]{24}/g, '/:id')} returned ${res.status}${detail ? ` (${detail})` : ''}`);
+      }
       return res.json();
     }
   }
-  // JSON:API pages: { data: [...], links: { next } }. Stops at maxPages.
+  // JSON:API pages: follow links.next when Kustomer gives one, else page=N. Stops at maxPages.
   async function* pages(path, query = {}, maxPages = 500) {
+    let body = await get(path, query);
     for (let page = 1; page <= maxPages; page++) {
-      const body = await get(path, { ...query, page, pageSize: 100 });
       const data = Array.isArray(body.data) ? body.data : [];
       yield { data, included: body.included || [] };
       if (!data.length || !body.links?.next) return;
+      body = await get(body.links.next);
     }
   }
   return { get, pages };
 }
 
+// The request shapes we try for "all objects of this klass", in order. Kustomer's docs weren't
+// reachable when this was written, so the first shape Kustomer accepts is used and remembered.
+export function listingCandidates(klass) {
+  const name = encodeURIComponent(klass.name);
+  const out = [
+    { label: 'by name', path: `/v1/klasses/${name}/kobjects`, query: {} },
+    { label: 'by name, paged', path: `/v1/klasses/${name}/kobjects`, query: { page: 1, pageSize: 100 } },
+  ];
+  if (klass.id && klass.id !== klass.name) out.push({ label: 'by id', path: `/v1/klasses/${encodeURIComponent(klass.id)}/kobjects`, query: {} });
+  return out;
+}
+
+/** First listing shape Kustomer accepts for this klass, plus what each attempt returned. */
+export async function findListing(client, klass) {
+  const attempts = [];
+  for (const c of listingCandidates(klass)) {
+    try {
+      const body = await client.get(c.path, c.query);
+      attempts.push({ label: c.label, ok: true, rows: Array.isArray(body.data) ? body.data.length : 0 });
+      return { listing: c, first: body, attempts };
+    } catch (err) {
+      attempts.push({ label: c.label, ok: false, error: err.message });
+    }
+  }
+  return { listing: null, first: null, attempts };
+}
+
 const typeOf = (v) => (v == null ? 'null' : Array.isArray(v) ? 'array' : typeof v);
 
-/** Which klasses exist, which one is the complaint, and its field names/types. No values. */
+/** Which klasses exist, which one is the complaint, how to list it, and its field names/types. No values. */
 export async function discover(client, { klass = null } = {}) {
   const klasses = (await client.get('/v1/klasses')).data || [];
-  const names = klasses.map((k) => ({ name: k.attributes?.name || k.id, display: k.attributes?.displayName || null }));
-  const chosen = klass || names.find((k) => /complain/i.test(`${k.name} ${k.display || ''}`))?.name || null;
+  const names = klasses.map((k) => ({ id: k.id || null, name: k.attributes?.name || k.id, display: k.attributes?.displayName || null }));
+  const chosen = (klass && names.find((k) => k.name === klass || k.id === klass)) || (klass ? { id: null, name: klass } : null) || names.find((k) => /complain/i.test(`${k.name} ${k.display || ''}`)) || null;
   let fields = null;
   let sampleCount = 0;
+  let found = { listing: null, attempts: [] };
   if (chosen) {
-    const body = await client.get(`/v1/klasses/${encodeURIComponent(chosen)}/kobjects`, { page: 1, pageSize: 25 });
+    found = await findListing(client, chosen);
     const shape = new Map();
-    for (const o of body.data || []) {
+    for (const o of found.first?.data || []) {
       sampleCount++;
       for (const [k, v] of Object.entries(o.attributes?.custom || {})) shape.set(`custom.${k}`, typeOf(v));
       for (const [k, v] of Object.entries(o.attributes || {})) if (k !== 'custom') shape.set(k, typeOf(v));
@@ -67,7 +110,7 @@ export async function discover(client, { klass = null } = {}) {
     }
     fields = [...shape].map(([name, type]) => ({ name, type }));
   }
-  return { klasses: names, complaint_klass: chosen, fields, sample_count: sampleCount };
+  return { klasses: names.map(({ name, display }) => ({ name, display })), complaint_klass: chosen?.name || null, klass: chosen, listing: found.listing, attempts: found.attempts, fields, sample_count: sampleCount };
 }
 
 // Field-name patterns for the complaint object's custom fields (first match wins).
@@ -123,21 +166,15 @@ export function toCase(kobject) {
   };
 }
 
-/** Complaint kobjects created in [from, to]. Kustomer returns newest first by default. */
-export async function* listComplaints(client, klass, { from, to }) {
-  for await (const { data } of client.pages(`/v1/klasses/${encodeURIComponent(klass)}/kobjects`, { sort: '-createdAt' })) {
-    let older = 0;
+/** Complaint kobjects created in [from, to]. Reads every page (order isn't guaranteed) and filters by date. */
+export async function* listComplaints(client, listing, { from, to }) {
+  const hi = `${to}T23:59:59Z`;
+  for await (const { data } of client.pages(listing.path, listing.query, 300)) {
     for (const o of data) {
       const at = o.attributes?.createdAt;
-      if (at && at < from) {
-        older++;
-        continue;
-      }
-      if (at && at > `${to}T23:59:59Z`) continue;
+      if (at && (at < from || at > hi)) continue;
       yield o;
     }
-    // A whole page older than the window: the rest is older too (sorted newest first).
-    if (data.length && older === data.length) return;
   }
 }
 

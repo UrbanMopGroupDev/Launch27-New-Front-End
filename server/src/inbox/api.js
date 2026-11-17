@@ -1154,6 +1154,9 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     r.get('/reports/scheduling', rep(async (req, res) => res.json(await reports.scheduling(period(req), { locations: repLocs(req) }))));
     r.get('/reports/cleaners', rep(async (req, res) => res.json(await reports.cleaners(period(req), { admin: admin(req), locations: repLocs(req) }))));
     r.get('/reports/cleaners/:id', rep(async (req, res) => res.json(await reports.cleaner(req.params.id, period(req), { admin: admin(req), locations: repLocs(req) }))));
+    // Cleaner reports 2.0 (Leslie's report above stays as he built it).
+    r.get('/reports/cleaners2', rep(async (req, res) => res.json(await reports.cleaners2(period(req), { admin: admin(req), locations: repLocs(req) }))));
+    r.get('/reports/cleaners2/:id', rep(async (req, res) => res.json(await reports.cleaner2(req.params.id, period(req), { admin: admin(req), locations: repLocs(req) }))));
     // Utilization: everyone outside production unless UTILIZATION_EMAILS narrows it; 404 otherwise.
     // ?from=YYYY-MM-DD&to=YYYY-MM-DD (clamped to today … the end of the planner's 8 weeks).
     r.get('/reports/utilization', rep(async (req, res) => {

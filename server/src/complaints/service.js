@@ -52,7 +52,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     kustomer: config.kustomerApiKey ? 'connected' : 'not set up (KUSTOMER_API_KEY)',
     slack: config.slackBotToken ? 'connected' : 'not set up (SLACK_BOT_TOKEN)',
     gmail: gmail ? `connected (${gmail.accounts.join(', ')})` : 'not connected in this environment',
-    launch27: config.l27Mode === 'mock' ? 'synthetic data' : config.l27SyncEmail ? 'connected (nightly 12-month sync)' : 'not set up (L27_SYNC_EMAIL)',
+    launch27: config.l27Mode === 'mock' ? 'synthetic data' : config.l27SyncEmail ? 'connected (nightly 12-month sync)' : 'connected (uses your Launch27 login when you run it)',
     claude: classifier ? 'on (redacted text only)' : 'off (ANTHROPIC_API_KEY not set): rules only',
   });
 
@@ -70,6 +70,8 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     const runLog = [];
     const note = (level, msg, extra = {}) => {
       runLog.push({ at: new Date(now()).toISOString(), level, msg, ...extra });
+      // Saved as it goes, so the page can show progress while a run is going.
+      db.query('UPDATE complaint_runs SET log = $2::jsonb WHERE id = $1', [runRow.id, json(runLog)]).catch(() => {});
       log[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info'](`complaints: ${msg}`, extra);
     };
     try {
@@ -78,11 +80,19 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       const staffNames = (await many(db, 'SELECT name FROM users WHERE name IS NOT NULL')).map((r) => r.name);
       const cases = [];
 
-      if (config.kustomerApiKey) cases.push(...(await fromKustomer(from, to, ctx, note)));
+      const guarded = async (label, fn) => {
+        try {
+          return await fn();
+        } catch (err) {
+          note('error', `${label} skipped: ${err.message}`);
+          return [];
+        }
+      };
+      if (config.kustomerApiKey) cases.push(...(await guarded('Kustomer', () => fromKustomer(from, to, ctx, note))));
       else note('warn', 'Kustomer skipped: KUSTOMER_API_KEY is not set');
       cases.push(...fromRatings(from, to, ctx));
       note('info', `Launch27 unhappy ratings: ${cases.filter((c) => c.source === 'launch27_rating').length}`);
-      if (gmail) cases.push(...(await fromGmail(from, to, ctx, note)));
+      if (gmail) cases.push(...(await guarded('info@ email', () => fromGmail(from, to, ctx, note))));
       else note('warn', 'info@ email skipped: Gmail is not connected in this environment');
 
       // Classify and store cases, then attach Slack refunds (which need the cases to match).
@@ -99,11 +109,13 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       for (const c of kept) c.id = await upsertCase(c);
       await markDuplicates();
 
-      if (config.slackBotToken) await fromSlack(from, to, ctx, note);
+      if (config.slackBotToken) await guarded('Slack', () => fromSlack(from, to, ctx, note));
       else note('warn', 'Slack refund history skipped: SLACK_BOT_TOKEN is not set');
 
       await enrich(from, to, ctx, settings, note);
-      await db.query("UPDATE complaint_runs SET finished_at = now(), status = 'done', log = $2::jsonb WHERE id = $1", [runRow.id, json(runLog)]);
+      // 'partial': it finished, but a source failed (shown on the page with the reason).
+      const status = runLog.some((l) => l.level === 'error') ? 'partial' : 'done';
+      await db.query('UPDATE complaint_runs SET finished_at = now(), status = $3, log = $2::jsonb WHERE id = $1', [runRow.id, json(runLog), status]);
       return { run_id: Number(runRow.id), cases: kept.length };
     } catch (err) {
       note('error', `run failed: ${err.message}`);
@@ -157,12 +169,16 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     const client = createKustomerClient({ apiKey: config.kustomerApiKey, fetchImpl });
     const found = await discover(client, { klass: config.kustomerComplaintKlass });
     if (!found.complaint_klass) {
-      note('error', `Kustomer: no complaint object type found. Klasses: ${found.klasses.map((k) => k.name).join(', ')}. Set KUSTOMER_COMPLAINT_KLASS.`);
+      note('error', `Kustomer: no complaint object type found. Types: ${found.klasses.map((k) => k.name).join(', ')}. Set KUSTOMER_COMPLAINT_KLASS.`);
+      return [];
+    }
+    if (!found.listing) {
+      note('error', `Kustomer: couldn't list "${found.complaint_klass}" records. ${found.attempts.map((a) => `${a.label}: ${a.error}`).join(' | ')}`);
       return [];
     }
     const out = [];
     const custCache = new Map();
-    for await (const ko of listComplaints(client, found.complaint_klass, { from, to })) {
+    for await (const ko of listComplaints(client, found.listing, { from, to })) {
       const c = kustomerToCase(ko);
       if (c.kustomer_customer_id && !custCache.has(c.kustomer_customer_id)) custCache.set(c.kustomer_customer_id, await kustomerCustomer(client, c.kustomer_customer_id).catch(() => null));
       const cust = custCache.get(c.kustomer_customer_id) || null;
@@ -188,7 +204,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
         our_replies: msgs.filter((m) => m.direction === 'out').map((m) => m.text).join('\n'),
       });
     }
-    note('info', `Kustomer: ${out.length} complaint objects (${found.complaint_klass})`);
+    note('info', `Kustomer: ${out.length} complaint objects (${found.complaint_klass}, ${found.listing.label})`);
     for (const c of out) c.l27_customer_id = c.l27_customer_id || (await customerByEmail(ctx, c.emails, c.phones)) || customerByName(ctx, c.customer_name);
     return out;
   }
