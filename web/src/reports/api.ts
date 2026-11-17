@@ -205,6 +205,7 @@ export interface UtilizationReport {
   by_day: (UtilFigures & { date: string; areas: Record<string, UtilFigures> })[];
   trend: { week: string; total: number | null; areas: Record<string, number | null> }[];
   data_check: DataCheck;
+  needs_cleaner: { kind: 'unassigned' | 'not_taking'; key: string; booking_id: number | null; projected: boolean; date: string; start: number; hours: number; customer: string | null; area: string; freq: string | null; address: string | null; cleaner: string | null }[];
   reconcile: null | {
     capacity: { existing: number; sundays: number; closed: number; other_brand: number; floor: number; result: number; ties: boolean };
     booked: { existing: number; sundays: number; other_brand: number; result: number; ties: boolean };

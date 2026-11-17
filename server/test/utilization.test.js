@@ -259,3 +259,15 @@ describe('utilization: past weeks and shared cleaners', () => {
   });
 });
 const addDaysT = (d, n) => new Date(Date.parse(`${d}T12:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
+
+describe('utilization: bookings that need a cleaner', () => {
+  test('lists unassigned and to-move bookings in the dates, Monday to Saturday, once each', () => {
+    const r = report();
+    const list = r.needs_cleaner;
+    // v3 (Tuesday, unassigned) and v7 (Saturday, on the on-hold cleaner); Sunday v4 is left out.
+    assert.deepEqual(list.map((x) => [x.kind, x.key]), [['unassigned', 'v3'], ['not_taking', 'v7']]);
+    assert.equal(list[0].hours, 2);
+    assert.equal(list[1].cleaner, 'On hold');
+    assert.equal(list.filter((x) => x.kind === 'unassigned').length, r.totals.unassigned_visits);
+  });
+});
