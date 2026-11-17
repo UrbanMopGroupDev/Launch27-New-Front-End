@@ -112,6 +112,10 @@ export function slimVisit(b) {
 // dataTag (dev/QA): names the data underneath (sample version or QA copy) so a switch is noticed.
 export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {}, warn() {}, error() {} }, now = () => Date.now(), dataTag = () => SAMPLE_VERSION, writes = null, retryDelayMs = 2000 }) {
   let snap = null; // latest snapshot (in memory)
+  // Genders entered in the portal (Commercial → Workforce plan → Cleaner details). Launch27 has no
+  // gender field, only an (F)/(M) code in some team names, so these win. Applied when a snapshot is
+  // indexed; the stored snapshot keeps Launch27's own values (raw_cleaners).
+  let genders = new Map();
   let unavailable = new Map(); // cleanerId -> Set(dates)
   let running = null;
   let lastRun;
@@ -164,8 +168,18 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       unavailable.get(id).add(dateStr(r.day));
     }
   }
+  async function loadGenders() {
+    const rows = (await db.query('SELECT cleaner_id, gender FROM commercial_cleaners WHERE gender IS NOT NULL')).rows;
+    genders = new Map(rows.map((r) => [Number(r.cleaner_id), r.gender]));
+  }
+  /** A gender was entered or cleared: re-read them and rebuild the in-memory copy on next use. */
+  async function gendersChanged() {
+    await loadGenders();
+    snap = null;
+  }
   async function load() {
     if (snap) return snap;
+    await loadGenders();
     const row = (await db.query('SELECT data FROM schedule_snapshots ORDER BY id DESC LIMIT 1')).rows[0];
     snap = row ? index(row.data) : null;
     await loadUnavailable();
@@ -176,7 +190,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
   function index(raw) {
     // Partner accounts: every booking on them is one of their clients (see harmonizePartners).
     const data = { ...raw, visits: harmonizePartners(fillForecasts(raw.visits)) };
-    const cleaners = data.cleaners;
+    const cleaners = data.cleaners.map((c) => (genders.has(c.id) ? { ...c, gender: genders.get(c.id), gender_launch27: c.gender ?? null, gender_set: true } : c));
     const byId = new Map(cleaners.map((c) => [c.id, c]));
     const t = data.today;
     const future = data.visits.filter((v) => v.date >= t);
@@ -207,7 +221,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       for (const v of c.past) for (const id of v.team_ids) c.history.set(id, (c.history.get(id) || 0) + 1);
       c.prefs = customerPrefs(c.tags || []);
     }
-    return { ...data, byId, future, past, busy, customers };
+    return { ...data, cleaners, raw_cleaners: data.cleaners, byId, future, past, busy, customers };
   }
 
   const windowFor = (c, d) => workingWindow(c.availability, d, unavailable.get(c.id));
@@ -507,7 +521,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     }
     const replaced = new Set([...freshKeys, ...extra.map((v) => v.key), ...gone]);
     const kept = prev.visits.filter((v) => !(v.date >= t && v.date <= until) && !replaced.has(v.key));
-    return { taken_at: new Date(now()).toISOString(), full_at: prev.full_at || prev.taken_at, today: t, cycle_anchor: prev.cycle_anchor, cleaners: prev.cleaners, holidays: prev.holidays || [], cleaners_by: prev.cleaners_by || null, hours_v: prev.hours_v || null, visits: [...kept, ...fresh, ...extra] };
+    return { taken_at: new Date(now()).toISOString(), full_at: prev.full_at || prev.taken_at, today: t, cycle_anchor: prev.cycle_anchor, cleaners: prev.raw_cleaners || prev.cleaners, holidays: prev.holidays || [], cleaners_by: prev.cleaners_by || null, hours_v: prev.hours_v || null, visits: [...kept, ...fresh, ...extra] };
   }
 
   async function sync({ bearer, trigger = 'manual', kind = 'full' } = {}) {
@@ -526,6 +540,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       const doNear = kind === 'near' && prev && prev.today === t;
       const data = { ...(doNear ? await nearData(bearer, prev, t) : await fullData(bearer, t, byPerson, prev)), sample };
       await loadUnavailable();
+      await loadGenders();
       const next = index(data);
       const found = [...(prev ? diff(prev, next) : []), ...problems(next)];
       let added = 0;
@@ -1140,6 +1155,6 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     };
   }
 
-  return { utilizationSource, reset, dataChanged, cleanerProfile, cleanerForBooking, sync, start, soon, maybeRun, status, overview, plan, gapOptions, unassigned, continuity, changes, resolveChange, findSlots, checkSlot, assign, markUnavailable, cleaners, isRunning: () => !!running, _load: load, _window: windowFor };
+  return { utilizationSource, reset, dataChanged, cleanerProfile, cleanerForBooking, sync, start, soon, maybeRun, status, overview, plan, gapOptions, unassigned, continuity, changes, resolveChange, findSlots, checkSlot, assign, markUnavailable, cleaners, isRunning: () => !!running, gendersChanged, _load: load, _window: windowFor };
 }
 

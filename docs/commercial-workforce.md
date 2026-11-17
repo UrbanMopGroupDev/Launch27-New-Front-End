@@ -67,8 +67,10 @@ Launch27 has no field for these, so the Commercial lead enters them on the Comme
 | Home postal code | The *Where cleaners live* map (postal area only). The audit log keeps only the postal area |
 | Pets (dogs, cats, other: OK / No, and a note) | Recorded only; not used in suggestions yet |
 
-None of these go into partner files. The gender entered here applies to this page only; Dispatch
-and the scheduling planner still use the Launch27 code.
+None of these go into partner files. The gender entered here is used across the portal: this page,
+Dispatch and the scheduling planner (`server/src/schedule/service.js` applies it when it indexes the
+Launch27 snapshot). The stored snapshot keeps Launch27's own values, so clearing an entry goes back
+to the team-name code.
 
 ## What was left out, on purpose
 

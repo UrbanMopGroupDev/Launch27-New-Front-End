@@ -121,7 +121,9 @@ export function teamStats({ visits, cleaners, today, isCom, ticks = new Map(), l
 export function withDetails(cleaners, details = new Map()) {
   return cleaners.map((c) => {
     const g = details.get(c.id)?.gender;
-    return g ? { ...c, gender: g, gender_launch27: c.gender || null, gender_set: true } : c;
+    if (!g) return c;
+    // The scheduler may already have applied it; keep Launch27's own value either way.
+    return { ...c, gender: g, gender_launch27: c.gender_launch27 !== undefined ? c.gender_launch27 : c.gender || null, gender_set: true };
   });
 }
 

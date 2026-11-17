@@ -216,6 +216,7 @@ describe('commercial workforce: the app on the synthetic Launch27', () => {
   let db;
   let server;
   let base;
+  let schedule;
   const login = async (email) => (await fetch(`${base}/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password: 'demo' }) })).headers.get('set-cookie').split(';')[0];
   const call = async (cookie, path, body, method = body ? 'PUT' : 'GET') => {
     const r = await fetch(`${base}/api/commercial/workforce${path}`, { method, headers: { cookie, 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
@@ -227,7 +228,7 @@ describe('commercial workforce: the app on the synthetic Launch27', () => {
     db = await openDb();
     await seed(db);
     const mock = createMockLaunch27({ password: 'demo' });
-    const schedule = createSchedule({ db, config, fetchImpl: mock, log: quiet });
+    schedule = createSchedule({ db, config, fetchImpl: mock, log: quiet });
     const commercialPlan = createWorkforce({ db, schedule });
     server = createApp(config, { db, fetchImpl: mock, schedule, commercialPlan, log: quiet }).listen(0);
     await new Promise((r) => server.once('listening', r));
@@ -288,6 +289,19 @@ describe('commercial workforce: the app on the synthetic Launch27', () => {
     assert.deepEqual([row.gender_source === 'platform', row.home_postal, row.pets.dogs], [false, null, 'no']);
     for (const bad of [{ gender: 'X' }, { home_postal: '12345' }, { pets_dogs: 'maybe' }]) assert.equal((await call(admin, `/cleaners/${c.id}`, bad)).status, 400);
     assert.deepEqual([tidyPostal('k1c 2b3'), tidyPostal('K6H'), tidyPostal('90210')], ['K1C 2B3', 'K6H', null]);
+    // The entered gender is used by the scheduler too (Dispatch, scheduling planner); the stored
+    // Launch27 copy keeps Launch27's own value, also after a sync.
+    const l27 = (await schedule._load()).cleaners.find((x) => x.id === c.id).gender;
+    const flip = l27 === 'F' ? 'M' : 'F';
+    await call(admin, `/cleaners/${c.id}`, { gender: flip });
+    assert.equal((await schedule._load()).cleaners.find((x) => x.id === c.id).gender, flip);
+    await schedule.sync();
+    assert.equal((await schedule._load()).cleaners.find((x) => x.id === c.id).gender, flip);
+    const stored = (await db.query('SELECT data FROM schedule_snapshots ORDER BY id DESC LIMIT 1')).rows[0].data;
+    const raw = (typeof stored === 'string' ? JSON.parse(stored) : stored).cleaners.find((x) => x.id === c.id);
+    assert.equal(raw.gender ?? null, l27 ?? null);
+    await call(admin, `/cleaners/${c.id}`, { gender: null });
+    assert.equal((await schedule._load()).cleaners.find((x) => x.id === c.id).gender ?? null, l27 ?? null);
     // Details never reach a partner file.
     await call(admin, `/cleaners/${c.id}`, { home_postal: 'K2P 0A1', pets_note: 'SECRET-PET-NOTE' });
     const file = await call(admin, `/partner-file?${Q}&partner=Carefor`);

@@ -152,6 +152,8 @@ export function createWorkforce({ db, schedule }) {
       ['pets_note', pets_note === undefined ? undefined : String(pets_note || '').trim().slice(0, 200) || null]].filter(([, v]) => v !== undefined);
     await db.query('INSERT INTO commercial_cleaners (cleaner_id, set_by) VALUES ($1, $2) ON CONFLICT (cleaner_id) DO NOTHING', [cid, userId]);
     for (const [col, v] of changes) await db.query(`UPDATE commercial_cleaners SET ${col} = $2, set_by = $3, set_at = now() WHERE cleaner_id = $1`, [cid, v, userId]);
+    // Dispatch and the scheduling planner use the entered gender too.
+    if (gender !== undefined) await schedule.gendersChanged?.();
   }
 
   async function setMove(key, { status, assignee_id, ends_on }, userId = null) {
