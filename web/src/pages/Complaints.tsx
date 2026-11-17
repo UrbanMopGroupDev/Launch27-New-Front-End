@@ -67,6 +67,14 @@ export function ComplaintsPage() {
   );
 }
 
+const RUN_LABEL: Record<string, { text: string; cls: string }> = {
+  running: { text: 'Running', cls: '' },
+  done: { text: 'Finished', cls: 'ok' },
+  partial: { text: 'Finished with problems', cls: 'warn' },
+  failed: { text: 'Failed', cls: 'neg' },
+};
+const clock = (s: string) => new Date(s).toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' });
+
 function RunBar({ status, isAdmin }: { status: Status; isAdmin: boolean }) {
   const qc = useQueryClient();
   const run = useMutation({ mutationFn: () => complaintsApi.run(), onSuccess: () => qc.invalidateQueries({ queryKey: ['complaints'] }) });
@@ -74,33 +82,47 @@ function RunBar({ status, isAdmin }: { status: Status; isAdmin: boolean }) {
   useEffect(() => {
     if (!status.running) qc.invalidateQueries({ queryKey: ['complaints', 'playbook'] });
   }, [status.running, qc]);
+  const state = status.running ? 'running' : last?.status || null;
+  const problems = (last?.log || []).filter((l) => l.level === 'error' || l.level === 'warn');
+  const latest = last?.log?.[last.log.length - 1];
   return (
     <section className="card">
       <div className="cmp-runbar">
         <div>
-          <b>Window:</b> {day(status.window.from)} – {day(status.window.to)}{' '}
-          <span className="muted small">
-            · {status.running ? 'Mining history…' : last ? `Last run ${day(last.started_at)}: ${last.status}` : 'Not run yet'}
-          </span>
+          <b>Window:</b> {day(status.window.from)} – {day(status.window.to)}
         </div>
         {isAdmin && (
           <button disabled={status.running || run.isPending} onClick={() => run.mutate()}>
-            {status.running ? 'Running…' : last ? 'Run again' : 'Run the pilot'}
+            {status.running || run.isPending ? 'Running…' : last ? 'Run again' : 'Run the pilot'}
           </button>
         )}
       </div>
+      {run.isError && <p className="neg small">Couldn't start the run: {(run.error as Error).message}</p>}
+      {state && last && (
+        <div className={`cmp-runstate ${RUN_LABEL[state]?.cls || ''}`} role="status" aria-live="polite">
+          <b>{RUN_LABEL[state]?.text || state}</b>
+          {status.running ? (
+            <span> · started {clock(last.started_at)}{latest ? ` · ${latest.msg}` : ' · starting…'} · the first run takes 5–10 minutes</span>
+          ) : (
+            <span> · {day(last.started_at)} {clock(last.started_at)}{last.finished_at ? `–${clock(last.finished_at)}` : ''}</span>
+          )}
+        </div>
+      )}
+      {!status.running && problems.length > 0 && (
+        <ul className="small cmp-problems">{problems.map((l, i) => <li key={i} className={l.level === 'error' ? 'neg' : 'warn'}>{l.msg}</li>)}</ul>
+      )}
       <ul className="cmp-sources small">
         {Object.entries(status.sources).map(([k, v]) => (
           <li key={k}>
-            <span className={`dot ${/connected|on|synthetic/.test(v) && !/not/.test(v) ? 'ok' : 'warn'}`} />
+            <span className={`dot ${/connected|on|synthetic/.test(v) && !/not /.test(v) ? 'ok' : 'warn'}`} />
             <b>{k === 'claude' ? 'Claude classification' : k[0].toUpperCase() + k.slice(1)}</b>: {v}
           </li>
         ))}
       </ul>
       {last?.log?.length ? (
-        <details className="small">
-          <summary>Run log</summary>
-          <ul>{last.log.map((l, i) => <li key={i} className={l.level === 'error' ? 'neg' : l.level === 'warn' ? 'warn' : ''}>{l.msg}</li>)}</ul>
+        <details className="small" open={status.running}>
+          <summary>Run log ({last.log.length} steps)</summary>
+          <ul>{last.log.map((l, i) => <li key={i} className={l.level === 'error' ? 'neg' : l.level === 'warn' ? 'warn' : ''}>{clock(l.at)} · {l.msg}</li>)}</ul>
         </details>
       ) : null}
     </section>

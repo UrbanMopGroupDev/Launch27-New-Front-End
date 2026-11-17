@@ -2,10 +2,9 @@
 # GitHub's deployment status, or by hand against any URL.
 #
 # Railway's deployment status carries a link to its dashboard, not to the app, so the app's
-# base URL comes from repository variables keyed by environment:
-#   SMOKE_URL_DEVELOPMENT, SMOKE_URL_STAGING, SMOKE_URL_PRODUCTION
-# (Settings → Secrets and variables → Actions → Variables). An environment with no URL
-# configured is skipped with a notice instead of failing.
+# base URL per environment is set below (Railway's public service domains). A repository
+# variable SMOKE_URL_DEVELOPMENT / SMOKE_URL_STAGING / SMOKE_URL_PRODUCTION overrides it,
+# e.g. after moving to a custom domain. An environment with no URL is skipped with a notice.
 name: Smoke test
 
 on:
@@ -36,9 +35,9 @@ jobs:
           INPUT_URL: ${{ github.event.inputs.url }}
           INPUT_EXPECT_ENV: ${{ github.event.inputs.expect_env }}
           DEPLOY_ENV: ${{ github.event.deployment.environment }}
-          URL_DEVELOPMENT: ${{ vars.SMOKE_URL_DEVELOPMENT }}
-          URL_STAGING: ${{ vars.SMOKE_URL_STAGING }}
-          URL_PRODUCTION: ${{ vars.SMOKE_URL_PRODUCTION }}
+          URL_DEVELOPMENT: ${{ vars.SMOKE_URL_DEVELOPMENT || 'https://web-development-7e66.up.railway.app' }}
+          URL_STAGING: ${{ vars.SMOKE_URL_STAGING || 'https://web-staging-e86e.up.railway.app' }}
+          URL_PRODUCTION: ${{ vars.SMOKE_URL_PRODUCTION || 'https://web-production-27677.up.railway.app' }}
         run: |
           # Map any spelling of an environment to development | staging | production.
           canon() {
@@ -78,7 +77,7 @@ jobs:
             esac
             if [ -z "$url" ]; then
               var="SMOKE_URL_$(echo "$expect" | tr '[:lower:]' '[:upper:]')"
-              echo "::notice::Smoke test skipped: no app URL for '$expect' (deployment environment '$DEPLOY_ENV'). Set the repository variable $var."
+              echo "::notice::Smoke test skipped: no app URL for '$expect' (deployment environment '$DEPLOY_ENV'). Set it in smoke.yml or the repository variable $var."
               echo "skip=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
