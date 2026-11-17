@@ -820,8 +820,12 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       res.send(file.html);
     }));
     r.put('/commercial/workforce/cleaners/:id', wf(async (req, res) => {
-      await commercialPlan.setCleaner(req.params.id, { commercial: req.body?.commercial, last_day: req.body?.last_day }, req.user.id);
-      await svc.audit(db, req.user.id, 'commercial.cleaner', 'cleaner', req.params.id, req.body || {});
+      const b = req.body || {};
+      await commercialPlan.setCleaner(req.params.id, { commercial: b.commercial, last_day: b.last_day, gender: b.gender, home_postal: b.home_postal, pets_dogs: b.pets_dogs, pets_cats: b.pets_cats, pets_other: b.pets_other, pets_note: b.pets_note }, req.user.id);
+      // A home postal code is personal: the audit log keeps only its postal area.
+      const logged = { ...b };
+      if (typeof logged.home_postal === 'string') logged.home_postal = logged.home_postal.replace(/\s/g, '').slice(0, 3).toUpperCase();
+      await svc.audit(db, req.user.id, 'commercial.cleaner', 'cleaner', req.params.id, logged);
       res.json({ ok: true });
     }));
     r.put('/commercial/workforce/moves', wf(async (req, res) => {

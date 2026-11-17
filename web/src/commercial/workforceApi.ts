@@ -4,11 +4,13 @@ import { ApiError, describeErrors } from '../api';
 
 export type MoveStatus = 'proposed' | 'approved' | 'done' | 'hold';
 export interface Who { id: number; name: string }
-export interface Candidate extends Who { added_km: number | null; served: boolean; free_hours?: number }
+/** How a cleaner fits the client's gender wish: null = the client has none. */
+export type GenderFit = 'match' | 'unknown' | 'other' | null;
+export interface Candidate extends Who { added_km: number | null; served: boolean; free_hours?: number; gender_fit?: GenderFit }
 export interface SeriesInfo { key: string; client: string; account: string; category: string; weekday: number; start: number; duration: number; rhythm: string; addr: string | null; area: string | null; location_id: number | null }
 export interface Action extends SeriesInfo { dates: string[]; kind: 'move' | 'nocover' | 'stay' | 'hold'; state: MoveStatus; end: string | null; holders: Who[]; pick: Candidate | null; candidates: Candidate[] }
 export interface Near { km: number; before: boolean; time: number; label: string }
-export interface Unassigned extends SeriesInfo { dates: string[]; visit_keys: string[]; commercial: (Who & { near: Near | null })[]; others: (Who & { near: Near | null })[] }
+export interface Unassigned extends SeriesInfo { dates: string[]; visit_keys: string[]; commercial: (Who & { near: Near | null; gender_fit?: GenderFit })[]; others: (Who & { near: Near | null; gender_fit?: GenderFit })[] }
 export interface Load { id: number; name: string; available_hours: number; commercial_hours: number; residential_hours: number; planned_hours: number; km_now: number; km_planned: number; has_hours: boolean; last_day: string | null }
 export type BlockType = 'com' | 'res' | 'in' | 'out' | 'stay' | 'nocover' | 'off';
 export interface BoardRow { id: number; name: string; commercial: boolean; days: { date: string; window: [number, number] | null; blocks: { start: number; end: number; type: BlockType; label: string }[] }[] }
@@ -21,7 +23,16 @@ export interface Plan {
   tight: { cleaner: Who; date: string; from: string; to: string; gap: number; need: number; km: number }[];
   board: BoardRow[]; no_cleaner: { date: string; start: number; end: number; label: string; try: string | null }[];
 }
-export interface TeamRow { id: number; name: string; status: string; assignable: boolean; commercial_hours: number; residential_hours: number; share: number; suggested: boolean; ticked: boolean | null; commercial: boolean; upcoming_commercial: number; accounts: number; location_ids: number[]; has_hours: boolean; last_day: string | null }
+export type Gender = 'F' | 'M';
+export type PetOk = 'ok' | 'no' | null;
+export interface TeamRow {
+  id: number; name: string; status: string; assignable: boolean; commercial_hours: number; residential_hours: number; share: number; suggested: boolean; ticked: boolean | null; commercial: boolean; upcoming_commercial: number; accounts: number; location_ids: number[]; has_hours: boolean; last_day: string | null;
+  /** Gender used for planning; gender_source says where it came from (entered in the portal, or the Launch27 team-name code). */
+  gender: Gender | null; gender_launch27: Gender | null; gender_source: 'platform' | 'launch27' | null;
+  home_postal: string | null; home_fsa: string | null; home_place: string | null;
+  pets: { dogs: PetOk; cats: PetOk; other: PetOk; note: string };
+}
+export interface CleanerPatch { commercial?: boolean | null; last_day?: string | null; gender?: Gender | null; home_postal?: string | null; pets_dogs?: PetOk; pets_cats?: PetOk; pets_other?: PetOk; pets_note?: string | null }
 export interface Team { today: string; taken_at: string; threshold: number; cleaners: TeamRow[] }
 export interface PartnerSettings { accounts: Record<string, string[]>; showNames: boolean; showOwnAddresses: boolean; showOtherPartners: boolean; weeks: number; days: number[]; slots: [number, number][]; contact: string }
 export interface Suggestion { cleaner_id: number; cleaner: string; area: string; day: number; start: number; duration: number; first: string; freq: number; near: { km: number; before: boolean; time: number; kind: 'C' | 'R'; account: string; addr: string } | null; tight: boolean; missing: string[] }
@@ -52,7 +63,7 @@ export const workforceApi = {
   team: (s: Scope) => call<Team>(`/team${qs(s)}`),
   plan: (s: Scope, week: string | null) => call<Plan>(`/plan${qs(s, { week })}`),
   slots: (s: Scope, find?: { postal: string; freq: number; day: number | null }) => call<Slots>(`/slots${qs(s, find ? { postal: find.postal, freq: find.freq, day: find.day } : {})}`),
-  setCleaner: (id: number, patch: { commercial?: boolean | null; last_day?: string | null }) => put(`/cleaners/${id}`, patch),
+  setCleaner: (id: number, patch: CleanerPatch) => put(`/cleaners/${id}`, patch),
   setMove: (key: string, patch: { status?: MoveStatus; assignee_id?: number | null; ends_on?: string | null }) => put('/moves', { key, ...patch }),
   setSettings: (patch: { transitionRule?: boolean; partner?: Partial<Pick<PartnerSettings, 'showNames' | 'showOwnAddresses' | 'showOtherPartners' | 'weeks' | 'contact'>> }) => put('/settings', patch),
   /** Downloads one partner's availability page (leads only). */

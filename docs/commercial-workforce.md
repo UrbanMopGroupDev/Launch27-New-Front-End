@@ -32,7 +32,10 @@ It never writes to Launch27. It suggests; people approve and make every change i
 4. **Where is there room for new clients?** The open-slots grid counts Commercial cleaners
    free at each day and time in every one of the next weeks. The slot finder takes a postal
    code and suggests times when a Commercial cleaner already has a visit nearby.
-5. **What can partners see?** A page per partner (Carefor, OWCS) that they open by
+5. **Where do cleaners live?** *Where cleaners live* shades the postal area each cleaner lives
+   in (from the home postal code entered under Cleaner details), so the lead can pick someone
+   close to a client. Only the postal area is shown, never an address.
+6. **What can partners see?** A page per partner (Carefor, OWCS) that they open by
    themselves, with the open slots and the same postal-code finder.
 
 ## What the portal already did
@@ -53,12 +56,28 @@ The Commercial team list, the weekly plan of moves with statuses, the week board
 open-slots grid and postal-code finder, the partner files, and two visit categories the
 portal did not name before (EOPMG, OWCS GHP).
 
+## Cleaner details (entered in the portal)
+
+Launch27 has no field for these, so the Commercial lead enters them on the Commercial team tab
+(*Cleaner details*). They are stored in `commercial_cleaners` (migration 0025).
+
+| Detail | Used for |
+| --- | --- |
+| Gender | Ranking suggestions. Replaces the (F)/(M) code in the Launch27 team name; "From Launch27" keeps that code |
+| Home postal code | The *Where cleaners live* map (postal area only). The audit log keeps only the postal area |
+| Pets (dogs, cats, other: OK / No, and a note) | Recorded only; not used in suggestions yet |
+
+None of these go into partner files. The gender entered here applies to this page only; Dispatch
+and the scheduling planner still use the Launch27 code.
+
 ## What was left out, on purpose
 
 - File uploads and downloads of bookings and cleaners. The data is live.
 - Assumed default hours for cleaners with none on file. The page uses what Launch27 holds.
 - Backup and restore of settings. They are in the database.
-- The postal-area outline map. The finder works from area centres.
+- The postal-area outlines in the slot finder. The finder works from area centres; the outlines
+  are drawn only on *Where cleaners live*, loaded from `web/public/geo/postal-areas.json`
+  (~60 KB compressed) when that tab opens.
 - A live login for partners. Partner files are downloaded and sent, as they were before.
   Giving partners a sign-in is a separate decision.
 
@@ -68,7 +87,11 @@ portal did not name before (EOPMG, OWCS GHP).
 - Times are compared visit by visit over the planning window, so "free" means free every
   time the visit happens, with the cleaner's hours and dated days off from Launch27.
 - A cleaner is only proposed where they have worked before (Ottawa or Cornwall).
-- Customer preferences from Launch27 tags are respected (female only, avoid, prefers).
+- Customer preferences from Launch27 tags and Staff Notes are respected (female only, avoid,
+  prefers). "No male cleaner" counts as a wish for a female cleaner.
+- Suggested cleaners are ranked: the client's gender wish first (right gender, then gender not
+  set, then the other gender), then already serves the account, then least extra driving, then
+  most free hours. Each suggestion says how it fits the gender wish.
 - Driving distance is the straight line times 1.3. Slots keep a 30-minute gap around other
   visits.
 - A cleaner with a last working day is not proposed for anything after it, and their visits
@@ -96,9 +119,10 @@ Only supervisors and admins can download a file, and each download is recorded.
 | Routes | `server/src/inbox/api.js` (`/api/commercial/workforce/…`) |
 | Tables | `server/migrations/0017_commercial_workforce.sql` |
 | Page | `web/src/commercial/Workforce.tsx` |
+| Where cleaners live | `web/src/commercial/HomesMap.tsx`, outlines in `web/public/geo/postal-areas.json` |
 | Tests | `server/test/commercial-workforce.test.js` |
 
-Tables: `commercial_cleaners` (the lead's tick and last working day), `commercial_moves`
+Tables: `commercial_cleaners` (the lead's tick, last working day, gender, home postal code and pets), `commercial_moves`
 (status, chosen cleaner and program end date for each recurring visit), `commercial_settings`
 (partner accounts and what partner files show).
 
@@ -106,3 +130,7 @@ Tables: `commercial_cleaners` (the lead's tick and last working day), `commercia
 
 Postal-area centres in `server/src/commercial/data/postal-area-centres.json` come from
 [GeoNames](https://www.geonames.org/), licensed CC BY 4.0.
+
+Postal-area boundaries in `web/public/geo/postal-areas.json`: Statistics Canada, 2021 Census
+forward sortation area boundary file (simplified). Contains information licensed under the
+[Open Government Licence – Canada](https://open.canada.ca/en/open-government-licence-canada).

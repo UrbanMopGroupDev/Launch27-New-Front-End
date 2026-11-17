@@ -9,14 +9,18 @@ import { useBrandsData } from '../brands/useBrand';
 import { brandForLocation } from '../brands/rules';
 import { ago, useInboxMe } from '../inbox/util';
 import { clockOf, niceDate } from './ui';
-import { workforceApi, type Action, type BlockType, type MoveStatus, type Plan, type Scope, type Slots, type Team } from './workforceApi';
+import { workforceApi, type Action, type BlockType, type GenderFit, type MoveStatus, type PetOk, type Plan, type Scope, type Slots, type Team, type TeamRow } from './workforceApi';
+import { HomesTab } from './HomesMap';
 
-type Tab = 'plan' | 'board' | 'slots' | 'team';
-const TABS: [Tab, string][] = [['plan', 'Weekly plan'], ['board', 'Week board'], ['slots', 'Open slots'], ['team', 'Commercial team']];
+type Tab = 'plan' | 'board' | 'slots' | 'homes' | 'team';
+const TABS: [Tab, string][] = [['plan', 'Weekly plan'], ['board', 'Week board'], ['slots', 'Open slots'], ['homes', 'Where cleaners live'], ['team', 'Commercial team']];
 const DAY = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 const RHYTHM: Record<string, string> = { weekly: 'Weekly', bi: 'Every 2 weeks', tri: 'Every 3 weeks', monthly: 'Monthly', one: 'One-time' };
 const STATUS: Record<MoveStatus, string> = { proposed: 'Proposed', approved: 'Approved', done: 'Done in Launch27', hold: 'On hold' };
+/** How a suggested cleaner fits the client's gender wish (nothing when the client has none). */
+const FIT: Record<Exclude<GenderFit, null>, string> = { match: 'fits gender wish', unknown: 'gender not set', other: 'not the gender asked for' };
+const fitText = (g?: GenderFit) => (g ? ` · ${FIT[g]}` : '');
 const shift = (d: string, n: number) => new Date(Date.parse(`${d}T12:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
 const shortDate = (d: string) => new Date(`${d}T12:00:00Z`).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 const hrs = (m: number) => `${Math.round((m / 60) * 10) / 10} h`;
@@ -73,6 +77,7 @@ export function WorkforcePage() {
       {scope && p && tab === 'plan' && <PlanTab plan={p} />}
       {scope && p && tab === 'board' && <BoardTab plan={p} />}
       {scope && scope.locations.length > 0 && tab === 'slots' && <SlotsTab scope={scope} />}
+      {scope && scope.locations.length > 0 && tab === 'homes' && <HomesTab scope={scope} />}
       {scope && scope.locations.length > 0 && tab === 'team' && <TeamTab scope={scope} />}
     </div>
   );
@@ -153,7 +158,7 @@ function PlanTab({ plan }: { plan: Plan }) {
                   <td>{a.holders.map((h) => h.name).join(', ')}</td>
                   <td>
                     <select value={a.pick?.id ?? ''} aria-label="Move to" onChange={(e) => save.mutate({ key: a.key, patch: { assignee_id: Number(e.target.value) } })}>
-                      {a.candidates.map((c) => <option key={c.id} value={c.id}>{c.name}{c.added_km != null ? ` · +${c.added_km} km` : ''}{c.served ? ' · knows the account' : ''}</option>)}
+                      {a.candidates.map((c) => <option key={c.id} value={c.id}>{c.name}{c.added_km != null ? ` · +${c.added_km} km` : ''}{c.served ? ' · knows the account' : ''}{fitText(c.gender_fit)}</option>)}
                     </select>
                   </td>
                   <td><StatusSelect a={a} /></td>
@@ -214,7 +219,7 @@ function PlanTab({ plan }: { plan: Plan }) {
                   <td><Client a={u} /></td>
                   <td className="nowrap">{when(u)}<div className="muted small">{u.dates.map(shortDate).join(', ')}</div></td>
                   <td>
-                    {u.commercial.map((c) => <div key={c.id}>{c.name}{c.near ? <span className="muted small"> · {c.near.km} km from {c.near.label}, {c.near.before ? 'ending' : 'starting'} {clockOf(c.near.time)}</span> : <span className="muted small"> · no other visit that day</span>}</div>)}
+                    {u.commercial.map((c) => <div key={c.id}>{c.name}{c.gender_fit && c.gender_fit !== 'match' && <span className="chip warn">{FIT[c.gender_fit]}</span>}{c.near ? <span className="muted small"> · {c.near.km} km from {c.near.label}, {c.near.before ? 'ending' : 'starting'} {clockOf(c.near.time)}</span> : <span className="muted small"> · no other visit that day</span>}</div>)}
                     {!u.commercial.length && u.others.map((c) => <div key={c.id}>{c.name} <span className="chip warn">not on the Commercial team</span></div>)}
                     {!u.commercial.length && !u.others.length && <span className="neg">Nobody is free</span>}
                   </td>
@@ -438,6 +443,7 @@ function TeamTab({ scope }: { scope: Scope }) {
   if (team.isError) return <div className="card error">{(team.error as Error).message}</div>;
   if (!d) return <div className="muted">Loading…</div>;
   return (
+    <>
     <section className="card no-pad">
       <div className="wf-head"><h2>Who is on the Commercial team</h2></div>
       <p className="muted small wf-note">Everyone with Commercial visits in the last 8 weeks or coming up. The app suggests the team from each cleaner's share of Commercial hours ({Math.round(d.threshold * 100)}% or more); you decide. Hours and days off come from Launch27.</p>
@@ -459,6 +465,61 @@ function TeamTab({ scope }: { scope: Scope }) {
                 </select>
               </td>
               <td><input type="date" aria-label="Last working day" defaultValue={c.last_day || ''} onBlur={(e) => e.target.value !== (c.last_day || '') && save.mutate({ id: c.id, patch: { last_day: e.target.value || null } })} /></td>
+            </tr>
+          ))}
+        </tbody>
+      </table></div>
+    </section>
+    <CleanerDetails cleaners={d.cleaners} onSave={(id, patch) => { setError(null); save.mutate({ id, patch }); }} />
+    </>
+  );
+}
+
+const GENDER: Record<string, string> = { F: 'Female', M: 'Male' };
+const PET_COLS: ['pets_dogs' | 'pets_cats' | 'pets_other', 'dogs' | 'cats' | 'other', string][] = [['pets_dogs', 'dogs', 'Dogs'], ['pets_cats', 'cats', 'Cats'], ['pets_other', 'other', 'Other pets']];
+
+/** Details Launch27 doesn't hold: gender (used to rank suggestions), home postal code (the map) and pets (recorded only). */
+function CleanerDetails({ cleaners, onSave }: { cleaners: TeamRow[]; onSave: (id: number, patch: Parameters<typeof workforceApi.setCleaner>[1]) => void }) {
+  const [filter, setFilter] = useState<'team' | 'all'>('team');
+  const rows = cleaners.filter((c) => filter === 'all' || c.commercial);
+  return (
+    <section className="card no-pad">
+      <div className="wf-head">
+        <h2>Cleaner details</h2>
+        <select value={filter} aria-label="Which cleaners" onChange={(e) => setFilter(e.target.value as 'team' | 'all')}>
+          <option value="team">Commercial team</option>
+          <option value="all">Everyone with Commercial work</option>
+        </select>
+      </div>
+      <p className="muted small wf-note">What Launch27 doesn't hold. <strong>Gender</strong> ranks suggestions: a client who asked for a female (or male) cleaner in their tags or Staff Notes gets one first; leave it on Launch27 to use the (F)/(M) code in the team name. <strong>Home postal code</strong> places the cleaner on the Where cleaners live map (postal area only). <strong>Pets</strong> are recorded for now, not used in suggestions. None of this goes into partner files.</p>
+      <div className="wf-scroll"><table>
+        <thead><tr><th>Cleaner</th><th>Gender</th><th>Home postal code</th>{PET_COLS.map(([, , label]) => <th key={label}>{label}</th>)}<th>Pets note</th></tr></thead>
+        <tbody>
+          {rows.map((c) => (
+            <tr key={c.id}>
+              <td>{c.name}{c.commercial ? '' : <div className="muted small">not on the team</div>}</td>
+              <td>
+                <select value={c.gender_source === 'platform' ? c.gender || '' : ''} aria-label={`Gender of ${c.name}`} onChange={(e) => onSave(c.id, { gender: (e.target.value || null) as 'F' | 'M' | null })}>
+                  <option value="">From Launch27: {c.gender_launch27 ? GENDER[c.gender_launch27] : 'not set'}</option>
+                  <option value="F">Female</option>
+                  <option value="M">Male</option>
+                </select>
+              </td>
+              <td>
+                <input key={c.home_postal || ''} className="wf-postal" aria-label={`Home postal code of ${c.name}`} placeholder="K1C 2B3" defaultValue={c.home_postal || ''}
+                  onBlur={(e) => e.target.value.trim() !== (c.home_postal || '') && onSave(c.id, { home_postal: e.target.value.trim() || null })} />
+                {c.home_fsa && <div className="muted small">⌂ {c.home_fsa}{c.home_place ? ` · ${c.home_place}` : ''}</div>}
+              </td>
+              {PET_COLS.map(([field, key, label]) => (
+                <td key={field}>
+                  <select value={c.pets[key] || ''} aria-label={`${label}: ${c.name}`} onChange={(e) => onSave(c.id, { [field]: (e.target.value || null) as PetOk })}>
+                    <option value="">Not asked</option>
+                    <option value="ok">OK</option>
+                    <option value="no">No</option>
+                  </select>
+                </td>
+              ))}
+              <td><input key={c.pets.note} className="wf-pets-note" aria-label={`Pets note for ${c.name}`} maxLength={200} defaultValue={c.pets.note} onBlur={(e) => e.target.value.trim() !== c.pets.note && onSave(c.id, { pets_note: e.target.value.trim() || null })} /></td>
             </tr>
           ))}
         </tbody>

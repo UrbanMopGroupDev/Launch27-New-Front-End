@@ -74,6 +74,8 @@ export function noteHints(notes) {
       prefers = true;
       out.push(line.replace(/^prefer\s/, 'prefers ').split(/[.,;]/)[0]);
     } else if (/female/.test(line) && /(cleaner|only|request)/.test(line)) out.push(/only/.test(line) ? 'female cleaner only' : 'prefers female cleaner');
+    // "NO male cleaner", "doesn't want a male cleaner": a wish for a female cleaner, not a male one.
+    else if (/\b(no|not|never|without|doesn'?t want|does not want|don'?t want|do not want)\b[^.]*\bmale\b/.test(line) && /(cleaner|only|request)/.test(line)) out.push('prefers female cleaner');
     else if (/\bmale\b/.test(line) && /(cleaner|only|request)/.test(line)) out.push('prefers male cleaner');
   }
   return [...new Set(out)];
