@@ -46,7 +46,7 @@ export function UtilizationPage() {
           <h1>Utilization{brand.view !== 'both' && <span className="muted"> · {brandLabel(brand.view)}</span>}</h1>
           <p className="muted">How much of our cleaners' open time is already spoken for, and how much is left to book. Monday to Saturday.</p>
         </div>
-        {r && <RangePicker value={range || { from: r.from, to: r.to }} onChange={setRange} today={r.today} maxTo={r.max_to} />}
+        {r && <RangePicker value={range || { from: r.from, to: r.to }} onChange={setRange} today={r.today} minFrom={r.min_from || r.today} maxTo={r.max_to} />}
       </header>
       <div className="ut-tabs" role="tablist">
         <button role="tab" aria-selected={tab === 'report'} className={tab === 'report' ? 'active' : ''} onClick={() => setTab('report')}>Utilization</button>
@@ -68,7 +68,7 @@ export function UtilizationPage() {
           <p className="muted">{(q.error as Error).message}</p>
         </section>
       )}
-      {r && (tab === 'report' ? <Report r={r} area={area} setArea={setArea} /> : <DataCheckView r={r} area={area} />)}
+      {r && (tab === 'report' ? <Report r={r} area={area} setArea={setArea} otherBrand={otherBrand(brand.view)} /> : <DataCheckView r={r} area={area} otherBrand={otherBrand(brand.view)} />)}
     </div>
   );
 }
@@ -89,6 +89,13 @@ function SentRows({ sent }: { sent: UtilizationReport['data_check']['cleaners'][
   );
 }
 
+// In one brand's view, shared cleaners' hours already booked for the other brand are taken out.
+const otherBrand = (view: string) => (view === 'residential' ? 'Commercial' : view === 'commercial' ? 'Residential' : 'the other brand');
+function OpenSplit({ open, other, label }: { open: number; other: number; label: string }) {
+  if (!(other > 0)) return null;
+  return <div className="small muted ut-split" title={`Open in Launch27: ${h(open)}. Already booked for ${label}: ${h(other)}.`}>{h(open)} open · {h(other)} booked for {label}</div>;
+}
+
 const issues = (r: UtilizationReport) => r.data_check.cleaners.filter((c) => c.flags.length).length;
 
 // ---------- data check: what the report knows from Launch27, per cleaner ----------
@@ -99,7 +106,7 @@ const FLAG_HELP: Record<DataFlag, string> = {
   no_hours: 'Launch27 answered, but no weekly hours are set for them.',
   no_home: "Their Launch27 profile has no map location (usually a missing or incomplete home address), so their area shows as Unknown.",
 };
-function DataCheckView({ r, area }: { r: UtilizationReport; area: string | null }) {
+function DataCheckView({ r, area, otherBrand: ob }: { r: UtilizationReport; area: string | null; otherBrand: string }) {
   const dc = r.data_check;
   const [only, setOnly] = useState<DataFlag | null>(null);
   const rows = dc.cleaners.filter((c) => (!area || c.area === area) && (!only || c.flags.some((f) => f.kind === only)));
@@ -148,7 +155,7 @@ function DataCheckView({ r, area }: { r: UtilizationReport; area: string | null 
                   <td className={c.taking ? '' : 'warn'}>{c.status_label || '—'}{!c.taking && <span className="muted small"> · not taking</span>}</td>
                   <td className={c.home_location ? 'muted' : 'warn'}>{c.home_location ? c.area : 'Unknown · no home location'}</td>
                   <td className="num">{c.availability_error ? <span className="warn">—</span> : c.weekly_hours ? h(c.weekly_hours) : <span className="warn">none set</span>}{c.dated_rows > 0 && <span className="muted small"> · {c.dated_rows} date changes</span>}</td>
-                  <td className="num">{h(c.available_h)}</td>
+                  <td className="num">{h(c.available_h)}<OpenSplit open={c.open_h} other={c.other_brand_h} label={ob} /></td>
                   <td className="num">{h(c.booked_h)}<span className="muted small"> · {c.visits} {c.visits === 1 ? 'visit' : 'visits'}</span></td>
                 </tr>
               ))}
@@ -162,10 +169,14 @@ function DataCheckView({ r, area }: { r: UtilizationReport; area: string | null 
 }
 
 // ---------- date range: presets + a calendar (click a start and an end, or drag) ----------
-function RangePicker({ value, onChange, today: t, maxTo }: { value: { from: string; to: string }; onChange: (v: { from: string; to: string }) => void; today: string; maxTo: string }) {
+function RangePicker({ value, onChange, today: t, minFrom, maxTo }: { value: { from: string; to: string }; onChange: (v: { from: string; to: string }) => void; today: string; minFrom: string; maxTo: string }) {
   const [open, setOpen] = useState(false);
   const presets = [1, 2, 4, 8].map((w) => ({ label: `${w} ${w === 1 ? 'week' : 'weeks'}`, from: t, to: addDays(t, w * 7 - 1) > maxTo ? maxTo : addDays(t, w * 7 - 1) }));
-  const active = presets.find((p) => p.from === value.from && p.to === value.to);
+  // Last week: the Monday to Sunday before this week.
+  const thisMonday = addDays(t, -((new Date(`${t}T12:00:00`).getDay() + 6) % 7));
+  const lastWeek = { label: 'Last week', from: addDays(thisMonday, -7), to: addDays(thisMonday, -1) };
+  const canLastWeek = lastWeek.from >= minFrom;
+  const active = [...presets, lastWeek].find((p) => p.from === value.from && p.to === value.to);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
@@ -179,6 +190,7 @@ function RangePicker({ value, onChange, today: t, maxTo }: { value: { from: stri
   return (
     <div className="ut-range" ref={ref}>
       <div className="seg-period" role="group" aria-label="Dates">
+        {canLastWeek && <button className={active === lastWeek ? 'active' : ''} aria-pressed={active === lastWeek} onClick={() => { onChange({ from: lastWeek.from, to: lastWeek.to }); setOpen(false); }}>Last week</button>}
         <span className="ut-next muted small">Next</span>
         {presets.map((p) => (
           <button key={p.label} className={active === p ? 'active' : ''} aria-pressed={active === p} onClick={() => { onChange({ from: p.from, to: p.to }); setOpen(false); }}>{p.label}</button>
@@ -188,7 +200,7 @@ function RangePicker({ value, onChange, today: t, maxTo }: { value: { from: stri
           <span className="muted"> · {n} {n === 1 ? 'day' : 'days'}</span>
         </button>
       </div>
-      {open && <Calendar value={value} min={t} max={maxTo} onChange={(v, done) => { onChange(v); if (done) setOpen(false); }} />}
+      {open && <Calendar value={value} min={minFrom} max={maxTo} onChange={(v, done) => { onChange(v); if (done) setOpen(false); }} />}
     </div>
   );
 }
@@ -257,7 +269,7 @@ function Calendar({ value, min, max, onChange }: { value: { from: string; to: st
 }
 
 // ---------- report ----------
-function Report({ r, area, setArea }: { r: UtilizationReport; area: string | null; setArea: (a: string | null) => void }) {
+function Report({ r, area, setArea, otherBrand: ob }: { r: UtilizationReport; area: string | null; setArea: (a: string | null) => void; otherBrand: string }) {
   const a = area ? r.areas.find((x) => x.area === area) : null;
   const f: UtilFigures = a || r.totals;
   const cleaners = area ? r.cleaners.filter((c) => c.area === area) : r.cleaners;
@@ -326,12 +338,12 @@ function Report({ r, area, setArea }: { r: UtilizationReport; area: string | nul
                 <tr key={x.cleaner_id}>
                   <td><Link to={`/reports/cleaners/${x.cleaner_id}`} className="seg-name">{x.name}</Link>{x.status_label && x.status_label !== 'Active' && <span className="seg-trait">{x.status_label}</span>}</td>
                   <td className="muted">{x.area}</td>
-                  <td className="num">{h(x.available_h)}</td>
+                  <td className="num">{h(x.available_h)}<OpenSplit open={x.open_h} other={x.other_brand_h} label={ob} /></td>
                   <td className="num">{h(x.assigned_h)}<span className="muted small"> · {x.visits} {x.visits === 1 ? 'visit' : 'visits'}</span></td>
                   <td className="num">{h(x.travel_h)}{x.travel_per_visit_min != null && <span className="muted small"> · {x.travel_per_visit_min} min each</span>}</td>
                   <td className={`num${x.left_h < 0 ? ' warn' : ''}`}>{x.left_h < 0 ? `over by ${h(-x.left_h)}` : h(x.left_h)}</td>
                   <td><UtilBar u={x.utilization} /></td>
-                  <td className="num">{x.area_short ? <span className="warn">area has no room</span> : x.if_left != null && x.if_left > 1 ? <span className="warn">{pct(x.if_left)}</span> : pct(x.if_left)}</td>
+                  <td className="num">{x.area_short ? <span className="warn">area has no room</span> : x.if_left != null && x.if_left > 1 ? <span className="warn">{x.if_left > 9.99 ? '>999%' : pct(x.if_left)}</span> : pct(x.if_left)}</td>
                 </tr>
               ))}
               {cleaners.length === 0 && <tr><td colSpan={8} className="muted">No cleaners taking bookings here.</td></tr>}
@@ -366,11 +378,13 @@ function Summary({ r, f, area }: { r: UtilizationReport; f: UtilFigures; area: s
       <span className="muted small">{when} · {area ? `${area} Ottawa` : 'All areas'}</span>
       <div className="ut-headline">
         <div>
-          <span className={`ut-big${over ? ' warn' : ''}`}>{over ? `Over by ${h(-f.left_h)}` : `${h(f.left_h)} left to book`}</span>
+          <span className={`ut-big${over ? ' warn' : ''}`}>{over ? `${r.past ? 'Overbooked' : 'Over'} by ${h(-f.left_h)}` : r.past ? `${h(f.left_h)} went unbooked` : `${h(f.left_h)} left to book`}</span>
           <span className="ut-sub">
             {over
-              ? 'More work is booked than cleaners have open hours.'
-              : f.room_bookings
+              ? (r.past ? 'More work was booked than cleaners had open hours.' : 'More work is booked than cleaners have open hours.')
+              : r.past
+                ? 'Past dates: open hours that no booking used.'
+                : f.room_bookings
                 ? <>Room for about <b>{f.room_bookings} more bookings</b> (a typical {h(f.typical_booking_h)} visit plus about {r.avg_leg_min} min of driving).</>
                 : 'No room for another typical booking.'}
           </span>
@@ -390,7 +404,7 @@ function Summary({ r, f, area }: { r: UtilizationReport; f: UtilFigures; area: s
         <span className="ut-op">−</span>
         <MathTile label="Travel (est.)" value={h(f.travel_h)} note="each cleaner's route, home and back" color={PART.travel} />
         <span className="ut-op">=</span>
-        <MathTile label="Left to book" value={over ? `−${h(-f.left_h)}` : h(f.left_h)} strong />
+        <MathTile label={r.past ? 'Unbooked' : 'Left to book'} value={over ? `−${h(-f.left_h)}` : h(f.left_h)} strong />
       </div>
       <div className="ut-bar" role="img" aria-label={`${pct(f.utilization)} of available hours spoken for`}>
         {parts.map((p) => p.value > 0 && <span key={p.key} title={`${p.label}: ${h(p.value)}`} style={{ width: `${(p.value / scale) * 100}%`, background: p.color }} />)}
@@ -398,7 +412,7 @@ function Summary({ r, f, area }: { r: UtilizationReport; f: UtilFigures; area: s
       </div>
       <ul className="ut-legend small">
         {parts.map((p) => <li key={p.key}><span className="seg-swatch" style={{ background: p.color }} />{p.label}</li>)}
-        <li><span className="seg-swatch ut-swatch-left" />Left to book</li>
+        <li><span className="seg-swatch ut-swatch-left" />{r.past ? 'Unbooked' : 'Left to book'}</li>
       </ul>
     </section>
   );

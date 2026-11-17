@@ -745,8 +745,10 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
       throw Object.assign(new Error(err.message), { status: err.status || 409 });
     }
     const maxTo = addDays(src.today, 55);
-    const range = clampRange(src.today, from, to, maxTo);
-    const facts = utilizationFacts({ today: src.today, cleaners: src.cleaners, visits: src.visits, holidays: src.holidays, unavailable: src.unavailable, locations });
+    // Past weeks back to what the planner keeps (its one-day changes and closed dates go back that far).
+    const minFrom = src.history_from && src.history_from < src.today ? src.history_from : src.today;
+    const range = clampRange(src.today, from, to, maxTo, minFrom);
+    const facts = utilizationFacts({ today: src.today, start: range.from < src.today ? range.from : src.today, cleaners: src.cleaners, visits: src.visits, holidays: src.holidays, unavailable: src.unavailable, locations });
     // Scheduling insights' own figures, for "Check the numbers".
     const { ov } = await plannerView(locations);
     let existing = null;
@@ -755,7 +757,7 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
       const w4 = (k) => rows.reduce((m, r) => m + r.weeks.slice(0, 4).reduce((a, x) => a + x[k], 0), 0);
       existing = { capacity4: w4('capacity'), booked4: w4('booked'), unassigned_visits: ov.counts.unassigned_visits, tolerance: Math.max(0.5, rows.length * 4 * 0.05) };
     }
-    return utilizationReport({ facts, ...range, maxTo, cfg: UTILIZATION, existing, takenAt: src.taken_at, cleaners: src.cleaners, source: { full_at: src.full_at, cleaners_by: src.cleaners_by } });
+    return utilizationReport({ facts, ...range, maxTo, minFrom, cfg: UTILIZATION, existing, takenAt: src.taken_at, cleaners: src.cleaners, source: { full_at: src.full_at, cleaners_by: src.cleaners_by } });
   }
 
   // The raw year of visits (for the Commercial area).
