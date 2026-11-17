@@ -28,6 +28,16 @@ const SOURCE_RANK = { kustomer: 0, ops_inbox: 1, gmail: 2, launch27_rating: 3, s
 const RECLEAN_RE = /\b(re-?clean|return (clean|visit)|come back|send (someone|a cleaner|the team) back|redo)\b/i;
 const CREDIT_RE = /\$\s?(\d{1,3})(?:\.\d{2})?\s*(?:off|credit|discount)\b|\bcredit(?:ed)?\s*(?:of\s*)?\$\s?(\d{1,3})/i;
 
+const CLASSIFY_CONCURRENCY = 6;
+// Run fn over items with at most n in flight.
+async function pool(items, n, fn) {
+  let i = 0;
+  const workers = Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (i < items.length) await fn(items[i++]);
+  });
+  await Promise.all(workers);
+}
+
 const suggestBrand = (name) => {
   const n = String(name || '').toLowerCase();
   if (/commercial|cornwall/.test(n)) return 'commercial';
@@ -90,19 +100,26 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       // (a release restarts the app) keeps every source it finished.
       let saved = 0;
       const save = async (label, cases) => {
+        // info@ is mostly not complaints: the free keyword rules screen it first, and only
+        // emails that read as a complaint go to Claude.
+        const work = cases
+          .map((c) => ({ c, rules: classifyRules(c.text, { claimAmount: c.claim_amount }) }))
+          .filter(({ c, rules }) => c.source !== 'gmail' || rules.category !== 'other' || rules.tone !== 'mild');
+        const screened = cases.length - work.length;
+        // Classify several at a time (Claude calls are the slow part), then save in order.
+        await pool(work, CLASSIFY_CONCURRENCY, async (w) => {
+          const model = classifier && w.c.text ? await classifier(redact(w.c.text, { names: [w.c.customer_name, ...(w.c.cleaner_names || []), ...staffNames] })) : null;
+          w.c.cls = mergeClassification(w.rules, model);
+          w.skip = w.c.source === 'gmail' && ((model && model.is_complaint === false) || (!model && (w.c.cls.category === 'other' || w.c.cls.tone === 'mild')));
+        });
         let kept = 0;
-        for (const c of cases) {
-          const rules = classifyRules(c.text, { claimAmount: c.claim_amount });
-          let model = null;
-          if (classifier && c.text) model = await classifier(redact(c.text, { names: [c.customer_name, ...(c.cleaner_names || []), ...staffNames] }));
-          c.cls = mergeClassification(rules, model);
-          if (c.source === 'gmail' && model && model.is_complaint === false) continue;
-          if (c.source === 'gmail' && !model && (c.cls.category === 'other' || c.cls.tone === 'mild')) continue;
-          c.id = await upsertCase(c);
+        for (const w of work) {
+          if (w.skip) continue;
+          w.c.id = await upsertCase(w.c);
           kept++;
         }
         saved += kept;
-        note('info', `${label}: ${kept} complaint case${kept === 1 ? '' : 's'} saved`);
+        note('info', `${label}: ${kept} complaint case${kept === 1 ? '' : 's'} saved${screened ? ` (${screened} screened out as not complaints)` : ''}`);
       };
 
       if (config.kustomerApiKey) await save('Kustomer', await guarded('Kustomer', () => fromKustomer(from, to, ctx, note)));
