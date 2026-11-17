@@ -443,3 +443,87 @@ describe('complaints: faster classification', () => {
     await db.close();
   });
 });
+
+describe('complaints: one-time clients, service type, clients view', () => {
+  const DAY = 86_400_000;
+  const at0 = Date.parse('2026-03-01T15:00:00Z');
+  const V = (d, extra = {}) => ({ id: d + 5000, at: at0 + d * DAY, date: new Date(at0 + d * DAY).toISOString().slice(0, 10), revenue: 250, kind: 'one', teams: [{ id: 7, name: 'C7', hours: 4 }], ...extra });
+  test('one-time client: rebooked within 90/120 days, or not, or too early', async () => {
+    const { oneTimeOutcomeAt } = await import('../src/complaints/journey.js');
+    const today = at0 + 200 * DAY;
+    assert.equal(oneTimeOutcomeAt([V(0), V(70)], at0, 90, { today }).outcome, 'rebooked');
+    assert.equal(oneTimeOutcomeAt([V(0), V(110)], at0, 90, { today }).outcome, 'not_rebooked');
+    assert.equal(oneTimeOutcomeAt([V(0), V(110)], at0, 120, { today }).outcome, 'rebooked');
+    assert.equal(oneTimeOutcomeAt([V(0)], at0, 120, { today }).outcome, 'not_rebooked');
+    assert.equal(oneTimeOutcomeAt([V(0)], at0, 120, { today: at0 + 50 * DAY }).outcome, 'pending');
+  });
+  test('visit snapshot carries service type; deep clean and move in/out come from extras', async () => {
+    const { slimReportVisit } = await import('../src/reports/compute.js');
+    const b = { id: 1, service_date: '2026-10-05T14:00:00Z', frequency: { name: 'One time' }, user: { id: 3, name: 'A' }, summary: { revenue: 300 }, teams: [{ id: 7, title: 'C', hours: 4 }], services: [{ name: 'Three Bedroom Home', extras: [{ name: 'Deep Cleaning' }, { name: 'Inside Oven' }] }] };
+    const v = slimReportVisit(b, null, null);
+    assert.equal(v.svc, 'Three Bedroom Home');
+    assert.equal(v.deep, true);
+    assert.equal(v.move, false);
+    assert.equal(slimReportVisit({ ...b, services: [{ name: 'Reclean', extras: [] }] }, null, null).reclean, true);
+  });
+  test('playbook: one-time clients are measured on rebooking, not Saved/Lost; plain rung names', () => {
+    const cases = [
+      { id: 1, source: 'kustomer', opened_at: '2026-06-10T12:00:00Z', category: 'quality_missed', l27_customer_id: 1, one_time: true },
+      { id: 2, source: 'kustomer', opened_at: '2026-06-10T12:00:00Z', category: 'quality_missed', l27_customer_id: 2, one_time: true },
+      { id: 3, source: 'kustomer', opened_at: '2026-06-10T12:00:00Z', category: 'quality_missed', l27_customer_id: 3 },
+    ];
+    const outcomes = [{ case_id: 1, day: 120, outcome: 'rebooked' }, { case_id: 2, day: 120, outcome: 'not_rebooked' }, { case_id: 3, day: 60, outcome: 'saved' }];
+    const pb = buildPlaybook({ cases, resolutions: [{ case_id: 3, rung: 'L3', action: 'reclean_full' }], costs: [], outcomes, visits: [], from: '2026-05-01', to: '2026-10-31', settings: normalizeSettings({}), today: '2026-11-16' });
+    assert.equal(pb.totals.decided, 1, 'only the recurring client counts toward Saved/Lost');
+    assert.equal(pb.totals.saved, 1);
+    assert.equal(pb.totals.one_time.n, 2);
+    assert.equal(pb.totals.one_time.rebooked_120, 0.5);
+    assert.equal(pb.ladder.find((r) => r.rung === 'L3').name, 'Reclean');
+    assert.equal(pb.ladder.find((r) => r.rung === 'L0').name, 'Apology only');
+    assert.ok(pb.like_for_like.verdict);
+  });
+  test('like for like: only groups with both a reclean and a refund are compared', () => {
+    const cases = [];
+    const resolutions = [];
+    const outcomes = [];
+    let id = 1;
+    const add = (tone, action, outcome) => {
+      cases.push({ id, source: 'kustomer', opened_at: '2026-06-10T12:00:00Z', category: 'quality_missed', tone, tenure_days: 200, l27_customer_id: id });
+      resolutions.push({ case_id: id, rung: action === 'refund' ? 'L5' : 'L3', action: action === 'refund' ? 'refund' : 'reclean_full' });
+      outcomes.push({ case_id: id++, day: 60, outcome });
+    };
+    // Calm clients: recleans only (no refund to compare with). Heated: both.
+    for (let i = 0; i < 8; i++) add('mild', 'reclean', 'saved');
+    for (let i = 0; i < 6; i++) add('angry', 'reclean', i < 2 ? 'saved' : 'lost');
+    for (let i = 0; i < 6; i++) add('angry', 'refund', i < 4 ? 'saved' : 'lost');
+    const pb = buildPlaybook({ cases, resolutions, costs: [], outcomes, visits: [], from: '2026-05-01', to: '2026-10-31', settings: normalizeSettings({}), today: '2026-11-16' });
+    const l = pb.like_for_like;
+    assert.equal(l.groups_compared, 1);
+    assert.equal(l.matched_pairs, 6);
+    assert.equal(l.reclean.saved, 0.333);
+    assert.equal(l.refund.saved, 0.667);
+    assert.match(l.verdict, /Too few comparable cases/);
+  });
+  test('clients view: repeat complainers and at-risk clients, with reasons', async () => {
+    const { buildClients } = await import('../src/complaints/playbook.js');
+    const now = Date.parse('2026-11-16T12:00:00Z');
+    const day = (d) => new Date(now - d * DAY).toISOString();
+    const rows = [
+      { id: 1, l27_customer_id: 10, customer_name: 'A', opened_at: day(200), category: 'quality_missed', tone: 'mild', severity: 1, cost: 5, outcomes: [{ day: 60, outcome: 'saved', next: '2026-06-01' }] },
+      { id: 2, l27_customer_id: 10, customer_name: 'A', opened_at: day(100), category: 'quality_missed', tone: 'mild', severity: 1, cost: 10, outcomes: [{ day: 60, outcome: 'saved', next: '2026-09-01' }] },
+      { id: 3, l27_customer_id: 20, customer_name: 'B', opened_at: day(20), category: 'punctuality', tone: 'threat_leave', severity: 3, cost: 0, cleans_total: 2, outcomes: [{ day: 30, outcome: 'pending', next: null }] },
+      { id: 4, l27_customer_id: 30, customer_name: 'C', opened_at: day(20), category: 'quality_missed', tone: 'mild', severity: 1, cost: 0, cleans_total: 40, outcomes: [{ day: 30, outcome: 'pending', next: '2026-11-20' }] },
+      { id: 5, l27_customer_id: 40, customer_name: 'D', opened_at: day(150), category: 'quality_missed', tone: 'threat_review', severity: 3, cost: 80, outcomes: [{ day: 60, outcome: 'lost', next: null }] },
+    ];
+    const c = buildClients(rows, now);
+    assert.deepEqual(c.repeat.map((x) => x.name), ['A']);
+    assert.equal(c.repeat[0].complaints, 2);
+    assert.equal(c.repeat[0].total_cost, 15);
+    assert.equal(c.repeat[0].still_with_us, true);
+    assert.deepEqual(c.at_risk.map((x) => x.name), ['B'], 'calm long-time client with a booking ahead is not at risk; a lost client is not at risk');
+    assert.ok(c.at_risk[0].reasons.includes('said they may leave'));
+    assert.ok(c.at_risk[0].reasons.includes('nothing booked since the complaint'));
+    assert.deepEqual(c.review_mentions.map((x) => x.name), ['D']);
+    assert.equal(c.google_reviews_connected, false);
+  });
+});

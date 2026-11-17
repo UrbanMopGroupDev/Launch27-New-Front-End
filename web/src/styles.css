@@ -1933,6 +1933,7 @@ a.rep-factor:hover b { text-decoration: underline; }
 .cmp-runstate.ok { border-left-color: var(--ok); }
 .cmp-runstate.warn { border-left-color: var(--warn); }
 .cmp-runstate.neg { border-left-color: var(--danger); }
+.cmp-sort { font: inherit; font-weight: 600; color: inherit; padding: 0; white-space: nowrap; }
 .cmp-problems { margin: 6px 0 0; padding-left: 18px; }
 .cmp-sources { list-style: none; padding: 0; margin: 10px 0 4px; display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 4px 16px; }
 .cmp-sources .dot.ok { background: var(--ok); }

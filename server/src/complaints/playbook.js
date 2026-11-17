@@ -7,7 +7,7 @@
 //   - data gaps and confidence
 // Every figure carries n; anything resting on fewer than THIN cases is flagged.
 import { categoryLabel, HARD_ROUTES } from './taxonomy.js';
-import { RUNGS, rungIndex } from './settings.js';
+import { RUNGS, rungIndex, rungName } from './settings.js';
 
 export const THIN = 10;
 const r2 = (x) => (x == null ? null : Math.round(x * 100) / 100);
@@ -37,6 +37,21 @@ function outcomeStats(list) {
     avg_cost: list.length ? r2(costs.reduce((s, x) => s + x, 0) / list.length) : null,
     median_cost: r2(median(costs)),
     confidence: confidence(decided.length),
+    one_time: oneTimeStats(list),
+  };
+}
+
+// One-time clients have no schedule to keep: the question is whether they booked again.
+function oneTimeStats(list) {
+  const ot = list.filter((c) => c.one_time);
+  const d120 = ot.filter((c) => c.outcome120 && c.outcome120 !== 'pending');
+  const d90 = ot.filter((c) => c.outcome90 && c.outcome90 !== 'pending');
+  return {
+    n: ot.length,
+    decided: d120.length,
+    rebooked_90: share(d90.filter((c) => c.outcome90 === 'rebooked').length, d90.length),
+    rebooked_120: share(d120.filter((c) => c.outcome120 === 'rebooked').length, d120.length),
+    confidence: confidence(d120.length),
   };
 }
 
@@ -66,6 +81,8 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, visits = []
       estimatedCost: k.some((x) => x.estimated),
       outcome60: (O.get(id) || []).find((o) => o.day === 60)?.outcome || null,
       outcome90: (O.get(id) || []).find((o) => o.day === 90)?.outcome || null,
+      outcome120: (O.get(id) || []).find((o) => o.day === 120)?.outcome || null,
+      one_time: !!c.one_time,
       reclean: (R.get(id) || []).some((r) => /^reclean/.test(r.action)),
       refund: (R.get(id) || []).some((r) => r.action === 'refund'),
     };
@@ -83,7 +100,7 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, visits = []
       const rungCounts = {};
       for (const c of list) rungCounts[c.rung] = (rungCounts[c.rung] || 0) + 1;
       const typical = Object.entries(rungCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
-      const byRung = Object.entries(rungCounts).map(([rung, n]) => ({ rung, ...outcomeStats(list.filter((c) => c.rung === rung)), n }));
+      const byRung = Object.entries(rungCounts).map(([rung, n]) => ({ rung, name: rungName(rung), ...outcomeStats(list.filter((c) => c.rung === rung)), n }));
       const decidedRungs = byRung.filter((b) => b.decided >= 3 && b.saved != null);
       // "What actually kept clients at what cost": the cheapest rung whose save rate is within
       // 10 points of the best rung's, among rungs with at least 3 decided cases.
@@ -96,10 +113,11 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, visits = []
         share: share(list.length, rows.length),
         hard_routed: list.filter((c) => c.hard_route).length,
         typical_rung: typical,
+        typical_name: typical ? rungName(typical) : null,
         tones: Object.fromEntries(['mild', 'frustrated', 'angry', 'threat_leave', 'threat_review'].map((t) => [t, list.filter((c) => c.tone === t).length])),
         ...outcomeStats(list),
         by_rung: byRung.sort((a, b) => rungIndex(a.rung) - rungIndex(b.rung)),
-        cheapest_that_works: cheapestGood ? { rung: cheapestGood.rung, saved: cheapestGood.saved, avg_cost: cheapestGood.avg_cost, n: cheapestGood.decided } : null,
+        cheapest_that_works: cheapestGood ? { rung: cheapestGood.rung, name: rungName(cheapestGood.rung), saved: cheapestGood.saved, avg_cost: cheapestGood.avg_cost, n: cheapestGood.decided } : null,
       };
     })
     .sort((a, b) => b.n - a.n);
@@ -127,6 +145,8 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, visits = []
       return { key: t.key, label: t.label, reclean: a, refund: b, neither: z, verdict };
     })
     .filter((x) => x.reclean.n || x.refund.n);
+
+  const likeForLike = likeForLikeCompare(ladderRows);
 
   // Root causes: complaint rate per 100 visits by the client's situation at the visit.
   const rootCauses = rootCauseTable(visits, rows, from, to);
@@ -171,8 +191,11 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, visits = []
   const pct = (x) => `${Math.round((x / Math.max(1, n)) * 100)}%`;
   const unlinked = rows.filter((c) => !c.l27_customer_id).length;
   if (unlinked) gaps.push(`${unlinked} of ${n} cases (${pct(unlinked)}) couldn't be matched to a Launch27 client, so they have no journey or outcome.`);
-  const pending = rows.filter((c) => !c.outcome60 || c.outcome60 === 'pending').length;
-  if (pending) gaps.push(`${pending} cases are too recent (or unmatched) for a 60-day outcome.`);
+  const pending = rows.filter((c) => (c.one_time ? !c.outcome120 || c.outcome120 === 'pending' : !c.outcome60 || c.outcome60 === 'pending')).length;
+  if (pending) gaps.push(`${pending} cases are too recent (or unmatched) for an outcome (60 days for recurring clients, 120 days for one-time clients).`);
+  const oneTimers = rows.filter((c) => c.one_time).length;
+  if (oneTimers) gaps.push(`${oneTimers} cases are one-time clients. They're left out of Saved/Lost and measured on whether they booked again within 90 and 120 days.`);
+  if (visits.length && !visits.some((v) => v.svc)) gaps.push('Service type (deep clean, move in/out) appears after the next Launch27 history rebuild (it rebuilds daily when someone opens Reports).');
   const rulesOnly = rows.filter((c) => c.classified_by === 'rules').length;
   if (rulesOnly) gaps.push(`${rulesOnly} cases were classified by keyword rules only (lower confidence).`);
   const est = rows.filter((c) => c.estimatedCost).length;
@@ -186,6 +209,7 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, visits = []
     taxonomy,
     ladder,
     reclean_vs_refund: recleanVsRefund,
+    like_for_like: likeForLike,
     root_causes: rootCauses,
     hard_routes: Object.entries(HARD_ROUTES).map(([key, label]) => ({ key, label, n: rows.filter((c) => c.hard_route === key).length })),
     response: { first_response_median_hours: r2(median(responseHours)), with_response_time: responseHours.length, decided_by: decidedBy },
@@ -218,20 +242,28 @@ function rootCauseTable(visits, cases, from, to) {
     feat.set(v.id, {
       first_three: i < 3,
       cleaner_changed: !!prev && prev.teams.map((t) => t.id).sort().join(',') !== team,
+      cleaner_lt5: cleanerExp < 5,
+      cleaner_lt10: cleanerExp < 10,
       new_cleaner: cleanerExp < 15,
       price_up: prev3.length >= 2 && v.revenue > (prev3.reduce((s, x) => s + x, 0) / prev3.length) * 1.05,
       long_gap: !!prev && v.at - prev.at > 45 * 86_400_000,
-      one_time: /one|once|single/i.test(v.freq || ''),
+      one_time: v.kind ? v.kind === 'one' : /one|once|single/i.test(v.freq || ''),
+      deep: !!v.deep,
+      move: !!v.move,
     });
   }
   const complained = new Set(cases.map((c) => Number(c.l27_booking_id)).filter(Boolean));
   const labels = {
     first_three: "Client's first 3 cleans",
     cleaner_changed: 'Different cleaner from last visit',
+    cleaner_lt5: 'Cleaner with fewer than 5 visits',
+    cleaner_lt10: 'Cleaner with fewer than 10 visits',
     new_cleaner: 'Cleaner with fewer than 15 visits',
     price_up: 'Price more than 5% above recent visits',
     long_gap: 'More than 45 days since last clean',
     one_time: 'One-time clean',
+    deep: 'Deep cleaning',
+    move: 'Move in / move out',
   };
   const all = inWindow.length;
   const allComplaints = inWindow.filter((v) => complained.has(v.id)).length;
@@ -253,4 +285,120 @@ function countBy(list, key) {
   const m = {};
   for (const x of list) m[x[key]] = (m[x[key]] || 0) + 1;
   return m;
+}
+
+// Reclean vs refund, like for like. Angrier clients tend to get refunds, so a raw comparison
+// makes refunds look worse than they are. Here cases are grouped by category, tone (calm vs
+// heated) and client tenure (first 90 days vs established); only groups that contain BOTH a
+// reclean and a refund with a known outcome are compared, each group weighted equally per case pair.
+function likeForLikeCompare(rows) {
+  const heated = (t) => ['angry', 'threat_leave', 'threat_review'].includes(t);
+  const groups = new Map();
+  for (const c of rows) {
+    if (c.one_time || !c.outcome60 || c.outcome60 === 'pending') continue;
+    const arm = c.reclean && !c.refund ? 'reclean' : c.refund && !c.reclean ? 'refund' : null;
+    if (!arm) continue;
+    const key = `${c.category}|${heated(c.tone) ? 'heated' : 'calm'}|${c.tenure_days != null && c.tenure_days < 90 ? 'new' : 'established'}`;
+    if (!groups.has(key)) groups.set(key, { key, category: c.category, reclean: [], refund: [] });
+    groups.get(key)[arm].push(c);
+  }
+  const matched = [...groups.values()].filter((g) => g.reclean.length && g.refund.length);
+  const rate = (l) => l.filter((c) => c.outcome60 === 'saved').length / l.length;
+  const avg = (l) => l.reduce((s, c) => s + c.cost, 0) / l.length;
+  let w = 0;
+  let rec = 0;
+  let ref = 0;
+  let recCost = 0;
+  let refCost = 0;
+  for (const g of matched) {
+    const k = Math.min(g.reclean.length, g.refund.length);
+    w += k;
+    rec += k * rate(g.reclean);
+    ref += k * rate(g.refund);
+    recCost += k * avg(g.reclean);
+    refCost += k * avg(g.refund);
+  }
+  const pairs = w;
+  const out = {
+    groups_compared: matched.length,
+    matched_pairs: pairs,
+    reclean: pairs ? { saved: Math.round((rec / w) * 1000) / 1000, avg_cost: r2(recCost / w), n: matched.reduce((s, g) => s + g.reclean.length, 0) } : null,
+    refund: pairs ? { saved: Math.round((ref / w) * 1000) / 1000, avg_cost: r2(refCost / w), n: matched.reduce((s, g) => s + g.refund.length, 0) } : null,
+    confidence: confidence(pairs),
+    verdict: 'Not enough comparable cases yet: no group of similar complaints has both a reclean and a refund with a known outcome.',
+  };
+  if (pairs) {
+    const diff = out.reclean.saved - out.refund.saved;
+    out.verdict = pairs < THIN
+      ? `Too few comparable cases to call (${pairs} matched). Treat as a hypothesis to test.`
+      : Math.abs(diff) <= 0.05
+        ? `Similar complaints, similar retention: the cheaper one wins (${out.reclean.avg_cost <= out.refund.avg_cost ? 'reclean' : 'refund'}).`
+        : diff > 0
+          ? 'For similar complaints, a reclean kept more clients than a refund.'
+          : 'For similar complaints, a refund kept more clients than a reclean.';
+  }
+  return out;
+}
+
+// Clients view (last 12 months of cases, clients matched to Launch27 only).
+//   repeat:  2+ complaints in 12 months: what they cost, how serious, and whether they stay
+//   at_risk: complained in the last 60 days, not gone yet, and showing warning signs
+//   review_mentions: said they'd post a review (Google reviews themselves aren't connected yet)
+export function buildClients(rows, nowMs) {
+  const DAY = 86_400_000;
+  const by = new Map();
+  for (const r of rows) {
+    const k = Number(r.l27_customer_id);
+    if (!by.has(k)) by.set(k, []);
+    by.get(k).push(r);
+  }
+  const latestOutcome = (c) => {
+    const os = (c.outcomes || []).filter((o) => o.outcome && o.outcome !== 'pending').sort((a, b) => b.day - a.day);
+    return os[0]?.outcome || 'pending';
+  };
+  const gone = (o) => o === 'lost' || o === 'partial_save' || o === 'not_rebooked';
+  const repeat = [];
+  const atRisk = [];
+  const reviews = [];
+  for (const [id, list] of by) {
+    const last = list[list.length - 1];
+    const status = latestOutcome(last);
+    const base = {
+      l27_customer_id: id,
+      name: last.customer_name,
+      complaints: list.length,
+      last_complaint: last.opened_at,
+      last_category: last.category,
+      total_cost: r2(list.reduce((s, c) => s + Number(c.cost || 0), 0)),
+      avg_severity: r2(list.reduce((s, c) => s + (Number(c.severity) || 1), 0) / list.length),
+      status,
+      case_id: Number(last.id),
+    };
+    if (list.length >= 2) repeat.push({ ...base, low_severity: base.avg_severity <= 2, still_with_us: !gone(status) });
+    const reviewCase = [...list].reverse().find((c) => c.tone === 'threat_review');
+    if (reviewCase) reviews.push({ ...base, mentioned_on: reviewCase.opened_at });
+    const age = (nowMs - new Date(last.opened_at).getTime()) / DAY;
+    if (age <= 60 && !gone(status)) {
+      const reasons = [];
+      let score = 0;
+      const add = (pts, why) => {
+        score += pts;
+        reasons.push(why);
+      };
+      if (last.tone === 'threat_leave') add(3, 'said they may leave');
+      if (last.tone === 'threat_review') add(3, 'mentioned a public review');
+      if (last.tone === 'angry') add(2, 'angry');
+      if (last.cleans_total != null && last.cleans_total <= 3) add(2, 'within their first 3 cleans');
+      if (list.length >= 2) add(1, `${list.length} complaints in 12 months`);
+      if (last.cleaner_changed_last_visit) add(1, 'cleaner changed before this visit');
+      if (last.price_change_pct != null && Number(last.price_change_pct) > 0.05) add(1, 'price went up');
+      const next = (last.outcomes || []).find((o) => o.next)?.next || null;
+      if (!next && age >= 14) add(2, 'nothing booked since the complaint');
+      if (score >= 3) atRisk.push({ ...base, score, reasons, next_booking_on: next });
+    }
+  }
+  repeat.sort((a, b) => b.complaints - a.complaints || b.total_cost - a.total_cost);
+  atRisk.sort((a, b) => b.score - a.score);
+  reviews.sort((a, b) => String(b.mentioned_on).localeCompare(String(a.mentioned_on)));
+  return { repeat, at_risk: atRisk, review_mentions: reviews, google_reviews_connected: false, clients_with_complaints: by.size };
 }
