@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { l27 } from '../api';
 import type { Booking, BookingComment, Charge } from '../types';
 import { BookingActions } from '../components/BookingActions';
 import { CallButton } from '../components/CallButton';
+import { CustomerTags } from '../components/CustomerTags';
 import { Icon } from '../components/Icon';
 import { Avatar, Stepper } from '../inbox/Customer360';
 import { inbox } from '../inbox/api';
@@ -25,6 +26,8 @@ const hm = (m: number | null) => (m === null ? '—' : `${Math.floor(m / 60)}h $
 export function BookingDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
+  // Opened from the Dispatch board: offer the way back to the same day and booking.
+  const fromDispatch = (useLocation().state as { from?: string } | null)?.from === 'dispatch';
   const booking = useQuery({ queryKey: ['booking', id], queryFn: () => l27<Booking>(`/v1/staff/bookings/${id}`), refetchInterval: 60_000 });
   const comments = useQuery({ queryKey: ['booking', id, 'comments'], queryFn: () => l27<BookingComment[] | null>(`/v1/staff/bookings/${id}/comments`) });
   const next = useQuery({ queryKey: ['booking', id, 'recurring'], queryFn: () => l27<Booking[] | null>(`/v1/staff/bookings/${id}/recurring`, { mode: 'next' }) });
@@ -76,6 +79,11 @@ export function BookingDetailPage() {
   return (
     <div className="bk">
       <div className="crumbs small">
+        {fromDispatch && (
+          <>
+            <button type="button" className="link" onClick={() => navigate(-1)}>← Dispatch board</button>{' · '}
+          </>
+        )}
         <Link to="/bookings">Bookings</Link> / #{b.id}
       </div>
 
@@ -244,6 +252,7 @@ export function BookingDetailPage() {
               )}
               <CallButton phone={b.phone} />
             </div>
+            <CustomerTags customerId={b.user?.id} fallback={b.user?.tags_info} />
             {b.user?.id && <Link to={`/customers/${b.user.id}`} className="small">Open customer 360</Link>}
           </section>
 
