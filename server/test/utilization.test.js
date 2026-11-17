@@ -214,3 +214,48 @@ test('a split day counts its blocks, not the gap', async () => {
   const rows = [{ date: null, weekday: 2, dayoff: false, start_time: '08:00', end_time: '12:00' }, { date: null, weekday: 2, dayoff: false, start_time: '13:00', end_time: '17:00' }];
   assert.equal(workingMinutes(rows, '2026-11-17'), 480);
 });
+
+describe('utilization: past weeks and shared cleaners', () => {
+  test('past dates can be chosen back to the earliest kept date', () => {
+    assert.deepEqual(clampRange('2026-11-17', '2026-11-08', '2026-11-14', '2027-01-11', '2026-09-22'), { from: '2026-11-08', to: '2026-11-14' });
+    assert.deepEqual(clampRange('2026-11-17', '2026-08-01', '2026-08-10', '2027-01-11', '2026-09-22'), { from: '2026-09-22', to: '2026-09-22' });
+  });
+
+  test('a past week is counted like any other, and marked past', () => {
+    // "Today" is the Sunday after the test week, so the whole week Nov 9–14 is in the past.
+    const f = utilizationFacts({ today: '2026-11-15', start: TODAY, cleaners: [A, B, OFF], visits: VISITS, holidays: HOLIDAYS, until: '2026-11-15' });
+    const r = utilizationReport({ facts: f, from: TODAY, to: '2026-11-14', maxTo: '2027-01-10', minFrom: '2026-09-20' });
+    assert.equal(r.past, true);
+    assert.equal(r.min_from, '2026-09-20');
+    assert.equal(r.totals.available_h, 84);
+    assert.equal(r.totals.assigned_h, 12);
+    assert.equal(r.totals.unassigned_h, 2);
+  });
+
+  test('a shared cleaner shows open hours and the other brand\'s share', () => {
+    const r = report([1]);
+    const b = r.cleaners.find((c) => c.cleaner_id === 2);
+    assert.deepEqual([b.open_h, b.other_brand_h, b.available_h], [40, 3, 37]); // Wednesday 9–12 went to the other brand
+    const a = r.cleaners.find((c) => c.cleaner_id === 1);
+    assert.deepEqual([a.open_h, a.other_brand_h, a.available_h], [44, 0, 44]);
+  });
+
+  test('the planner keeps visits and one-day changes from past weeks for the report', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet, retryDelayMs: 0 });
+    await schedule.sync();
+    const src = await schedule.utilizationSource();
+    assert.ok(src.history_from < src.today);
+    assert.ok(src.visits.some((v) => v.date < src.today), 'past visits are included');
+    assert.ok(src.cleaners.some((c) => c.availability.some((row) => row.date && String(row.date).slice(0, 10) < addDaysT(src.today, -7))), 'one-day changes older than a week are kept');
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    const r = await reports.utilization({ from: addDaysT(src.today, -14), to: addDaysT(src.today, -8) });
+    assert.equal(r.past, true);
+    assert.equal(r.from, addDaysT(src.today, -14));
+    assert.ok(r.totals.available_h > 0 && r.totals.assigned_h > 0);
+    await db.close();
+  });
+});
+const addDaysT = (d, n) => new Date(Date.parse(`${d}T12:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
