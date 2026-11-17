@@ -129,6 +129,27 @@ function dayHeading(iso: string) {
   return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric' });
 }
 
+function deliveryLabel(state: string | null) {
+  switch (state) {
+    case 'not_connected':
+      return 'not sent: channel not connected';
+    case 'sandbox':
+      return 'sandbox: not sent to customer';
+    case 'sending':
+      return 'sending…';
+    case 'queued':
+      return 'accepted, waiting for the carrier';
+    case 'delivered':
+      return 'delivered';
+    case 'failed':
+      return 'not sent';
+    case 'unknown':
+      return 'status unknown';
+    default:
+      return state || '';
+  }
+}
+
 function renderMessage(m: Message) {
         if (m.kind === 'event') {
           return (
@@ -161,7 +182,8 @@ function renderMessage(m: Message) {
             {m.channel === 'email' && <EmailExtras m={m} />}
             <div className="tl-meta">
               {m.channel && <Icon name={m.channel} size={12} />} {m.channel ? CHANNEL_LABEL[m.channel] : ''} · {m.direction === 'out' ? m.author_name || 'Agent' : displayIdentity(m.from_addr)} · {fmtTime(m.created_at)}
-              {m.direction === 'out' && <span className={notSent ? 'delivery bad' : 'delivery'}> · {m.delivery_state === 'not_connected' ? 'not sent: channel not connected' : m.delivery_state === 'sandbox' ? 'sandbox: not sent to customer' : m.delivery_state}</span>}
+              {m.direction === 'out' && <span className={notSent ? 'delivery bad' : 'delivery'}> · {deliveryLabel(m.delivery_state)}</span>}
+              {m.direction === 'out' && m.delivery_state === 'failed' && m.channel === 'sms' && m.meta?.note && <div className="error small">{String(m.meta.note)}</div>}
             </div>
           </div>
         );
@@ -202,6 +224,7 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
   const [subject, setSubject] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const sendKey = useRef<string | null>(null);
   const area = useRef<HTMLTextAreaElement>(null);
 
   useImperativeHandle(ref, () => ({
@@ -247,7 +270,13 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
     setError(null);
     try {
       if (mode === 'note') await inbox.note(c.id, text);
-      else await inbox.reply(c.id, { body: text, channel, to: target, from: sender, subject: channel === 'email' && subject ? subject : undefined });
+      else {
+        // One key per message: if this request is repeated (double click, retry after a network
+        // error), the server returns the first one instead of texting the customer twice.
+        sendKey.current ||= crypto.randomUUID();
+        await inbox.reply(c.id, { body: text, channel, to: target, from: sender, subject: channel === 'email' && subject ? subject : undefined, idempotency_key: sendKey.current });
+        sendKey.current = null;
+      }
       setText('');
       drafts.set(key, '');
       onSent();
@@ -293,7 +322,10 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
           rows={4}
           value={text}
           placeholder={mode === 'note' ? 'Only your team sees this. @name to notify someone.' : 'Write a reply…'}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            sendKey.current = null; // edited: a new message
+            setText(e.target.value);
+          }}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && text.trim() && !busy && !optedOut && !emailLocked) send();
           }}

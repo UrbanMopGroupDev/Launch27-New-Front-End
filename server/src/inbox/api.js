@@ -27,7 +27,7 @@ export function diffRules(before, after) {
 }
 const many = async (q, sql, p) => (await q.query(sql, p)).rows;
 
-export function createInboxRouter({ db, sessions, cookieName, config, l27, connectors = {}, log = (lvl, msg, f) => console.error(msg, f), qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, complaints = null }) {
+export function createInboxRouter({ db, sessions, cookieName, config, l27, connectors = {}, log = (lvl, msg, f) => console.error(msg, f), qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, complaints = null, sms = null }) {
   const r = express.Router();
   r.use(express.json({ limit: '1mb' }));
 
@@ -169,8 +169,34 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     return {
       // state: how mail is read (live Gmail, sandbox, or not connected). read_only: sending is off.
       email: !email ? { state: 'not_connected', provider: null, accounts: [], read_only: !EMAIL_SENDING_ENABLED } : { state: email.sandbox ? 'sandbox' : 'live', provider: email.name, send_from: email.identities || OUR_IDENTITIES.email, accounts, read_only: !EMAIL_SENDING_ENABLED },
-      sms: !connectors.sms ? { state: 'not_connected', provider: null } : { state: connectors.sms.sandbox ? 'sandbox' : 'live', provider: connectors.sms.name },
+      sms: !connectors.sms ? { state: 'not_connected', provider: null } : { state: connectors.sms.sandbox ? 'sandbox' : 'live', provider: connectors.sms.name, ringcentral: sms ? await smsDetail() : null },
     };
+  }
+
+  // RingCentral SMS: connection, numbers and the queue each number's texts go to (from the
+  // routing rules, so the screen always matches what really happens).
+  async function smsDetail() {
+    const st = await sms.status();
+    const rules = await many(db, 'SELECT * FROM routing_rules');
+    const queues = new Map((await many(db, 'SELECT slug, name FROM queues')).map((q) => [q.slug, q.name]));
+    const numbers = [...new Set([...(st.health?.sms_numbers || []), ...st.configured_numbers])];
+    return {
+      ...st,
+      numbers: numbers.map((n) => {
+        const slug = route(rules, { channel: 'sms', to: n, from: '+10000000000', subject: '', body: '', roles: [] }).action.queue || 'fallback';
+        return { number: n, can_send: (st.health?.sms_numbers || []).includes(n), queue: queues.get(slug) || slug };
+      }),
+    };
+  }
+  if (sms) {
+    const smsAction = (fn) => wrap(async (req, res) => {
+      await fn();
+      await svc.audit(db, req.user.id, `sms.${req.path.split('/').pop()}`, 'channel', 'sms', {});
+      res.json(await channelStatus());
+    });
+    r.post('/admin/sms/check', needRole('admin'), smsAction(() => sms.check()));
+    r.post('/admin/sms/disconnect', needRole('admin'), smsAction(() => sms.disconnect()));
+    r.post('/admin/sms/connect', needRole('admin'), smsAction(() => sms.connect()));
   }
 
   r.get('/channels', wrap(async (req, res) => res.json(await channelStatus())));
@@ -183,7 +209,7 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       dispositions: DISPOSITIONS,
       canned: await many(db, 'SELECT * FROM canned_responses ORDER BY shortcut'),
       // Only addresses the email connector can really send from (all of ours when sandboxed).
-      identities: { ...OUR_IDENTITIES, email: sendableIdentities(connectors, 'email') || OUR_IDENTITIES.email },
+      identities: { ...OUR_IDENTITIES, email: sendableIdentities(connectors, 'email') || OUR_IDENTITIES.email, sms: sendableIdentities(connectors, 'sms')?.length ? sendableIdentities(connectors, 'sms') : OUR_IDENTITIES.sms },
       connected_channels: connectedChannels(connectors),
       channels: await channelStatus(),
       portal: { name: config.portalName || 'UrbanMop', links: config.portalLinks || [] },
@@ -438,6 +464,8 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     const updated = await db.tx(async (q) => {
       const row = await one(q, `UPDATE contacts SET ${sets.join(', ')}, updated_at = now() WHERE id = $1 RETURNING *`, params);
       if (!row) throw new svc.InboxError(404, 'Contact not found');
+      // Linked to Launch27: their conversations leave "Who is this?".
+      if (row.l27_customer_id || row.l27_team_id) await q.query('UPDATE conversations SET needs_match = false, updated_at = now() WHERE contact_id = $1 AND needs_match', [row.id]);
       await svc.audit(q, req.user.id, 'contact.updated', 'contact', req.params.id, req.body);
       return row;
     });

@@ -18,8 +18,10 @@ import { createWriteLog } from './writes.js';
 import { createCommercial } from './commercial/service.js';
 import { createWorkforce } from './commercial/workforce.js';
 import { createPlacement } from './placement/service.js';
-import { sandboxEmail } from './inbox/channels.js';
+import { sandboxEmail, sandboxSms } from './inbox/channels.js';
 import { createGmailClient, createGmailConnector } from './inbox/email/gmail.js';
+import { createRingCentralClient } from './inbox/sms/ringcentral.js';
+import { createSmsChannel } from './inbox/sms/service.js';
 import { createEmailSync } from './inbox/email/sync.js';
 import { createL27Client, createSyncBearer } from './inbox/lookup.js';
 import { OUR_IDENTITIES } from './inbox/seed.js';
@@ -90,6 +92,26 @@ if (config.gmail) {
 } else if (!config.production) {
   connectors.email = sandboxEmail();
 }
+// SMS: RingCentral when RINGCENTRAL_SMS_* is set (production platform in production, the
+// RingCentral sandbox elsewhere). Sends outside production are always sandbox records
+// (guardConnectors in app.js). Dev and QA without credentials get the sandbox SMS channel.
+let sms = null;
+if (config.ringcentralSms) {
+  const smsL27 = createL27Client({ baseUrl: config.l27BaseUrl, fetchImpl });
+  const smsBearer = createSyncBearer({ config, fetchImpl });
+  sms = createSmsChannel({
+    db,
+    client: createRingCentralClient(config.ringcentralSms),
+    smsConfig: { numbers: config.ringcentralSms.numbers.length ? config.ringcentralSms.numbers : OUR_IDENTITIES.sms, webhookUrl: config.ringcentralSms.webhookUrl, webhookToken: config.ringcentralSms.webhookToken },
+    identify: async (phone) => smsL27.match(await smsBearer(), 'phone', phone),
+    log,
+  });
+  connectors.sms = sms.connector;
+  sms.start().catch((err) => log.error('sms start failed', { error: err.message }));
+  log.info('sms connected (RingCentral)', { server: config.ringcentralSms.server.replace(/^https:\/\//, ''), webhook: !!config.ringcentralSms.webhookUrl });
+} else if (!config.production) {
+  connectors.sms = sandboxSms();
+}
 // Complaint Resolution Engine (Phase 1: history miner + playbook). Read-only on every source.
 const complaints = createComplaints({
   db,
@@ -102,7 +124,7 @@ const complaints = createComplaints({
   syncBearer: createSyncBearer({ config, fetchImpl }),
   log,
 });
-const app = createApp(config, { db, sessions, fetchImpl, log, jobs, connectors, qa: { store: qaStore, sender: qaSender }, segments, schedule, reports, writes, commercial, placement, commercialPlan, complaints });
+const app = createApp(config, { db, sessions, fetchImpl, log, jobs, connectors, qa: { store: qaStore, sender: qaSender }, segments, schedule, reports, writes, commercial, placement, commercialPlan, complaints, sms });
 if (config.sampleData && config.l27Mode === 'mock') {
   await loadSampleInbox(db, { fetchImpl, baseUrl: config.l27BaseUrl, log: (level, msg, fields) => log[level](msg, fields) }).catch((err) => log.error('sample inbox failed', { error: err.message }));
 }
@@ -121,6 +143,7 @@ const worker = setInterval(async () => {
   try {
     await db.tx((q) => tick(q));
     emailSync?.maybeRun()?.catch((err) => log.error('email sync failed', { error: err.message }));
+    await sms?.tick();
     await sessions.purgeExpired();
     await segments.maybeRun();
     await schedule.maybeRun();
