@@ -10,16 +10,17 @@
 // Sources that aren't configured are skipped and reported, never faked.
 import { many, one, json } from '../db/index.js';
 import { indexVisits } from '../reports/compute.js';
+import { frequencyKind } from '../schedule/rules.js';
 import { normalizeEmail, normalizePhone } from '../inbox/normalize.js';
 import { parseGmailMessage } from '../inbox/email/mime.js';
 import { classifyRules, mergeClassification, amountsIn } from './taxonomy.js';
 import { redact } from './redact.js';
-import { journeyAt, outcomeAt, cleanerStatsIndex, recleanCost, unitEconomics } from './journey.js';
+import { journeyAt, outcomeAt, oneTimeOutcomeAt, cleanerStatsIndex, recleanCost, unitEconomics } from './journey.js';
 import { normalizeSettings, rungForRefund } from './settings.js';
 import { parseRefundPost } from './slackRefunds.js';
 import { createKustomerClient, discover, listComplaints, toCase as kustomerToCase, customer as kustomerCustomer, conversationsAround } from './sources/kustomer.js';
 import { createSlackClient, DEFAULT_CHANNELS } from './sources/slack.js';
-import { buildPlaybook } from './playbook.js';
+import { buildPlaybook, buildClients } from './playbook.js';
 
 const DAY = 86_400_000;
 const isoDay = (ms) => new Date(ms).toISOString().slice(0, 10);
@@ -473,7 +474,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
 
       // Reclean: a $0 visit for the same client within 14 days after the complaint, or the
       // Kustomer status / our reply says so.
-      const free = list.find((v) => v.at > at && v.at < at + 14 * DAY && (v.revenue || 0) === 0);
+      const free = list.find((v) => v.at > at && v.at < at + 14 * DAY && (v.reclean || (v.revenue || 0) === 0));
       const mentioned = c.source_status && /reclean/i.test(c.source_status) || RECLEAN_RE.test(c.raw?.resolution_text || '') || RECLEAN_RE.test(c.raw?.our_replies_excerpt || '');
       if (free || mentioned) {
         recleans++;
@@ -526,8 +527,15 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
           [c.id, j.tenure_days, j.frequency, j.cleans_total, j.spend_12m, j.price_change_pct, j.distinct_cleaners_90d, j.cleaner_changed_last_visit, j.prior_complaints, j.prior_unhappy_ratings, j.days_since_last_clean, j.cleaner_id, j.cleaner_name, j.cleaner_visits_before, j.cleaner_unhappy_rate_90d, j.data_from],
         );
         const repeat = allCases.find((x) => Number(x.l27_customer_id) === Number(c.l27_customer_id) && x.id !== c.id && new Date(x.opened_at) > new Date(c.opened_at) && new Date(x.opened_at) - new Date(c.opened_at) <= 90 * DAY);
-        for (const day of [30, 60, 90]) {
-          const o = outcomeAt(list, at, day, { today: todayMs, repeatCaseId: repeat?.id || null });
+        // Recurring clients: still booking at 30/60/90 days. One-time clients: did they book
+        // again within 90/120 days. Recleans and free visits don't count as coming back.
+        const paid = list.filter((v) => !v.reclean && (v.revenue || 0) > 0);
+        const kindVisit = visit || list.filter((v) => v.at < at).slice(-1)[0] || null;
+        const oneTime = kindVisit ? kindVisit.kind === 'one' : false;
+        const days = oneTime ? [90, 120] : [30, 60, 90];
+        await db.query('DELETE FROM complaint_outcomes WHERE case_id = $1 AND NOT (day = ANY($2::int[]))', [c.id, days]);
+        for (const day of days) {
+          const o = oneTime ? oneTimeOutcomeAt(paid, at, day, { today: todayMs, repeatCaseId: repeat?.id || null }) : outcomeAt(paid, at, day, { today: todayMs, repeatCaseId: repeat?.id || null });
           await db.query(
             `INSERT INTO complaint_outcomes (case_id, day, still_booking, next_booking_on, last_booking_on, public_review_stars, public_review_platform, repeat_case_id, outcome, checked_at)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
@@ -563,7 +571,9 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
 
   async function status() {
     const last = await one(db, 'SELECT id, started_at, finished_at, status, window_from, window_to, log FROM complaint_runs ORDER BY id DESC LIMIT 1');
-    return { running: !!running, sources: sources(), last_run: last };
+    // Which periods have been mined (finished runs), so the page can say what a date range covers.
+    const mined = await many(db, "SELECT window_from, window_to, finished_at, status FROM complaint_runs WHERE status IN ('done', 'partial') ORDER BY window_from");
+    return { running: !!running, sources: sources(), last_run: last, mined };
   }
 
   async function listCases({ from, to, category, limit = 500 }) {
@@ -574,17 +584,39 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       where += ` AND c.category = $${params.length}`;
     }
     params.push(Math.min(2000, Number(limit) || 500));
-    return many(
+    const rows = await many(
       db,
       `SELECT c.id, c.source, c.opened_at, c.service_date, c.customer_name, c.l27_customer_id, c.l27_booking_id, c.category, c.tone, c.severity, c.hard_route, c.summary, c.status, c.source_status, c.classified_by,
               (SELECT coalesce(sum(amount), 0) FROM complaint_costs k WHERE k.case_id = c.id) AS total_cost,
               (SELECT string_agg(DISTINCT coalesce(r.rung, r.action), ', ') FROM complaint_resolutions r WHERE r.case_id = c.id) AS rungs,
               (SELECT outcome FROM complaint_outcomes o WHERE o.case_id = c.id AND o.day = 60) AS outcome_60,
-              j.tenure_days, j.cleaner_name
+              (SELECT outcome FROM complaint_outcomes o WHERE o.case_id = c.id AND o.day = 120) AS outcome_120,
+              j.tenure_days, j.cleaner_name, j.frequency
          FROM complaint_cases c LEFT JOIN complaint_journeys j ON j.case_id = c.id
         WHERE ${where} ORDER BY c.opened_at DESC LIMIT $${params.length}`,
       params,
     );
+    const byId = await visitIndex();
+    return rows.map((r) => ({ ...r, ...visitInfo(byId.get(Number(r.l27_booking_id)), r.frequency) }));
+  }
+
+  // Service type and client type of the visit complained about, from the Launch27 snapshot.
+  let visitCache = null;
+  async function visitIndex() {
+    try {
+      const snap = await reports.visitsSnapshot();
+      if (!visitCache || visitCache.taken_at !== snap.taken_at) visitCache = { taken_at: snap.taken_at, byId: new Map(snap.visits.map((v) => [Number(v.id), v])) };
+      return visitCache.byId;
+    } catch {
+      return new Map();
+    }
+  }
+  function visitInfo(v, frequency = null) {
+    const kind = v?.kind || (frequency ? frequencyKind(frequency) : null);
+    return {
+      client_type: kind == null ? null : kind === 'one' ? 'one_time' : 'recurring',
+      service: v?.svc ? [v.svc, v.deep && 'Deep cleaning', v.move && 'Move in/out', v.reclean && 'Reclean'].filter(Boolean).join(' · ') : null,
+    };
   }
 
   async function getCase(id) {
@@ -597,7 +629,8 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       many(db, 'SELECT * FROM complaint_outcomes WHERE case_id = $1 ORDER BY day', [id]),
       many(db, 'SELECT id, source, opened_at FROM complaint_cases WHERE merged_into = $1', [id]),
     ]);
-    return { ...c, journey, resolutions, costs, outcomes, also_seen_in: dupes };
+    const byId = await visitIndex();
+    return { ...c, ...visitInfo(byId.get(Number(c.l27_booking_id)), journey?.frequency), journey, resolutions, costs, outcomes, also_seen_in: dupes };
   }
 
   async function setCategory(id, { category, hard_route }, userId) {
@@ -625,9 +658,23 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     } catch {
       // Reports not built yet: the playbook still renders, without per-visit rates.
     }
+    const byId = await visitIndex();
+    for (const c of cases) c.one_time = visitInfo(byId.get(Number(c.l27_booking_id)), c.frequency).client_type === 'one_time';
     return buildPlaybook({ cases, resolutions, costs, outcomes, visits, from, to, settings, today: isoDay(now()) });
   }
 
-  return { getSettings, saveSettings, kustomerDiscover, start, run, status, markInterrupted, listCases, getCase, setCategory, playbook, sources };
+  // Clients view: who complains repeatedly, and who looks at risk of leaving right now.
+  async function clients() {
+    const since = new Date(now() - 365 * DAY).toISOString();
+    const rows = await many(db, `SELECT c.id, c.l27_customer_id, c.customer_name, c.opened_at, c.category, c.tone, c.severity, c.hard_route,
+        (SELECT coalesce(sum(amount), 0) FROM complaint_costs k WHERE k.case_id = c.id) AS cost,
+        (SELECT json_agg(json_build_object('day', o.day, 'outcome', o.outcome, 'next', o.next_booking_on)) FROM complaint_outcomes o WHERE o.case_id = c.id) AS outcomes,
+        j.cleans_total, j.cleaner_changed_last_visit, j.price_change_pct, j.frequency, j.tenure_days
+      FROM complaint_cases c LEFT JOIN complaint_journeys j ON j.case_id = c.id
+      WHERE c.merged_into IS NULL AND c.l27_customer_id IS NOT NULL AND c.opened_at >= $1 ORDER BY c.opened_at`, [since]);
+    return buildClients(rows, now());
+  }
+
+  return { getSettings, saveSettings, kustomerDiscover, start, run, status, markInterrupted, listCases, getCase, setCategory, playbook, clients, sources };
 }
 

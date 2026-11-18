@@ -6,7 +6,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useInboxMe } from '../inbox/util';
-import { complaintsApi, OUTCOME_LABEL, SOURCE_LABEL, TONE_LABEL, type CaseRow, type Confidence, type OutcomeStats, type Playbook, type Settings, type Status } from '../complaints/api';
+import { complaintsApi, OUTCOME_LABEL, RUNG_NAME, SOURCE_LABEL, TONE_LABEL, whatWeDid, type CaseRow, type ClientRow, type Confidence, type OutcomeStats, type Playbook, type Settings, type Status } from '../complaints/api';
 import { Kpi } from '../reports/ui';
 import { money, pct } from '../reports/api';
 
@@ -28,11 +28,28 @@ const catLabel = (k: string) => CATEGORY_LABEL[k] || k;
 const conf = (c: Confidence, n: number) => <span className={`pill ${c === 'thin' || c === 'none' ? 'late' : ''}`} title={`${n} cases with a 60-day outcome`}>{c === 'none' ? 'no data' : `${c} · n=${n}`}</span>;
 const day = (s: string | null) => (s ? new Date(s).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' }) : '—');
 
+// Viewing and mining are separate. Viewing reads what's already stored for any date range,
+// instantly. Mining ("Update from sources") reads Kustomer, Slack, info@ and Launch27 for the
+// range shown, at most about 3 months at a time so a run stays around 10–15 minutes.
+interface Period { from: string; to: string; days: number | null }
+const QUICK_DAYS = [7, 14, 30, 60, 90, 180, 365];
+const MAX_RUN_DAYS = 93;
+const isoDay = (d: Date) => d.toISOString().slice(0, 10);
+const addDays = (iso: string, n: number) => {
+  const d = new Date(`${iso}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return isoDay(d);
+};
+const spanDays = (p: { from: string; to: string }) => Math.round((Date.parse(p.to) - Date.parse(p.from)) / 86_400_000) + 1;
+const lastDays = (n: number, end: string): Period => ({ from: addDays(end, -(n - 1)), to: end, days: n });
+
 export function ComplaintsPage() {
   const me = useInboxMe();
-  const [tab, setTab] = useState<'playbook' | 'cases' | 'rules'>('playbook');
+  const [tab, setTab] = useState<'playbook' | 'cases' | 'clients' | 'rules'>('playbook');
+  const [chosen, setChosen] = useState<Period | null>(null);
   const status = useQuery({ queryKey: ['complaints', 'status'], queryFn: complaintsApi.status, refetchInterval: (q) => (q.state.data?.running ? 5000 : false), retry: false });
   const isAdmin = me.data?.role === 'admin';
+  const period = chosen || (status.data ? lastDays(90, status.data.window.to) : null);
   if (status.isError) {
     return (
       <div className="seg-page">
@@ -52,16 +69,17 @@ export function ComplaintsPage() {
           <p className="muted">What our complaints are, what we did, and what actually kept clients at what cost. Phase 1: learning from history. Nothing here sends anything.</p>
         </div>
       </header>
-      {status.data && <RunBar status={status.data} isAdmin={isAdmin} />}
+      {status.data && period && <RunBar status={status.data} isAdmin={isAdmin} period={period} onPeriod={setChosen} />}
       <div className="tabs" role="tablist">
-        {(['playbook', 'cases', 'rules'] as const).map((t) => (
+        {(['playbook', 'cases', 'clients', 'rules'] as const).map((t) => (
           <button key={t} role="tab" aria-selected={tab === t} className={`tab ${tab === t ? 'active' : ''}`} onClick={() => setTab(t)}>
-            {t === 'playbook' ? 'Playbook' : t === 'cases' ? 'Cases' : 'Rules & budget'}
+            {t === 'playbook' ? 'Playbook' : t === 'cases' ? 'Cases' : t === 'clients' ? 'Clients' : 'Rules & budget'}
           </button>
         ))}
       </div>
-      {tab === 'playbook' && <PlaybookTab />}
-      {tab === 'cases' && <CasesTab />}
+      {tab === 'playbook' && period && <PlaybookTab period={period} />}
+      {tab === 'cases' && period && <CasesTab period={period} />}
+      {tab === 'clients' && <ClientsTab />}
       {tab === 'rules' && <RulesTab canEdit={isAdmin} />}
     </div>
   );
@@ -76,9 +94,9 @@ const RUN_LABEL: Record<string, { text: string; cls: string }> = {
 };
 const clock = (s: string) => new Date(s).toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' });
 
-function RunBar({ status, isAdmin }: { status: Status; isAdmin: boolean }) {
+function RunBar({ status, isAdmin, period, onPeriod }: { status: Status; isAdmin: boolean; period: Period; onPeriod: (p: Period) => void }) {
   const qc = useQueryClient();
-  const run = useMutation({ mutationFn: () => complaintsApi.run(), onSuccess: () => qc.invalidateQueries({ queryKey: ['complaints'] }) });
+  const run = useMutation({ mutationFn: () => complaintsApi.run({ from: period.from, to: period.to }), onSuccess: () => qc.invalidateQueries({ queryKey: ['complaints'] }) });
   const last = status.last_run;
   useEffect(() => {
     if (!status.running) qc.invalidateQueries({ queryKey: ['complaints', 'playbook'] });
@@ -86,26 +104,57 @@ function RunBar({ status, isAdmin }: { status: Status; isAdmin: boolean }) {
   const state = status.running ? 'running' : last?.status || null;
   const problems = (last?.log || []).filter((l) => l.level === 'error' || l.level === 'warn');
   const latest = last?.log?.[last.log.length - 1];
+  const end = status.window.to;
+  const tooLong = spanDays(period) > MAX_RUN_DAYS;
+  // Is every day of the range shown inside a period that has been mined?
+  const covered = (() => {
+    let day0 = period.from;
+    for (const m of [...status.mined].sort((a, b) => a.window_from.localeCompare(b.window_from))) {
+      const f = m.window_from.slice(0, 10);
+      const t = m.window_to.slice(0, 10);
+      if (f <= day0 && t >= day0) day0 = addDays(t, 1);
+    }
+    return day0 > period.to;
+  })();
+  const setDate = (k: 'from' | 'to', v: string) => {
+    if (!v) return;
+    const next = { ...period, [k]: v, days: null };
+    if (next.from <= next.to) onPeriod(next);
+  };
   return (
     <section className="card">
       <div className="cmp-runbar">
-        <div>
-          <b>Window:</b> {day(status.window.from)} – {day(status.window.to)}
+        <div className="cmp-period">
+          <div className="tabs inline" role="group" aria-label="Show the last">
+            {QUICK_DAYS.map((n) => (
+              <button key={n} className={`chip-btn ${period.days === n ? 'active' : ''}`} aria-pressed={period.days === n} onClick={() => onPeriod(lastDays(n, end))}>{n === 180 ? '6 months' : n === 365 ? '12 months' : `${n} days`}</button>
+            ))}
+          </div>
+          <label className="cmp-date">From<input type="date" value={period.from} max={period.to} onChange={(e) => setDate('from', e.target.value)} /></label>
+          <label className="cmp-date">To<input type="date" value={period.to} min={period.from} max={end} onChange={(e) => setDate('to', e.target.value)} /></label>
         </div>
         {isAdmin && (
-          <button disabled={status.running || run.isPending} onClick={() => run.mutate()}>
-            {status.running || run.isPending ? 'Running…' : last ? 'Run again' : 'Run the pilot'}
+          <button disabled={status.running || run.isPending || tooLong} title={tooLong ? 'Updates read at most about 3 months at a time. Pick 90 days or less, or set the dates to a 3-month block.' : 'Read Kustomer, Slack, info@ and Launch27 for the dates shown'} onClick={() => run.mutate()}>
+            {status.running || run.isPending ? 'Updating…' : 'Update these dates from sources'}
           </button>
         )}
       </div>
+      <p className="muted small">
+        Showing {day(period.from)} – {day(period.to)} from what's already stored.{' '}
+        {status.mined.length === 0 ? 'Nothing has been read from the sources yet.' : covered ? 'All of these dates have been read from the sources.' : <span className="warn">Some of these dates haven't been read from the sources yet, so they may be missing complaints.</span>}
+        {isAdmin && tooLong ? ' To read more history, set the dates to a 3-month block and update it.' : ''}
+      </p>
+      {status.mined.length > 0 && (
+        <p className="muted small">Read so far: {status.mined.map((m) => `${day(m.window_from)} – ${day(m.window_to)}`).filter((x, i, a) => a.indexOf(x) === i).join(' · ')}</p>
+      )}
       {run.isError && <p className="neg small">Couldn't start the run: {(run.error as Error).message}</p>}
       {state && last && (
         <div className={`cmp-runstate ${RUN_LABEL[state]?.cls || ''}`} role="status" aria-live="polite">
           <b>{RUN_LABEL[state]?.text || state}</b>
           {status.running ? (
-            <span> · started {clock(last.started_at)}{latest ? ` · ${latest.msg}` : ' · starting…'} · the first run takes 5–10 minutes</span>
+            <span> · {day(last.window_from)} – {day(last.window_to)} · started {clock(last.started_at)}{latest ? ` · ${latest.msg}` : ' · starting…'} · about 10–15 minutes for 3 months</span>
           ) : (
-            <span> · {day(last.started_at)} {clock(last.started_at)}{last.finished_at ? `–${clock(last.finished_at)}` : ''}</span>
+            <span> · {day(last.window_from)} – {day(last.window_to)} · ran {day(last.started_at)} {clock(last.started_at)}{last.finished_at ? `–${clock(last.finished_at)}` : ''}</span>
           )}
         </div>
       )}
@@ -142,19 +191,20 @@ function StatCells({ s }: { s: OutcomeStats }) {
   );
 }
 
-function PlaybookTab() {
-  const q = useQuery({ queryKey: ['complaints', 'playbook'], queryFn: () => complaintsApi.playbook(), retry: false });
+function PlaybookTab({ period }: { period: Period }) {
+  const q = useQuery({ queryKey: ['complaints', 'playbook', period.from, period.to], queryFn: () => complaintsApi.playbook({ from: period.from, to: period.to }), retry: false, placeholderData: (prev) => prev });
   const p = q.data;
   if (q.isLoading) return <p className="muted">Loading…</p>;
   if (q.isError) return <div className="error">{(q.error as Error).message}</div>;
   if (!p) return null;
-  if (!p.totals.cases) return <section className="card seg-empty"><h2>No cases yet</h2><p className="muted">Run the pilot to mine the last {p.window.from ? 'six months' : 'months'} of complaints.</p></section>;
+  if (!p.totals.cases) return <section className="card seg-empty"><h2>No cases stored for these dates</h2><p className="muted">Pick other dates above, or update these dates from the sources.</p></section>;
   return (
     <>
       <div className="tiles">
         <Kpi label="Complaint cases" value={String(p.totals.cases)} note={Object.entries(p.totals.by_source).map(([k, v]) => `${SOURCE_LABEL[k] || k} ${v}`).join(' · ')} />
-        <Kpi label="Kept the client (60 days)" value={pct(p.totals.saved)} note={`of ${p.totals.decided} with a known outcome`} />
-        <Kpi label="Lost the client" value={pct(p.totals.lost)} tone={(p.totals.lost || 0) > 0.3 ? 'warn' : undefined} />
+        <Kpi label="Recurring clients kept (60 days)" value={pct(p.totals.saved)} note={`of ${p.totals.decided} weekly/biweekly/monthly clients with a known outcome`} />
+        <Kpi label="Recurring clients lost" value={pct(p.totals.lost)} tone={(p.totals.lost || 0) > 0.3 ? 'warn' : undefined} />
+        <Kpi label="One-time clients who booked again" value={pct(p.totals.one_time.rebooked_120)} note={`within 120 days (${pct(p.totals.one_time.rebooked_90)} within 90) · ${p.totals.one_time.decided} of ${p.totals.one_time.n} with a known outcome`} />
         <Kpi label="Total cost" value={money(p.totals.total_cost)} note={`avg ${money(p.totals.avg_cost)} per case`} />
         <Kpi label="Hard-routed" value={String(p.totals.hard_routed)} note="damage >$100, theft, safety, misconduct, legal" />
         <Kpi label="First reply (median)" value={p.response.first_response_median_hours == null ? '—' : `${p.response.first_response_median_hours} h`} note={`${p.response.with_response_time} cases with reply times`} />
@@ -162,18 +212,19 @@ function PlaybookTab() {
 
       <section className="card">
         <h2>Taxonomy: what comes up, what we did, what worked</h2>
-        <p className="muted small">"Cheapest that works" is the lowest-cost rung whose save rate is within 10 points of the best rung, among rungs with at least 3 decided cases. Anything marked thin rests on fewer than {p.thin_threshold} cases.</p>
+        <p className="muted small">Saved and Lost count recurring clients only (still booking 60 days later). One-time clients are measured on whether they booked again within 120 days. "Cheapest that works" is the lowest-cost response whose save rate is within 10 points of the best one, among responses with at least 3 known outcomes. Anything marked thin rests on fewer than {p.thin_threshold} cases.</p>
         <div className="table-scroll">
           <table>
-            <thead><tr><th>Category</th><th>Share</th><th>We usually</th><th>Cases</th><th>Saved</th><th>Lost</th><th>Avg cost</th><th>Confidence</th><th>Cheapest that works</th></tr></thead>
+            <thead><tr><th>Category</th><th>Share</th><th>We usually</th><th>Cases</th><th>Saved</th><th>Lost</th><th>Avg cost</th><th>Confidence</th><th>One-time: booked again</th><th>Cheapest that works</th></tr></thead>
             <tbody>
               {p.taxonomy.map((t) => (
                 <tr key={t.key} className="static">
                   <td>{catLabel(t.key)}{t.hard_routed ? <span className="pill late">{t.hard_routed} hard-routed</span> : null}</td>
                   <td>{pct(t.share)}</td>
-                  <td>{t.typical_rung || '—'}</td>
+                  <td>{t.typical_name || '—'}</td>
                   <StatCells s={t} />
-                  <td>{t.cheapest_that_works ? `${t.cheapest_that_works.rung} · ${pct(t.cheapest_that_works.saved)} saved · ${money(t.cheapest_that_works.avg_cost)}` : <span className="muted">not enough data</span>}</td>
+                  <td>{t.one_time.n ? `${pct(t.one_time.rebooked_120)} · n=${t.one_time.decided}` : '—'}</td>
+                  <td>{t.cheapest_that_works ? `${t.cheapest_that_works.name} · ${pct(t.cheapest_that_works.saved)} saved · ${money(t.cheapest_that_works.avg_cost)}` : <span className="muted">not enough data</span>}</td>
                 </tr>
               ))}
             </tbody>
@@ -182,35 +233,19 @@ function PlaybookTab() {
       </section>
 
       <section className="card">
-        <h2>The ladder: retention and real cost per rung</h2>
-        <p className="muted small">Each case is counted at the highest rung it reached. Hard-routed cases are left out (they're never on the ladder). Reclean cost includes the cleaner's pay, travel and the margin of the slot it used up.</p>
+        <h2>What we did: retention and real cost of each response</h2>
+        <p className="muted small">Each case is counted at the biggest thing we gave. Refunds are grouped by size (we've actually given 20%, 30%, 40%, 50% and full). Hard-routed cases are left out (they're never on the ladder). Reclean cost includes the cleaner's pay, travel and the margin of the slot it used up.</p>
         <table>
-          <thead><tr><th>Rung</th><th>Action</th><th>Cases</th><th>Saved</th><th>Lost</th><th>Avg cost</th><th>Confidence</th></tr></thead>
+          <thead><tr><th>Response</th><th>Level</th><th>Cases</th><th>Saved</th><th>Lost</th><th>Avg cost</th><th>Confidence</th></tr></thead>
           <tbody>
             {p.ladder.map((r) => (
-              <tr key={r.rung} className="static"><td><b>{r.rung}</b> <span className="muted small">{r.tier}</span></td><td>{r.label}</td><StatCells s={r} /></tr>
+              <tr key={r.rung} className="static"><td><b>{r.name}</b></td><td className="muted small">{r.tier}</td><StatCells s={r} /></tr>
             ))}
           </tbody>
         </table>
       </section>
 
-      {p.reclean_vs_refund.length > 0 && (
-        <section className="card">
-          <h2>Reclean vs refund: where our default helped, where it was overkill</h2>
-          <table>
-            <thead><tr><th>Category</th><th>Reclean</th><th>Refund</th><th>Neither</th><th>Read</th></tr></thead>
-            <tbody>
-              {p.reclean_vs_refund.map((x) => (
-                <tr key={x.key} className="static">
-                  <td>{catLabel(x.key)}</td>
-                  {[x.reclean, x.refund, x.neither].map((s, i) => <td key={i}>{s.n ? `${pct(s.saved)} saved · ${money(s.avg_cost)} · n=${s.decided}` : '—'}</td>)}
-                  <td>{x.verdict}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
-      )}
+      <RecleanVsRefund p={p} />
 
       {p.root_causes && <RootCauses rc={p.root_causes} />}
       <Baseline b={p.baseline} />
@@ -220,6 +255,62 @@ function PlaybookTab() {
         <ul>{p.gaps.map((g, i) => <li key={i}>{g}</li>)}</ul>
       </section>
     </>
+  );
+}
+
+function RecleanVsRefund({ p }: { p: Playbook }) {
+  const t = p.reclean_vs_refund_total;
+  const l = p.like_for_like;
+  const arms = [
+    { label: 'Reclean', s: t.reclean },
+    { label: 'Refund', s: t.refund },
+    { label: 'Neither (apology or credit)', s: t.neither },
+  ];
+  const any = t.reclean.n + t.refund.n > 0;
+  return (
+    <section className="card">
+      <h2>Reclean vs refund</h2>
+      {!any ? (
+        <p className="muted">No recleans or refunds in these dates yet. This fills in once Kustomer and the finance channels have been read for the period.</p>
+      ) : (
+        <>
+          <div className="cmp-arms">
+            {arms.map((a) => (
+              <div key={a.label} className="cmp-arm">
+                <span className="muted small">{a.label}</span>
+                <span className="cmp-arm-value">{a.s.decided ? pct(a.s.saved) : '—'}</span>
+                <span className="small">recurring clients kept</span>
+                <span className="muted small">{a.s.n} cases · avg cost {money(a.s.avg_cost)} · {a.s.decided} with a known outcome</span>
+              </div>
+            ))}
+          </div>
+          <div className={`cmp-note ${l.reclean && l.refund && l.matched_pairs >= p.thin_threshold ? 'ok' : ''}`}>
+            <b>Like for like.</b> Angrier clients tend to get refunds, which makes refunds look worse than they are. Comparing only similar complaints (same category, calm or heated, new or established client):{' '}
+            {l.reclean && l.refund ? <>reclean kept <b>{pct(l.reclean.saved)}</b>, refund kept <b>{pct(l.refund.saved)}</b>, from {l.matched_pairs} comparable pair{l.matched_pairs === 1 ? '' : 's'}. {l.verdict}</> : <span className="muted">not enough similar cases yet to compare fairly. This fills in as more history is read.</span>}
+          </div>
+          {p.reclean_vs_refund.length > 0 && (
+            <div className="table-scroll">
+              <table>
+                <thead><tr><th>Category</th><th>Reclean kept</th><th>Reclean cost</th><th>Refund kept</th><th>Refund cost</th><th>Neither kept</th><th>Read</th></tr></thead>
+                <tbody>
+                  {p.reclean_vs_refund.map((x) => (
+                    <tr key={x.key} className="static">
+                      <td>{catLabel(x.key)}</td>
+                      <td>{x.reclean.decided ? `${pct(x.reclean.saved)} of ${x.reclean.decided}` : x.reclean.n ? `too early (${x.reclean.n})` : '—'}</td>
+                      <td>{x.reclean.n ? money(x.reclean.avg_cost) : '—'}</td>
+                      <td>{x.refund.decided ? `${pct(x.refund.saved)} of ${x.refund.decided}` : x.refund.n ? `too early (${x.refund.n})` : '—'}</td>
+                      <td>{x.refund.n ? money(x.refund.avg_cost) : '—'}</td>
+                      <td>{x.neither.decided ? `${pct(x.neither.saved)} of ${x.neither.decided}` : '—'}</td>
+                      <td className="small">{x.verdict}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+    </section>
   );
 }
 
@@ -263,11 +354,42 @@ function Baseline({ b }: { b: Playbook['baseline'] }) {
   );
 }
 
-function CasesTab() {
+type SortKey = 'opened_at' | 'customer_name' | 'category' | 'service' | 'client_type' | 'tone' | 'did' | 'total_cost' | 'outcome' | 'source';
+const TONE_ORDER = ['mild', 'frustrated', 'angry', 'threat_leave', 'threat_review'];
+const outcomeOf = (c: CaseRow) => (c.client_type === 'one_time' ? c.outcome_120 : c.outcome_60);
+function sortValue(c: CaseRow, k: SortKey): string | number {
+  switch (k) {
+    case 'total_cost': return Number(c.total_cost) || 0;
+    case 'tone': return c.tone ? TONE_ORDER.indexOf(c.tone) : -1;
+    case 'category': return catLabel(c.category);
+    case 'did': return whatWeDid(c.rungs);
+    case 'outcome': return outcomeOf(c) || '';
+    case 'source': return SOURCE_LABEL[c.source] || c.source;
+    default: return String(c[k] ?? '');
+  }
+}
+
+function CasesTab({ period }: { period: Period }) {
   const [category, setCategory] = useState('');
+  const [source, setSource] = useState('');
   const [open, setOpen] = useState<number | null>(null);
-  const q = useQuery({ queryKey: ['complaints', 'cases', category], queryFn: () => complaintsApi.cases({ category: category || undefined }), retry: false });
-  const rows = q.data || [];
+  const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: 'opened_at', dir: -1 });
+  const q = useQuery({ queryKey: ['complaints', 'cases', category, period.from, period.to], queryFn: () => complaintsApi.cases({ category: category || undefined, from: period.from, to: period.to }), retry: false });
+  const all = useMemo(() => q.data || [], [q.data]);
+  const sources = useMemo(() => [...new Set(all.map((c) => c.source))].sort(), [all]);
+  const rows = useMemo(() => {
+    const list = source ? all.filter((c) => c.source === source) : [...all];
+    return list.sort((a, b) => {
+      const x = sortValue(a, sort.key);
+      const y = sortValue(b, sort.key);
+      return (typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y))) * sort.dir;
+    });
+  }, [all, source, sort]);
+  const Th = ({ k, children }: { k: SortKey; children: string }) => (
+    <th aria-sort={sort.key === k ? (sort.dir === 1 ? 'ascending' : 'descending') : 'none'}>
+      <button className="link cmp-sort" onClick={() => setSort((s) => ({ key: k, dir: s.key === k ? (s.dir === 1 ? -1 : 1) : 1 }))}>{children}{sort.key === k ? (sort.dir === 1 ? ' ▲' : ' ▼') : ''}</button>
+    </th>
+  );
   const cats = useMemo(() => Object.keys(CATEGORY_LABEL), []);
   return (
     <div className="cmp-cases">
@@ -277,21 +399,27 @@ function CasesTab() {
             <option value="">All categories</option>
             {cats.map((c) => <option key={c} value={c}>{catLabel(c)}</option>)}
           </select>
-          <span className="muted small">{rows.length} cases</span>
+          <select value={source} onChange={(e) => setSource(e.target.value)} aria-label="Source">
+            <option value="">All sources</option>
+            {sources.map((s) => <option key={s} value={s}>{SOURCE_LABEL[s] || s}</option>)}
+          </select>
+          <span className="muted small">{rows.length} cases · click a column heading to sort</span>
         </div>
         <div className="table-scroll">
           <table>
-            <thead><tr><th>Opened</th><th>Client</th><th>Category</th><th>Tone</th><th>What we did</th><th>Cost</th><th>60 days</th><th>From</th></tr></thead>
+            <thead><tr><Th k="opened_at">Opened</Th><Th k="customer_name">Client</Th><Th k="client_type">Client type</Th><Th k="service">Service</Th><Th k="category">Category</Th><Th k="tone">Tone</Th><Th k="did">What we did</Th><Th k="total_cost">Cost</Th><Th k="outcome">Outcome</Th><Th k="source">From</Th></tr></thead>
             <tbody>
               {rows.map((c: CaseRow) => (
                 <tr key={c.id} className={open === c.id ? 'selected' : ''} onClick={() => setOpen(c.id)}>
                   <td>{day(c.opened_at)}</td>
                   <td>{c.customer_name || <span className="muted">unmatched</span>}</td>
+                  <td>{c.client_type === 'one_time' ? 'One-time' : c.client_type === 'recurring' ? 'Recurring' : '—'}</td>
+                  <td className="small">{c.service || '—'}</td>
                   <td>{catLabel(c.category)}{c.hard_route && <span className="pill late">hard route</span>}</td>
                   <td>{c.tone ? TONE_LABEL[c.tone] : '—'}</td>
-                  <td>{c.rungs || 'L0'}</td>
+                  <td>{whatWeDid(c.rungs)}</td>
                   <td>{money(Number(c.total_cost))}</td>
-                  <td>{c.outcome_60 ? OUTCOME_LABEL[c.outcome_60] : '—'}</td>
+                  <td>{outcomeOf(c) ? OUTCOME_LABEL[outcomeOf(c) as string] : '—'}</td>
                   <td className="small muted">{SOURCE_LABEL[c.source] || c.source}</td>
                 </tr>
               ))}
@@ -327,6 +455,7 @@ function CaseDetailCard({ id, onClose }: { id: number; onClose: () => void }) {
         {c.hard_route && (<><dt>Hard route</dt><dd className="neg">{c.hard_route.replace(/_/g, ' ')} → Office Manager</dd></>)}
         <dt>Areas</dt><dd>{c.areas_cited?.length ? c.areas_cited.join(', ') : '—'}</dd>
         <dt>Booking</dt><dd>{c.l27_booking_id ? `#${c.l27_booking_id}` : '—'} {c.service_date && `· cleaned ${day(c.service_date)}`}</dd>
+        <dt>Service</dt><dd>{c.service || '—'} · {c.client_type === 'one_time' ? 'One-time client' : c.client_type === 'recurring' ? 'Recurring client' : 'client type unknown'}</dd>
         {c.source_status && (<><dt>Kustomer status</dt><dd>{c.source_status}</dd></>)}
         {c.also_seen_in.length > 0 && (<><dt>Also seen in</dt><dd>{c.also_seen_in.map((d) => SOURCE_LABEL[d.source] || d.source).join(', ')}</dd></>)}
       </dl>
@@ -342,13 +471,59 @@ function CaseDetailCard({ id, onClose }: { id: number; onClose: () => void }) {
       )}
       <h3>What we did</h3>
       {c.resolutions.length ? (
-        <ul>{c.resolutions.map((r, i) => <li key={i}><b>{r.rung || r.action}</b> {r.action.replace(/_/g, ' ')}{r.pct != null ? ` ${r.pct}%` : ''}{r.amount ? ` ${money(Number(r.amount))}` : ''}{r.decided_by ? ` · decided by ${r.decided_by}` : ''}{r.approved_by && r.approved_by !== r.decided_by ? ` · approved by ${r.approved_by}` : ''} <span className="muted small">({SOURCE_LABEL[r.source] || r.source})</span></li>)}</ul>
-      ) : <p className="muted">No compensation found (L0: apology only, or not recorded).</p>}
+        <ul>{c.resolutions.map((r, i) => <li key={i}><b>{RUNG_NAME[r.rung || r.action] || r.action.replace(/_/g, ' ')}</b>{r.pct != null ? ` ${r.pct}%` : ''}{r.amount ? ` ${money(Number(r.amount))}` : ''}{r.decided_by ? ` · decided by ${r.decided_by}` : ''}{r.approved_by && r.approved_by !== r.decided_by ? ` · approved by ${r.approved_by}` : ''} <span className="muted small">({SOURCE_LABEL[r.source] || r.source})</span></li>)}</ul>
+      ) : <p className="muted">No compensation found (apology only, or not recorded).</p>}
       <h3>Cost</h3>
       {c.costs.length ? <ul>{c.costs.map((k, i) => <li key={i}>{k.kind.replace(/_/g, ' ')}: {money(Number(k.amount))}{k.estimated ? <span className="muted small"> (estimated)</span> : ''}</li>)}</ul> : <p className="muted">$0</p>}
       <h3>Outcome</h3>
       <p>{c.outcomes.length ? c.outcomes.map((o) => `${o.day} days: ${OUTCOME_LABEL[o.outcome]}`).join(' · ') : 'Not linked to a Launch27 client, so no outcome.'}</p>
     </section>
+  );
+}
+
+function ClientTable({ rows, extra, head }: { rows: ClientRow[]; head: string; extra: (r: ClientRow) => React.ReactNode }) {
+  return (
+    <div className="table-scroll">
+      <table>
+        <thead><tr><th>Client</th><th>Complaints (12 mo)</th><th>Last complaint</th><th>About</th><th>Cost to us</th><th>Now</th><th>{head}</th></tr></thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.l27_customer_id} className="static">
+              <td>{r.name || `Client ${r.l27_customer_id}`}</td><td>{r.complaints}</td><td>{day(r.last_complaint)}</td><td>{catLabel(r.last_category)}</td><td>{money(r.total_cost)}</td>
+              <td>{OUTCOME_LABEL[r.status] || r.status}</td><td className="small">{extra(r)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ClientsTab() {
+  const q = useQuery({ queryKey: ['complaints', 'clients'], queryFn: complaintsApi.clients, retry: false });
+  const c = q.data;
+  if (q.isLoading) return <p className="muted">Loading…</p>;
+  if (q.isError) return <div className="error">{(q.error as Error).message}</div>;
+  if (!c) return null;
+  return (
+    <>
+      <p className="muted small">Clients matched to Launch27, from every period mined so far (last 12 months). {c.clients_with_complaints} clients have at least one complaint.</p>
+      <section className="card">
+        <h2>At risk of leaving <span className="muted">· {c.at_risk.length}</span></h2>
+        <p className="muted small">Complained in the last 60 days, still with us, and showing warning signs. Worth a personal call from the office.</p>
+        {c.at_risk.length ? <ClientTable rows={c.at_risk} head="Why" extra={(r) => { const x = r as (typeof c.at_risk)[number]; return `${x.reasons.join(' · ')}${x.next_booking_on ? ` · next booking ${day(x.next_booking_on)}` : ''}`; }} /> : <p className="muted">Nobody flagged right now.</p>}
+      </section>
+      <section className="card">
+        <h2>Repeat complainers <span className="muted">· {c.repeat.length}</span></h2>
+        <p className="muted small">Two or more complaints in 12 months. The question the numbers answer: do they stay, and what do they cost us?</p>
+        {c.repeat.length ? <ClientTable rows={c.repeat} head="Read" extra={(r) => { const x = r as (typeof c.repeat)[number]; return `${x.low_severity ? 'mostly minor issues' : 'serious issues'} · ${x.still_with_us ? 'still with us' : 'left'}`; }} /> : <p className="muted">None yet. This fills in as more periods are mined.</p>}
+      </section>
+      <section className="card">
+        <h2>Escalates to a public review <span className="muted">· {c.review_mentions.length} mentioned one</span></h2>
+        <p className="small warn">Google reviews aren't connected yet, so this lists clients who said they'd post a review, not reviews that were posted.</p>
+        {c.review_mentions.length ? <ClientTable rows={c.review_mentions} head="Mentioned" extra={(r) => day((r as (typeof c.review_mentions)[number]).mentioned_on)} /> : <p className="muted">Nobody has mentioned a review in the periods mined.</p>}
+      </section>
+    </>
   );
 }
 
@@ -380,7 +555,7 @@ function RulesTab({ canEdit }: { canEdit: boolean }) {
           <thead><tr><th>Role</th><th>Can approve up to</th></tr></thead>
           <tbody>
             {Object.entries(s.max_rung).map(([role, rung]) => (
-              <tr key={role} className="static"><td>{role.replace('_', ' ')}</td><td>{rung} · {q.data.rungs.find((r) => r.rung === rung)?.label}{role === 'owner' ? ' (only the owner can approve above 50%)' : ''}</td></tr>
+              <tr key={role} className="static"><td>{role.replace('_', ' ')}</td><td>{q.data.rungs.find((r) => r.rung === rung)?.name}{role === 'owner' ? ' (only the owner can approve above 50%)' : ''}</td></tr>
             ))}
           </tbody>
         </table>

@@ -1924,6 +1924,15 @@ a.rep-factor:hover b { text-decoration: underline; }
 .cmp-runstate.ok { border-left-color: var(--ok); }
 .cmp-runstate.warn { border-left-color: var(--warn); }
 .cmp-runstate.neg { border-left-color: var(--danger); }
+.cmp-period { display: flex; gap: 10px 14px; align-items: center; flex-wrap: wrap; }
+.cmp-date { display: inline-flex; flex-direction: row; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.cmp-date input { width: auto; padding: 4px 8px; }
+.cmp-arms { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 12px; }
+.cmp-arm { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px; }
+.cmp-arm-value { font-size: 26px; font-weight: 600; }
+.cmp-note { padding: 10px 12px; border-radius: 6px; background: var(--bg); border-left: 3px solid var(--warn); font-size: 13px; margin-bottom: 12px; }
+.cmp-note.ok { border-left-color: var(--ok); }
+.cmp-sort { font: inherit; font-weight: 600; color: inherit; padding: 0; white-space: nowrap; }
 .cmp-problems { margin: 6px 0 0; padding-left: 18px; }
 .cmp-sources { list-style: none; padding: 0; margin: 10px 0 4px; display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 4px 16px; }
 .cmp-sources .dot.ok { background: var(--ok); }
