@@ -1989,3 +1989,5 @@ a.rep-factor:hover b { text-decoration: underline; }
 .bd-duration-rows { display: flex; flex-wrap: wrap; gap: 6px 22px; }
 .bd-duration-rows > div { display: flex; flex-direction: column; }
 .bd-duration-rows b { font-size: 16px; }
+.ut-history { margin: -4px 2px 0; color: var(--text-2); }
+.ut-history.partial { color: var(--warn-ink); }
