@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { utilizationFacts, utilizationReport, clampRange, dataCheck } from '../src/reports/utilization.js';
+import { utilizationFacts, utilizationReport, clampRange, dataCheck, withRecordedDays } from '../src/reports/utilization.js';
 import { createReports } from '../src/reports/service.js';
 import { createSchedule } from '../src/schedule/service.js';
 import { createMockLaunch27 } from '../src/mock/launch27.js';
@@ -289,4 +289,48 @@ test('room for counts bookings that fit into real gaps, not hours ÷ length', ()
   const u = utilizationReport({ facts: g, from: TODAY, to: TODAY, maxTo: '2026-11-15' }).totals;
   assert.ok(u.left_h > 3, 'several open hours remain');
   assert.equal(u.room_bookings, 0, 'no gap fits a 1 h visit plus its drive');
+});
+
+describe('utilization: daily history record', () => {
+  test('a saved day replaces the same day rebuilt from current hours', () => {
+    // Live: A works 9–5 every day now. The record for Tue Nov 10 says A only had 9–1 that day.
+    const live = utilizationFacts({ today: '2026-11-16', start: TODAY, cleaners: [A], visits: [], until: '2026-11-15' });
+    const A_then = { ...A, availability: [{ id: 1, date: null, weekday: 2, dayoff: false, start_time: '09:00', end_time: '13:00' }] };
+    const rec = { ...utilizationFacts({ today: '2026-11-16', start: '2026-11-10', until: '2026-11-10', cleaners: [A_then], visits: [] }), recorded_days: ['2026-11-10'] };
+    const merged = withRecordedDays(live, [rec]);
+    const t = utilizationReport({ facts: merged, from: '2026-11-10', to: '2026-11-10', maxTo: '2027-01-10' }).totals;
+    assert.equal(t.available_h, 4);
+    const wk = utilizationReport({ facts: merged, from: TODAY, to: '2026-11-14', maxTo: '2027-01-10' }).totals;
+    // Mon 8 + Tue 4 (recorded) + Wed 8 + Thu 4 (A's own Thursday hours) + Fri 8 + Sat 8 = 40.
+    assert.equal(wk.available_h, 40);
+    assert.deepEqual(merged.recorded_days, ['2026-11-10']);
+  });
+
+  test('the planner saves today and yesterday on each refresh; the report uses saved past days', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet, retryDelayMs: 0 });
+    await schedule.sync();
+    const src = await schedule.utilizationSource();
+    const y = addDaysT(src.today, -1);
+    const rows = (await db.query('SELECT day FROM utilization_days ORDER BY day')).rows;
+    assert.equal(rows.length, 2);
+    const saved = await schedule.recordedDays(y, src.today);
+    assert.deepEqual(saved.map((r) => r.day), [y, src.today]);
+    assert.ok(saved[0].cleaners.length > 0 && Array.isArray(saved[0].visits));
+    assert.ok(saved[0].cleaners.every((c) => c.availability.every((row) => !row.date || String(row.date).slice(0, 10) === y)), 'only that day\'s one-day changes are kept');
+    // Pretend yesterday everyone had the day off: the report must follow the record, not today's hours.
+    const off = { ...saved[0], cleaners: saved[0].cleaners.map((c) => ({ ...c, availability: [] })) };
+    delete off.day;
+    await db.query('UPDATE utilization_days SET data = $2::jsonb WHERE day = $1', [y, JSON.stringify(off)]);
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    const r = await reports.utilization({ from: y, to: y });
+    if (new Date(`${y}T12:00:00Z`).getUTCDay() !== 0) {
+      assert.equal(r.totals.available_h, 0);
+      assert.deepEqual([r.history.recorded_days, r.history.past_days], [1, 1]);
+    }
+    assert.equal(r.history.first_recorded, y);
+    await db.close();
+  });
 });
