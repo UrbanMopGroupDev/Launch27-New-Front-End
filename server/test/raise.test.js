@@ -302,9 +302,11 @@ describe('raise: monthly raise check', () => {
   test('a private bell notification per raise-ready cleaner, once a month, admins only', async () => {
     const db = await openDb();
     const config = { ...loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' }), raiseDigestEmails: '' };
-    const fetchImpl = createMockLaunch27({ password: 'demo' });
     let clock = Date.parse('2026-11-12T17:00:00Z'); // 12 pm Toronto
-    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    // The synthetic data and the planner run on the same fixed day as the report, so the
+    // result does not depend on the day the test is run.
+    const fetchImpl = createMockLaunch27({ password: 'demo', now: () => clock });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet, now: () => clock });
     const reports = createReports({ db, config, fetchImpl, schedule, log: quiet, now: () => clock });
     await schedule.sync();
     await reports.sync();
