@@ -1,8 +1,9 @@
 import { DragEvent, useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { l27, l27All, l27Write } from '../api';
 import { useBrand } from '../brands/useBrand';
+import { CustomerTags } from '../components/CustomerTags';
 import { useActiveTeams, useCanWrite, useLocations } from '../hooks';
 import { fmtMoney, todayISO } from '../format';
 import {
@@ -74,11 +75,29 @@ type DropAsk = { booking: DispatchBooking; teamId: number; verb: string; run: ()
 export function DispatchPage() {
   const canWrite = useCanWrite();
   const queryClient = useQueryClient();
-  const [date, setDate] = useState(todayISO());
-  const [locationId, setLocationId] = useState<number | 'all' | null>(null);
+  // The day, location and open booking live in the address (?date=…&loc=…&open=…), so coming
+  // back from a booking (or reloading, or sharing the link) lands on the same view, not on today.
+  // Each day change is its own history entry, so the browser's Back button steps back through
+  // the days you looked at; opening a booking or switching location just updates the current one.
+  const [params, setParams] = useSearchParams();
+  const setUrl = (patch: Record<string, string | null>, push = false) => {
+    const next = new URLSearchParams(params);
+    for (const [k, v] of Object.entries(patch)) if (v) next.set(k, v); else next.delete(k);
+    if (next.toString() === params.toString()) return;
+    setParams(next, { replace: !push });
+  };
+  const today = todayISO();
+  const dateParam = params.get('date') || '';
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(dateParam) && !Number.isNaN(new Date(`${dateParam}T12:00:00`).getTime()) ? dateParam : today;
+  const setDate = (d: string) => setUrl({ date: d && d !== today ? d : null, open: null, team: null }, true);
+  const locParam = params.get('loc');
+  const locationId: number | 'all' | null = locParam === 'all' ? 'all' : locParam && Number.isInteger(Number(locParam)) ? Number(locParam) : null;
+  const setLocationId = (l: number | 'all' | null) => setUrl({ loc: l === null ? null : String(l) });
+  const openKey = params.get('open');
+  const selected = useMemo(() => (openKey ? { key: openKey, teamId: params.get('team') ? Number(params.get('team')) : null } : null), [openKey, params]);
+  const setSelected = (sel: { key: string; teamId: number | null } | null) => setUrl({ open: sel?.key ?? null, team: sel?.teamId != null ? String(sel.teamId) : null });
   const [search, setSearch] = useState('');
   const [showAll, setShowAll] = useState(false);
-  const [selected, setSelected] = useState<{ key: string; teamId: number | null } | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [dropAsk, setDropAsk] = useState<DropAsk | null>(null);
   const [busy, setBusy] = useState(false);
@@ -105,6 +124,7 @@ export function DispatchPage() {
   useEffect(() => {
     if (locationId !== null && locationId !== 'all' && !brandLocations.some((l) => l.id === locationId)) setLocationId(null);
     else if (locationId === null && brandLocations.length) setLocationId(brand.view === 'both' ? (brandLocations.find((l) => l.default) || brandLocations[0]).id : brandLocations.length > 1 ? 'all' : brandLocations[0].id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- setLocationId only writes the address
   }, [brandLocations, locationId, brand.view]);
 
   const bookingsQ = useQuery({
@@ -186,7 +206,7 @@ export function DispatchPage() {
     };
   }, [board, rows, bookings]);
 
-  const isToday = date === todayISO();
+  const isToday = date === today;
   const nowMin = (() => {
     const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(new Date(now));
     return (Number(parts.find((p) => p.type === 'hour')?.value) % 24) * 60 + Number(parts.find((p) => p.type === 'minute')?.value);
@@ -290,7 +310,7 @@ export function DispatchPage() {
               ›
             </button>
             {!isToday && (
-              <button className="secondary" onClick={() => setDate(todayISO())}>
+              <button className="secondary" onClick={() => setDate(today)}>
                 Today
               </button>
             )}
@@ -597,7 +617,7 @@ function BookingDrawer({
           </a>
         )}
         {b.id && (
-          <Link to={`/bookings/${b.id}`} className="button secondary-link">
+          <Link to={`/bookings/${b.id}`} state={{ from: 'dispatch' }} className="button secondary-link">
             Open booking
           </Link>
         )}
@@ -609,6 +629,7 @@ function BookingDrawer({
         </p>
       )}
       <p className="small">{b.address?.full_address}</p>
+      <CustomerTags customerId={b.user?.id} fallback={b.user?.tags_info} />
       {(b.staff_notes || b.customer_notes) && (
         <div className="drawer-notes small">
           {b.staff_notes && (

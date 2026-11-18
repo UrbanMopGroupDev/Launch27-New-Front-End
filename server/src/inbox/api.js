@@ -2,6 +2,7 @@
 // as the rest of the app); the agent's Launch27 token is used for lookups so Launch27
 // keeps enforcing their permissions.
 import { canSeeUtilization } from '../config.js';
+import { registerComplaintRoutes } from '../complaints/api.js';
 import express from 'express';
 import { json as toJson } from '../db/index.js';
 import { lintRules, route } from './routing.js';
@@ -26,7 +27,7 @@ export function diffRules(before, after) {
 }
 const many = async (q, sql, p) => (await q.query(sql, p)).rows;
 
-export function createInboxRouter({ db, sessions, cookieName, config, l27, connectors = {}, log = (lvl, msg, f) => console.error(msg, f), qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null }) {
+export function createInboxRouter({ db, sessions, cookieName, config, l27, connectors = {}, log = (lvl, msg, f) => console.error(msg, f), qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, complaints = null, smsProviders = {} }) {
   const r = express.Router();
   r.use(express.json({ limit: '1mb' }));
 
@@ -168,9 +169,34 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     return {
       // state: how mail is read (live Gmail, sandbox, or not connected). read_only: sending is off.
       email: !email ? { state: 'not_connected', provider: null, accounts: [], read_only: !EMAIL_SENDING_ENABLED } : { state: email.sandbox ? 'sandbox' : 'live', provider: email.name, send_from: email.identities || OUR_IDENTITIES.email, accounts, read_only: !EMAIL_SENDING_ENABLED },
-      sms: !connectors.sms ? { state: 'not_connected', provider: null } : { state: connectors.sms.sandbox ? 'sandbox' : 'live', provider: connectors.sms.name },
+      sms: !connectors.sms ? { state: 'not_connected', provider: null, providers: [] } : { state: connectors.sms.sandbox ? 'sandbox' : 'live', provider: connectors.sms.name, providers: await Promise.all(Object.values(smsProviders).map(smsDetail)) },
     };
   }
+
+  // Each SMS provider: connection, numbers and the queue each number's texts go to (from the
+  // routing rules, so the screen always matches what really happens).
+  async function smsDetail(provider) {
+    const st = await provider.status();
+    const rules = await many(db, 'SELECT * FROM routing_rules');
+    const queues = new Map((await many(db, 'SELECT slug, name FROM queues')).map((q) => [q.slug, q.name]));
+    const numbers = [...new Set([...(st.health?.sms_numbers || []), ...st.configured_numbers])];
+    return {
+      ...st,
+      numbers: numbers.map((n) => {
+        const slug = route(rules, { channel: 'sms', to: n, from: '+10000000000', subject: '', body: '', roles: [] }).action.queue || 'fallback';
+        return { number: n, can_send: (st.health?.sms_numbers || []).includes(n), queue: queues.get(slug) || slug };
+      }),
+    };
+  }
+  // Admins: check, disconnect or reconnect one provider (credentials stay in Railway).
+  r.post('/admin/sms/:provider/:action', needRole('admin'), wrap(async (req, res) => {
+    const provider = Object.hasOwn(smsProviders, req.params.provider) ? smsProviders[req.params.provider] : null;
+    const actions = { check: 'check', disconnect: 'disconnect', connect: 'connect' };
+    if (!provider || !Object.hasOwn(actions, req.params.action)) throw new svc.InboxError(404, 'Unknown SMS provider or action');
+    await provider[actions[req.params.action]]();
+    await svc.audit(db, req.user.id, `sms.${req.params.action}`, 'channel', `sms:${req.params.provider}`, {});
+    res.json(await channelStatus());
+  }));
 
   r.get('/channels', wrap(async (req, res) => res.json(await channelStatus())));
 
@@ -182,7 +208,7 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       dispositions: DISPOSITIONS,
       canned: await many(db, 'SELECT * FROM canned_responses ORDER BY shortcut'),
       // Only addresses the email connector can really send from (all of ours when sandboxed).
-      identities: { ...OUR_IDENTITIES, email: sendableIdentities(connectors, 'email') || OUR_IDENTITIES.email },
+      identities: { ...OUR_IDENTITIES, email: sendableIdentities(connectors, 'email') || OUR_IDENTITIES.email, sms: sendableIdentities(connectors, 'sms')?.length ? sendableIdentities(connectors, 'sms') : OUR_IDENTITIES.sms },
       connected_channels: connectedChannels(connectors),
       channels: await channelStatus(),
       portal: { name: config.portalName || 'UrbanMop', links: config.portalLinks || [] },
@@ -437,6 +463,8 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     const updated = await db.tx(async (q) => {
       const row = await one(q, `UPDATE contacts SET ${sets.join(', ')}, updated_at = now() WHERE id = $1 RETURNING *`, params);
       if (!row) throw new svc.InboxError(404, 'Contact not found');
+      // Linked to Launch27: their conversations leave "Who is this?".
+      if (row.l27_customer_id || row.l27_team_id) await q.query('UPDATE conversations SET needs_match = false, updated_at = now() WHERE contact_id = $1 AND needs_match', [row.id]);
       await svc.audit(q, req.user.id, 'contact.updated', 'contact', req.params.id, req.body);
       return row;
     });
@@ -1143,11 +1171,19 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     });
     const period = (req) => (['4w', '13w', '12m'].includes(req.query.period) ? req.query.period : '13w');
     const admin = (req) => req.user.role === 'admin';
-    r.get('/reports/status', rep(async (req, res) => res.json(await reports.status())));
+    // Opening the reports keeps them fresh: a build from before today is rebuilt in the background
+    // with this person's own (read-only) Launch27 login. The page polls this while it runs.
+    r.get('/reports/status', rep(async (req, res) => {
+      await reports.maybeRun({ bearer: req.bearer }).catch((err) => log.warn?.('reports build on view failed', { error: err.message }));
+      res.json(await reports.status());
+    }));
     const repLocs = (req) => (req.query.locations ? String(req.query.locations).split(',').map(Number).filter((n) => Number.isInteger(n) && n >= 0) : null);
     r.get('/reports/scheduling', rep(async (req, res) => res.json(await reports.scheduling(period(req), { locations: repLocs(req) }))));
     r.get('/reports/cleaners', rep(async (req, res) => res.json(await reports.cleaners(period(req), { admin: admin(req), locations: repLocs(req) }))));
     r.get('/reports/cleaners/:id', rep(async (req, res) => res.json(await reports.cleaner(req.params.id, period(req), { admin: admin(req), locations: repLocs(req) }))));
+    // Cleaner reports 2.0 (Leslie's report above stays as he built it).
+    r.get('/reports/cleaners2', rep(async (req, res) => res.json(await reports.cleaners2(period(req), { admin: admin(req), locations: repLocs(req) }))));
+    r.get('/reports/cleaners2/:id', rep(async (req, res) => res.json(await reports.cleaner2(req.params.id, period(req), { admin: admin(req), locations: repLocs(req) }))));
     // Utilization: everyone outside production unless UTILIZATION_EMAILS narrows it; 404 otherwise.
     // ?from=YYYY-MM-DD&to=YYYY-MM-DD (clamped to today … the end of the planner's 8 weeks).
     r.get('/reports/utilization', rep(async (req, res) => {
@@ -1183,6 +1219,8 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       res.status(202).json({ running: true });
     }));
   }
+
+  if (complaints) registerComplaintRoutes(r, { complaints, needRole, wrap });
 
   return r;
 }

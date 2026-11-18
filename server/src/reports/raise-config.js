@@ -84,3 +84,8 @@ export const RESTRICTIVE_TAGS = [
 // Employee cleaners move up a ladder rather than getting a $ raise. Read from their tags.
 export const EMPLOYEE_TAG = /\bemployee\b/i;
 export const LADDER = ['Regular', 'Flex', 'Team Lead', 'Trainer'];
+
+// Cleaner reports 2.0 churn: a recurring client with nothing booked ahead (schedule cancelled)
+// is "at risk" from minGap days without a clean, and "churned" at `days` days. 60 rather than
+// 45 so a monthly client who skips one visit isn't counted as lost.
+export const CHURN = { days: 60, minGap: 7, flagAt: 2 }; // flagAt: churned clients in the period for a Needs attention flag

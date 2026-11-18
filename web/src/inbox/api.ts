@@ -315,9 +315,41 @@ export interface ChannelAccount {
   last_error: string | null;
   ingested_count: number;
 }
+export interface SmsProviderStatus {
+  provider: 'ringcentral' | 'twilio';
+  enabled: boolean;
+  health_ok: boolean;
+  health: {
+    sms_numbers: string[];
+    not_sms_capable: string[];
+    checked_at: string;
+    // RingCentral
+    account_id?: string | null;
+    extension?: { id: string; number: string | null; name: string | null };
+    other_sms_numbers?: string[];
+    missing_scopes?: string[];
+    // Twilio
+    account?: { sid: string; name: string | null; status: string | null; type: string | null };
+    webhook_elsewhere?: string[];
+  } | null;
+  webhook_url?: string | null;
+  status_callback_url?: string | null;
+  configured_numbers: string[];
+  numbers: { number: string; can_send: boolean; queue: string }[];
+  receiving: string;
+  has_subscription?: boolean;
+  subscription_expires_at?: string | null;
+  last_webhook_at: string | null;
+  last_received_at: string | null;
+  last_reconcile_at: string | null;
+  last_health_at: string | null;
+  last_error: string | null;
+  last_error_at: string | null;
+  events: Record<string, number>;
+}
 export interface ChannelStatus {
   email: { state: ChannelState; provider: string | null; send_from?: string[]; accounts: ChannelAccount[]; read_only: boolean };
-  sms: { state: ChannelState; provider: string | null };
+  sms: { state: ChannelState; provider: string | null; providers: SmsProviderStatus[] };
 }
 
 export interface Meta {
@@ -406,10 +438,11 @@ export const inbox = {
   saveSchedule: (s: Schedule) => call<Schedule>('PUT', s.id ? `/admin/schedules/${s.id}` : '/admin/schedules', s),
   meta: () => call<Meta>('GET', '/meta'),
   channels: () => call<ChannelStatus>('GET', '/channels'),
+  smsAction: (provider: string, action: 'check' | 'disconnect' | 'connect') => call<ChannelStatus>('POST', `/admin/sms/${provider}/${action}`),
   counts: () => call<Counts>('GET', '/counts'),
   list: (params: { view?: string; status?: string; channel?: string; role?: string; q?: string; contact_id?: number; booking_id?: number }) => call<ConversationRow[]>('GET', `/conversations${qs(params)}`),
   get: (id: number) => call<ConversationDetail>('GET', `/conversations/${id}`),
-  reply: (id: number, body: { body: string; channel?: Channel; to?: string; subject?: string; from?: string }) => call<Message>('POST', `/conversations/${id}/messages`, body),
+  reply: (id: number, body: { body: string; channel?: Channel; to?: string; subject?: string; from?: string; idempotency_key?: string }) => call<Message>('POST', `/conversations/${id}/messages`, body),
   note: (id: number, body: string) => call<Message>('POST', `/conversations/${id}/notes`, { body }),
   addEvent: (id: number, text: string, meta: Record<string, unknown> = {}) => call<Message>('POST', `/conversations/${id}/events`, { text, meta }),
   patch: (id: number, patch: Partial<{ status: Status; snooze_until: string; disposition: Disposition; queue_id: number; priority: number; l27_booking_id: number | null; complaint: Complaint | null; subject: string; cleaner_id: number | null; cleaner_name: string | null }>) => call<Conversation>('PATCH', `/conversations/${id}`, patch),

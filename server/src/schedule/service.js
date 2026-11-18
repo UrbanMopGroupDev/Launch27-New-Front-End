@@ -13,7 +13,10 @@ const PAST_DAYS = 91;
 const AHEAD_DAYS = 56;
 // How cleaners' hours are read. Bump when that changes: the next look at the planner then re-reads
 // everyone's hours instead of waiting for the hourly refresh.
-const HOURS_VERSION = 2;
+const HOURS_VERSION = 3; // 3: one-day changes kept HISTORY_DAYS back
+// How far back cleaners' one-day changes, closed dates and days marked unavailable are kept, so
+// Utilization can look at past weeks (visits go back PAST_DAYS).
+export const HISTORY_DAYS = 56;
 const AVAIL_CHUNK = 28; // days per availability request (Launch27's calendar asks for 42)
 const NEAR_DAYS = 14; // problems are raised for this many days ahead
 const NEAR_EVERY_MS = 3 * 60_000; // next 14 days of bookings
@@ -153,7 +156,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
   }
 
   async function loadUnavailable() {
-    const rows = (await db.query('SELECT cleaner_id, day FROM schedule_unavailable WHERE day >= $1', [addDays(today(), -1)])).rows;
+    const rows = (await db.query('SELECT cleaner_id, day FROM schedule_unavailable WHERE day >= $1', [addDays(today(), -HISTORY_DAYS)])).rows;
     unavailable = new Map();
     for (const r of rows) {
       const id = Number(r.cleaner_id);
@@ -316,7 +319,9 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     for (const c of next.cleaners) {
       const old = prev.byId?.get(c.id);
       if (!old) continue;
-      const sig = (x) => JSON.stringify((x.availability || []).map((r) => [r.date, r.weekday, r.dayoff, r.start_time, r.end_time]).sort());
+      // Only hours that matter from today on: past one-day changes (kept for Utilization's past
+      // weeks) coming or going is not a change to handle.
+      const sig = (x) => JSON.stringify((x.availability || []).filter((r) => !r.date || String(r.date).slice(0, 10) >= t).map((r) => [r.date, r.weekday, r.dayoff, r.start_time, r.end_time]).sort());
       const statusChanged = old.assignable !== c.assignable;
       if (sig(old) === sig(c) && !statusChanged) continue;
       const affected = next.future.filter((v) => v.team_ids.includes(c.id)).filter((v) => {
@@ -412,7 +417,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     const weekly = (w.rows || old || []).filter((r) => !r.date);
     const end = addDays(t, AHEAD_DAYS);
     const dated = [];
-    for (let from = addDays(t, -7); from <= end; from = addDays(from, AVAIL_CHUNK)) {
+    for (let from = addDays(t, -HISTORY_DAYS); from <= end; from = addDays(from, AVAIL_CHUNK)) {
       const to = addDays(from, AVAIL_CHUNK - 1) < end ? addDays(from, AVAIL_CHUNK - 1) : end;
       const d = await read({ from, to });
       if (d.error) errors.push(`${d.error} (one-day changes ${from} to ${to})`);
@@ -478,7 +483,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       const rows = await pullAll(bearer, '/v1/staff/holidays', { locations: loc }, 20).catch(() => []);
       for (const h of rows) {
         const date = String(h.date || '').slice(0, 10);
-        if (date >= t && date <= addDays(t, AHEAD_DAYS)) out.push({ date, start_time: h.start_time || null, end_time: h.end_time || null, description: h.description || null, location_id: loc });
+        if (date >= addDays(t, -HISTORY_DAYS) && date <= addDays(t, AHEAD_DAYS)) out.push({ date, start_time: h.start_time || null, end_time: h.end_time || null, description: h.description || null, location_id: loc });
       }
     }
     return out;
@@ -1127,7 +1132,9 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       full_at: s.full_at || s.taken_at,
       cleaners_by: s.cleaners_by || null,
       cleaners: s.cleaners.map((c) => ({ ...cleanerOut(c), availability: c.availability || [], availability_error: c.availability_error || null })),
-      visits: s.future,
+      // From HISTORY_DAYS back, so past weeks can be shown too.
+      history_from: addDays(s.today, -HISTORY_DAYS),
+      visits: s.visits.filter((v) => v.date >= addDays(s.today, -HISTORY_DAYS)),
       holidays: s.holidays || [],
       unavailable,
     };

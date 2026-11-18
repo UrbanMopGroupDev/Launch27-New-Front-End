@@ -70,6 +70,15 @@ export function slimReportVisit(booking, tt, fb) {
     location_id: Number(b.location?.id ?? b.location_id ?? booking?.location?.id) || null,
     location_name: b.location?.name ?? booking?.location?.name ?? null,
     kind: frequencyKind(booking?.frequency?.name),
+    // Service type, for the complaint playbook: the service booked and the extras that change
+    // the job (deep clean, move in/out). `reclean` = Launch27's Reclean service.
+    ...(() => {
+      const lines = (booking || b).services || [];
+      const names = lines.map((x) => x.name).filter(Boolean);
+      const extras = lines.flatMap((x) => (x.extras || []).map((e) => e.name)).filter(Boolean);
+      if (!names.length) return {};
+      return { svc: names[0], deep: extras.some((e) => /deep/i.test(e)) || names.some((n) => /deep/i.test(n)), move: extras.some((e) => /move/i.test(e)) || names.some((n) => /move/i.test(n)), reclean: names.some((n) => /re-?clean/i.test(n)) };
+    })(),
     lat: b.address?.latitude ?? null,
     lng: b.address?.longitude ?? null,
     revenue: Number(b.summary?.revenue ?? b.summary?.total) || 0,
@@ -83,26 +92,31 @@ export const isHomemaking = (v) => v.partner_kind === 'homemaking';
 // Residential: not homemaking, not a hospital program, not at a Commercial location.
 export const isResidential = (v) => v.partner_kind !== 'homemaking' && v.partner_kind !== 'program' && !/commercial|cornwall/i.test(v.location_name || '');
 
-// Per visit and cleaner: on time, minutes late, overtime (ran long), finished early, on site.
-// Residential on time = checked in within the first 15 min of the arrival window; homemaking
-// = by the start time + 10 min. Minutes late count from that mark. Finished early = on site
-// 30+ min less than booked, on a residential visit with one cleaner (split team jobs and
-// homemaking are left out).
-export function timing(v, t) {
+// Two sets of rules. LESLIE: Cleaner reports and Scheduling insights as Leslie built them
+// (on time = by the end of the arrival window + 5 min; "runs long" = 15%+ of the last 40).
+// V2: Cleaner reports 2.0 (on time = within the first 15 min of the window, homemaking start
+// + 10 min; overtime only well above the team; finished early on residential cleans).
+export const LESLIE = Object.freeze({ v2: false });
+export const V2 = Object.freeze({ v2: true });
+
+// Per visit and cleaner: on time, minutes late, ran long (overtime), finished early (2.0 only),
+// on-site minutes. 2.0: finished early = on site 30+ min less than booked, on a residential
+// visit with one cleaner (split team jobs and homemaking are left out).
+export function timing(v, t, rules = LESLIE) {
   if (!t.checkin) return null;
-  const home = isHomemaking(v);
-  const due = v.at + (home ? HOMEMAKING_GRACE_MIN : ON_TIME_MIN) * MIN;
   const ci = Date.parse(t.checkin);
-  const late = ci > due ? Math.round((ci - due) / MIN) : 0;
   const booked = t.hours ? t.hours * 60 : v.duration / Math.max(v.teams.length, 1);
   const onsite = t.checkout ? (Date.parse(t.checkout) - ci) / MIN : null;
+  const long = onsite != null && booked > 30 ? onsite > booked * 1.15 : false;
+  if (!rules.v2) {
+    const windowEnd = v.at + v.window * MIN;
+    const late = ci > windowEnd + 5 * MIN ? Math.round((ci - windowEnd) / MIN) : 0;
+    return { onTime: !late, late, onsite, long, early: null, enroute: !!t.enroute, distance: t.distance };
+  }
+  const due = v.at + (isHomemaking(v) ? HOMEMAKING_GRACE_MIN : ON_TIME_MIN) * MIN;
+  const late = ci > due ? Math.round((ci - due) / MIN) : 0;
   const earlyEligible = isResidential(v) && v.teams.length === 1 && onsite != null;
-  return {
-    onTime: !late, late, onsite,
-    long: onsite != null && booked > 30 ? onsite > booked * 1.15 : false,
-    early: earlyEligible ? booked - onsite > EARLY_MIN : null,
-    enroute: !!t.enroute, distance: t.distance,
-  };
+  return { onTime: !late, late, onsite, long, early: earlyEligible ? booked - onsite > EARLY_MIN : null, enroute: !!t.enroute, distance: t.distance };
 }
 
 // Index: customers' assigned visits in time order (for "main cleaner" as of any date).
@@ -155,7 +169,7 @@ export function sameCleaner(visits, byCustomer, from, to) {
 }
 
 // Cleaner-level stats over a range.
-export function cleanerStats(visits, byCustomer, from, to, today) {
+export function cleanerStats(visits, byCustomer, from, to, today, rules = LESLIE) {
   const map = new Map();
   const get = (id, name) => {
     if (!map.has(id)) map.set(id, emptyStats(id, name));
@@ -177,7 +191,7 @@ export function cleanerStats(visits, byCustomer, from, to, today) {
         s.marginRev += v.revenue / v.teams.length;
         s.marginPay += t.earned;
       }
-      const tm = timing(v, t);
+      const tm = timing(v, t, rules);
       if (!tm && v.date < today) s.missing.push({ date: v.date, customer: v.customer, kind: 'missing_checkin', visit_id: v.id });
       if (tm) {
         s.tracked++;
@@ -216,7 +230,7 @@ export function cleanerStats(visits, byCustomer, from, to, today) {
     for (const t of v.teams) {
       const s = map.get(t.id);
       if (!s || s.last40.length >= 40) continue;
-      const tm = timing(v, t);
+      const tm = timing(v, t, rules);
       if (tm) s.last40.push({ date: v.date, late: tm.late, long: tm.long, early: !!tm.early, enroute: tm.enroute, customer: v.customer });
     }
   }
@@ -225,8 +239,8 @@ export function cleanerStats(visits, byCustomer, from, to, today) {
   const endAt = Date.parse(`${to}T23:59:59Z`);
   for (const [cid, list] of byCustomer) {
     if (!list.some((v) => v.kind !== 'one')) continue;
-    // Homemaking clients are placed by the partner, not kept by the cleaner.
-    if (list.every(isHomemaking)) continue;
+    // 2.0: homemaking clients are placed by the partner, not kept by the cleaner.
+    if (rules.v2 && list.every(isHomemaking)) continue;
     const a = mainBefore(list, startAt);
     if (a == null) continue;
     const s = map.get(a);
@@ -252,28 +266,33 @@ export function teamLong(stats, minVisits = 10) {
   return { median: q(0.5), p75: q(0.75), n: shares.length };
 }
 
-export function flagsFor(s, util, team = null) {
+export function flagsFor(s, util, team = null, rules = LESLIE) {
   const flags = [];
   const l40 = s.last40 || [];
   if (s.unhappyRecent >= 2) flags.push({ kind: 'ratings', label: 'Ratings slipping', detail: `${s.unhappyRecent} unhappy ratings in the last 4 weeks` });
   if (l40.length >= 10) {
     const late = l40.filter((x) => x.late);
     if (late.length / l40.length > 0.15) flags.push({ kind: 'late', label: 'Often late', detail: `Late on ${late.length} of the last ${l40.length} visits, ${Math.round(late.reduce((a, x) => a + x.late, 0) / late.length)} min on average` });
-    // Overtime (worked 15%+ past booked time): only well above the team (top quartile and
-    // 25%+ of visits). If everyone does it, booked times are too short.
     const long = l40.filter((x) => x.long).length;
-    const share = long / l40.length;
-    const teamMed = team?.median;
-    if (share >= 0.25 && (team?.p75 == null || share >= team.p75) && (teamMed == null || share > teamMed)) {
-      flags.push({ kind: 'long', label: 'Overtime vs the team', detail: `${long} of the last ${l40.length} cleans went 15%+ over booked time${teamMed != null ? ` (team: ${Math.round(teamMed * 100)}%)` : ''}` });
+    if (!rules.v2) {
+      if (long / l40.length >= 0.15) flags.push({ kind: 'long', label: 'Often runs long', detail: `${long} of the last ${l40.length} cleans ran 15%+ over booked time` });
+    } else {
+      // Overtime (15%+ past booked time): only well above the team (top quartile and 25%+ of
+      // visits). If everyone does it, booked times are too short.
+      const share = long / l40.length;
+      const teamMed = team?.median;
+      if (share >= 0.25 && (team?.p75 == null || share >= team.p75) && (teamMed == null || share > teamMed)) {
+        flags.push({ kind: 'long', label: 'Overtime vs the team', detail: `${long} of the last ${l40.length} cleans went 15%+ over booked time${teamMed != null ? ` (team: ${Math.round(teamMed * 100)}%)` : ''}` });
+      }
+      // Finishing early on residential jobs is the quality risk.
+      const eligible = l40.filter((x) => x.early != null);
+      const early = l40.filter((x) => x.early).length;
+      if (eligible.length >= 10 && early / eligible.length > 0.2) flags.push({ kind: 'early', label: 'Finishes early', detail: `${early} of the last ${eligible.length} residential cleans finished 30+ min under booked time` });
     }
-    // Finishing early on residential jobs is the quality risk.
-    const eligible = l40.filter((x) => x.early != null);
-    const early = l40.filter((x) => x.early).length;
-    if (eligible.length >= 10 && early / eligible.length > 0.2) flags.push({ kind: 'early', label: 'Finishes early', detail: `${early} of the last ${eligible.length} residential cleans finished 30+ min under booked time` });
   }
   if (util && util.capacity >= 8 && util.booked / util.capacity < 0.5) flags.push({ kind: 'underbooked', label: 'Under-booked', detail: `Booked ${Math.round(util.booked)} of ${Math.round(util.capacity)} available hours a week` });
-  if ((s.started || 0) >= 5 && (s.kept || 0) / s.started < 0.6) flags.push({ kind: 'losing', label: 'Losing clients', detail: `Kept ${s.kept || 0} of ${s.started} regular clients this period` });
+  // 2.0 replaces this with a churn-based flag (see the reports service).
+  if (!rules.v2 && (s.started || 0) >= 5 && (s.kept || 0) / s.started < 0.6) flags.push({ kind: 'losing', label: 'Losing clients', detail: `Kept ${s.kept || 0} of ${s.started} regular clients this period` });
   return flags;
 }
 
@@ -324,7 +343,7 @@ export function regularClients(cleanerId, byCustomer, nowAt) {
   return out.sort((a, b) => b.cleans - a.cleans);
 }
 
-export function weeklySeries(visits, cleanerId, from, to) {
+export function weeklySeries(visits, cleanerId, from, to, rules = LESLIE) {
   const weeks = new Map();
   for (let w = mondayOf(from); w <= to; w = addDays(w, 7)) weeks.set(w, { week: w, visits: 0, tracked: 0, onTime: 0, rated: 0, happy: 0 });
   for (const v of visits) {
@@ -334,7 +353,7 @@ export function weeklySeries(visits, cleanerId, from, to) {
     const w = weeks.get(mondayOf(v.date));
     if (!w) continue;
     w.visits++;
-    const tm = timing(v, t);
+    const tm = timing(v, t, rules);
     if (tm) {
       w.tracked++;
       if (tm.onTime) w.onTime++;

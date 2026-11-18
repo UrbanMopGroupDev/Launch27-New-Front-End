@@ -6,8 +6,8 @@ import { addDays, daysBetween, localDate, mondayOf } from '../schedule/rules.js'
 import { harmonizePartners } from '../commercial/partners.js';
 import { clampRange, utilizationFacts, utilizationReport } from './utilization.js';
 import { UTILIZATION } from './utilization-config.js';
-import { PERIODS, cleanerRow, cleanerStats, emptyStats, flagsFor, indexVisits, median, outsideArea, pct, periodRange, regularClients, round1, sameCleaner, slimReportVisit, teamLong, timing, weeklySeries } from './compute.js';
-import { CHANGE_LOG_START, DROP_REASONS, RAISE_THRESHOLDS } from './raise-config.js';
+import { PERIODS, V2, cleanerRow, cleanerStats, emptyStats, mainBefore, flagsFor, indexVisits, median, outsideArea, pct, periodRange, regularClients, round1, sameCleaner, slimReportVisit, teamLong, timing, weeklySeries } from './compute.js';
+import { CHANGE_LOG_START, CHURN, DROP_REASONS, RAISE_THRESHOLDS } from './raise-config.js';
 import { ladderOf, raiseReview, rateHistory, reliability, reliabilityWeeks, restrictiveTags, slackSummary } from './raise.js';
 
 
@@ -100,12 +100,20 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
     if (!running) running = sync(opts).catch(() => null).finally(() => (running = null));
     return running;
   }
-  async function maybeRun() {
+  // Rebuild once a day. Overnight with the sync login where one is set; otherwise (production has
+  // none) when someone opens the reports and they are from before today, with that person's own
+  // read-only Launch27 login, the way the planner keeps itself fresh. At most one try per 30 min.
+  async function maybeRun({ bearer = null } = {}) {
     if (running || now() - lastAttempt < 30 * 60_000) return;
-    if (config.l27Mode !== 'mock' && !(config.l27SyncEmail && config.l27SyncPassword)) return;
+    const syncLogin = config.l27Mode === 'mock' || !!(config.l27SyncEmail && config.l27SyncPassword);
+    if (!bearer && !syncLogin) return;
     const s = await load();
-    const due = !s || (s.today < today() && Number(HOUR.format(new Date(now()))) >= 4);
-    if (due) start();
+    const stale = !s || s.today < today();
+    const due = bearer ? stale : stale && (!s || Number(HOUR.format(new Date(now()))) >= 4);
+    if (due) {
+      log.info('reports: building', { trigger: bearer ? 'viewer' : 'overnight', built_for: s?.today || null });
+      start({ bearer: bearer || undefined });
+    }
   }
 
   async function need() {
@@ -342,13 +350,11 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
 
   const ratedShareOf = (s, from, to) => pct(new Set(s.visits.filter((v) => v.date >= from && v.date <= to && v.rating).map((v) => v.id)).size, s.visits.filter((v) => v.date >= from && v.date <= to).length);
 
+  // ---------- Cleaner reports (Leslie's) ----------
   async function cleaners(period = '13w', { admin = false, locations = null } = {}) {
     const s = await needScoped(locations);
     const { from, to, days } = periodRange(s.today, period);
     const stats = cleanerStats(s.visits, s.byCustomer, from, to, s.today);
-    const today = localDate(now());
-    const side = await sideData(from);
-    const team = teamLong(stats);
     const { ov, util } = await plannerView(locations);
     const info = new Map((ov?.rows || []).map((r) => [r.id, r]));
     const rows = [];
@@ -356,9 +362,152 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
       const i = info.get(st.id);
       const u = util.get(st.id);
       const row = cleanerRow(st, { name: i?.name });
+      rows.push({
+        ...row,
+        earned: admin ? row.earned : undefined,
+        status: i?.status || 'unknown', status_label: i?.status_label || 'Not in the active list', assignable: !!i?.assignable, area: i?.area || null, color: i?.color || '#94A3B8', is_new: !!i?.is_new, hours_type: i?.hours_type || null,
+        hours_per_week: round1((row.onsite_hours || row.booked_hours) / (days / 7)),
+        hours_filled: u && u.capacity ? pct(u.booked, u.capacity) : null,
+        flags: flagsFor(st, u),
+      });
+    }
+    rows.sort((a, b) => b.visits - a.visits);
+    const all = rows.filter((r) => r.visits);
+    const tot = (k) => all.reduce((a, r) => a + (r[k] || 0), 0);
+    const sumStats = [...stats.values()];
+    const tracked = sumStats.reduce((a, s2) => a + s2.tracked, 0);
+    return {
+      taken_at: s.taken_at, period, from, to, admin,
+      team: {
+        cleaners: all.length,
+        median_visits: median(all.map((r) => r.visits)),
+        max_visits: all.length ? Math.max(...all.map((r) => r.visits)) : 0,
+        on_time: pct(sumStats.reduce((a, s2) => a + s2.onTime, 0), tracked),
+        check_ins: tracked,
+        happy: pct(sumStats.reduce((a, s2) => a + s2.happy, 0), sumStats.reduce((a, s2) => a + s2.rated, 0)),
+        rated_share: pct(new Set(s.visits.filter((v) => v.date >= from && v.date <= to && v.rating).map((v) => v.id)).size, s.visits.filter((v) => v.date >= from && v.date <= to).length),
+        revenue: tot('revenue'),
+        earned: admin ? tot('earned') : undefined,
+        flagged: rows.filter((r) => r.flags.length && r.assignable).length,
+      },
+      rows,
+    };
+  }
+
+  async function cleaner(id, period = '13w', { admin = false, locations = null } = {}) {
+    const s = await needScoped(locations);
+    const cid = Number(id);
+    const { from, to, days } = periodRange(s.today, period);
+    const stats = cleanerStats(s.visits, s.byCustomer, from, to, s.today);
+    const st = stats.get(cid);
+    const { ov, util } = await plannerView(locations);
+    const i = (ov?.rows || []).find((r) => r.id === cid);
+    if (!st && !i) throw Object.assign(new Error('No report for this cleaner'), { status: 404 });
+    const base = st || cleanerStats([], new Map(), from, to, s.today).get(cid) || { id: cid, name: i?.name, visits: 0, onsiteMin: 0, bookedMin: 0, tracked: 0, onTime: 0, lateMin: [], long: 0, enroute: 0, km: [], rated: 0, happy: 0, unhappy: 0, unhappyRecent: 0, revenue: 0, earned: 0, last40: [] };
+    const row = cleanerRow(base, { name: i?.name });
+    const u = util.get(cid);
+    const lastRatings = s.visits.filter((v) => v.rating && v.teams.some((t) => t.id === cid)).sort((a, b) => b.at - a.at).slice(0, 8).map((v) => ({ date: v.date, customer: v.customer, r: v.rating.r, comment: v.rating.comment }));
+    const firstSeen = s.visits.filter((v) => v.teams.some((t) => t.id === cid)).reduce((m, v) => (!m || v.date < m ? v.date : m), null);
+    return {
+      taken_at: s.taken_at, period, from, to, admin,
+      cleaner: { id: cid, name: i?.name || row.name, status: i?.status || 'unknown', status_label: i?.status_label || 'Not in the active list', area: i?.area || null, color: i?.color || '#94A3B8', tags: i?.tags || [], hours_type: i?.hours_type || null, phone: i?.phone || null, weekly_hours: i?.weekly_hours ?? null, first_seen: firstSeen },
+      stats: { ...row, earned: admin ? row.earned : undefined, hours_per_week: round1((row.onsite_hours || row.booked_hours) / (days / 7)), hours_filled: u && u.capacity ? pct(u.booked, u.capacity) : null, booked_next4: u ? round1(u.booked) : null, capacity_next4: u ? round1(u.capacity) : null, per_hour: admin && row.earned && row.onsite_hours ? round1(row.earned / row.onsite_hours) : undefined },
+      flags: flagsFor(base, u),
+      series: weeklySeries(s.visits, cid, from, to),
+      clients: regularClients(cid, s.byCustomer, now()).slice(0, 25),
+      lost: (base.lost || []).map((l) => ({ customer: l.customer, stopped: l.stopped, to: l.to != null ? (ov?.rows.find((r) => r.id === l.to)?.name || 'another cleaner') : null })),
+      ratings: lastRatings,
+      last40: [...(base.last40 || [])].reverse(),
+    };
+  }
+
+  // ---------- 2.0 helpers ----------
+  // Churn: a recurring client of ours with nothing booked ahead (their schedule is cancelled).
+  // No clean for CHURN.days (60) days = churned, on the day it reaches 60; under that = at risk.
+  // Counted against their regular cleaner at their last clean. Homemaking and hospital-program
+  // clients are placed by the partner, so they're left out. Needs the planner's upcoming visits;
+  // without them, churn is unknown (null), never zero.
+  async function churnFor(s, today) {
+    let upcoming = null;
+    try {
+      const src = schedule?.utilizationSource ? await schedule.utilizationSource() : null;
+      if (src) upcoming = new Set(src.visits.filter((v) => v.customer_id != null && v.date >= today).map((v) => String(v.customer_id)));
+    } catch { /* planner not running: churn unknown */ }
+    const byCleaner = new Map();
+    if (!upcoming) return { known: false, byCleaner };
+    for (const [cid, list] of s.byCustomer) {
+      const last = list.at(-1);
+      if (!last || last.kind === 'one' || list.length < 2) continue;
+      if (last.partner_kind === 'homemaking' || last.partner_kind === 'program') continue;
+      if (upcoming.has(String(cid))) continue;
+      const gap = daysBetween(last.date, today);
+      if (gap < CHURN.minGap) continue;
+      const cleaner = mainBefore(list, last.at + 1);
+      if (cleaner == null) continue;
+      const churned = gap >= CHURN.days;
+      const entry = { customer_id: cid, customer: last.customer, last_clean: last.date, days_since: gap, freq: last.freq, cleans: list.filter((v) => v.teams.some((t) => t.id === cleaner)).length, status: churned ? 'churned' : 'at_risk', churned_on: churned ? addDays(last.date, CHURN.days) : null };
+      if (!byCleaner.has(cleaner)) byCleaner.set(cleaner, []);
+      byCleaner.get(cleaner).push(entry);
+    }
+    for (const l of byCleaner.values()) l.sort((a, b) => (a.last_clean < b.last_clean ? 1 : -1));
+    return { known: true, byCleaner };
+  }
+
+  // Typical hours from the end of a clean to its rating, for ratings in [from, to].
+  function feedbackHours(s, from, to) {
+    const hours = s.visits.filter((v) => v.date >= from && v.date <= to && v.rating?.at).map((v) => (Date.parse(v.rating.at) - (v.at + v.duration * 60_000)) / 3_600_000).filter((h) => Number.isFinite(h) && h >= 0);
+    return hours.length ? round1(median(hours)) : null;
+  }
+
+  const marginOf = (statsList) => {
+    const rev = statsList.reduce((a, x) => a + x.marginRev, 0);
+    const pay = statsList.reduce((a, x) => a + x.marginPay, 0);
+    return rev ? { dollars: Math.round(rev - pay), share: Math.round(((rev - pay) / rev) * 1000) / 1000 } : null;
+  };
+
+  // 2.0's "Losing clients": recurring clients who churned in the period (not Leslie's keeps).
+  const churnFlag = (x) => (x.churned >= CHURN.flagAt ? [{ kind: 'losing', label: 'Losing clients', detail: `${x.churned} recurring client${x.churned === 1 ? '' : 's'} churned this period${x.at_risk ? `, ${x.at_risk} more at risk` : ''}` }] : []);
+
+  // The 2.0 columns for one cleaner.
+  function extras2({ st, row, rel, side, churn, from, today, admin }) {
+    const complaints = (side.complaints.get(st.id) || []).filter((c) => c.date >= from && c.date <= today);
+    const lost = churn.known ? churn.byCleaner.get(st.id) || [] : null;
+    return {
+      engagement: row.visits ? Math.round((row.rated / row.visits) * 1000) / 1000 : null,
+      churned: lost ? lost.filter((c) => c.status === 'churned' && c.churned_on >= from && c.churned_on <= today).length : null,
+      at_risk: lost ? lost.filter((c) => c.status === 'at_risk').length : null,
+      moved: (st.lost || []).filter((l) => l.to != null).length,
+      recleans: complaints.filter((c) => c.outcome === 'return clean').length,
+      complaints_n: complaints.length,
+      // Reliability on 2.0: last-minute cancellations + no-shows only (null = not recorded yet).
+      reliability2: rel.no_shows == null ? null : rel.no_shows + rel.last_minute,
+      margin_dollars: admin && st.marginRev ? Math.round(st.marginRev - st.marginPay) : undefined,
+    };
+  }
+
+  // ---------- Cleaner reports 2.0 ----------
+  // Leslie's report plus: engagement rate, churn, margin, re-cleans, reliability (last-minute
+  // cancellations + no-shows), Google reviews, and the raise review. On 2.0 timing rules.
+  async function cleaners2(period = '13w', { admin = false, locations = null } = {}) {
+    const s = await needScoped(locations);
+    const { from, to, days } = periodRange(s.today, period);
+    const stats = cleanerStats(s.visits, s.byCustomer, from, to, s.today, V2);
+    const today = localDate(now());
+    const side = await sideData(from);
+    const team = teamLong(stats);
+    const { ov, util } = await plannerView(locations);
+    const info = new Map((ov?.rows || []).map((r) => [r.id, r]));
+    const churn = await churnFor(s, today);
+    const rows = [];
+    for (const st of stats.values()) {
+      const i = info.get(st.id);
+      const u = util.get(st.id);
+      const row = cleanerRow(st, { name: i?.name });
       const rel = reliability({ drops: side.drops.get(st.id) || [], checks: { missing: st.missing, late: [] }, from, to: today });
       const reviews = (side.reviews.get(st.id) || []).filter((g) => g.date >= from && g.date <= today);
+      const extra = extras2({ st, row, rel, side, churn, from, today, admin });
       rows.push({
+        ...extra,
         ...row,
         earned: admin ? row.earned : undefined,
         margin: admin ? row.margin : undefined,
@@ -368,7 +517,7 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
         stars: i?.stars ?? null, ratings_count: i?.ratings_count ?? null,
         reliability: { issues: rel.issues, no_shows: rel.no_shows, last_minute: rel.last_minute, short_notice: rel.short_notice, missing_checks: rel.missing_checks, partial: rel.partial, covers_from: rel.covers_from, uncoded: rel.uncoded },
         google_reviews: reviews.length,
-        flags: flagsFor(st, u, team),
+        flags: [...flagsFor(st, u, team, V2), ...churnFlag(extra)],
       });
     }
     rows.sort((a, b) => b.visits - a.visits);
@@ -391,16 +540,24 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
         earned: admin ? tot('earned') : undefined,
         flagged: rows.filter((r) => r.flags.length && r.assignable).length,
         runs_long_median: team.median,
+        // Engagement: share of visits that got a rating, and how fast ratings come in.
+        engagement: ratedShareOf(s, from, to),
+        feedback_hours: feedbackHours(s, from, to),
+        margin: admin ? marginOf(sumStats) : undefined,
+        churned: churn.known ? rows.reduce((a, r) => a + (r.churned || 0), 0) : null,
+        at_risk: churn.known ? rows.reduce((a, r) => a + (r.at_risk || 0), 0) : null,
       },
+      churn_known: churn.known,
+      churn_days: CHURN.days,
       rows,
     };
   }
 
-  async function cleaner(id, period = '13w', { admin = false, locations = null } = {}) {
+  async function cleaner2(id, period = '13w', { admin = false, locations = null } = {}) {
     const s = await needScoped(locations);
     const cid = Number(id);
     const { from, to, days } = periodRange(s.today, period);
-    const stats = cleanerStats(s.visits, s.byCustomer, from, to, s.today);
+    const stats = cleanerStats(s.visits, s.byCustomer, from, to, s.today, V2);
     const st = stats.get(cid);
     const { ov, util } = await plannerView(locations);
     const i = (ov?.rows || []).find((r) => r.id === cid);
@@ -410,7 +567,7 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
     const u = util.get(cid);
     const today = localDate(now());
     const r13 = periodRange(s.today, '13w');
-    const stats13 = period === '13w' ? stats : cleanerStats(s.visits, s.byCustomer, r13.from, r13.to, s.today);
+    const stats13 = period === '13w' ? stats : cleanerStats(s.visits, s.byCustomer, r13.from, r13.to, s.today, V2);
     const side = await sideData(from < r13.from ? from : r13.from);
     const rates = ratesFor(s).get(cid);
     const team = teamLong(stats);
@@ -418,6 +575,8 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
     const lastRatings = s.visits.filter((v) => v.rating && v.teams.some((t) => t.id === cid)).sort((a, b) => b.at - a.at).slice(0, 8).map((v) => ({ date: v.date, customer: v.customer, r: v.rating.r, comment: v.rating.comment }));
     const firstSeen = rates?.first || null;
     const rel = reliability({ drops: side.drops.get(cid) || [], checks: { missing: base.missing, late: base.lateList }, from, to: today });
+    const churn = await churnFor(s, today);
+    const extra = extras2({ st: base, row, rel, side, churn, from, today, admin });
     let raise;
     if (admin) {
       const st13 = stats13.get(cid) || emptyStats(cid, i?.name);
@@ -437,10 +596,10 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
       taken_at: s.taken_at, period, from, to, admin,
       change_log_start: CHANGE_LOG_START,
       cleaner: { id: cid, name: i?.name || row.name, status: i?.status || 'unknown', status_label: i?.status_label || 'Not in the active list', area: i?.area || null, color: i?.color || '#94A3B8', tags: i?.tags || [], hours_type: i?.hours_type || null, phone: i?.phone || null, weekly_hours: i?.weekly_hours ?? null, first_seen: firstSeen, start_date: start.date, start_known: start.known, stars: i?.stars ?? null, ratings_count: i?.ratings_count ?? null, restrictive: restrictiveTags(i?.tags || []) },
-      stats: { ...row, earned: admin ? row.earned : undefined, margin: admin ? row.margin : undefined, hours_per_week: round1((row.onsite_hours || row.booked_hours) / (days / 7)), hours_filled: u && u.capacity ? pct(u.booked, u.capacity) : null, booked_next4: u ? round1(u.booked) : null, capacity_next4: u ? round1(u.capacity) : null, per_hour: admin && row.earned && row.onsite_hours ? round1(row.earned / row.onsite_hours) : undefined },
-      flags: flagsFor(base, u, team),
+      stats: { ...row, ...extra, earned: admin ? row.earned : undefined, margin: admin ? row.margin : undefined, hours_per_week: round1((row.onsite_hours || row.booked_hours) / (days / 7)), hours_filled: u && u.capacity ? pct(u.booked, u.capacity) : null, booked_next4: u ? round1(u.booked) : null, capacity_next4: u ? round1(u.capacity) : null, per_hour: admin && row.earned && row.onsite_hours ? round1(row.earned / row.onsite_hours) : undefined },
+      flags: [...flagsFor(base, u, team, V2), ...churnFlag(extra)],
       team: { runs_long_median: team.median },
-      series: weeklySeries(s.visits, cid, from, to),
+      series: weeklySeries(s.visits, cid, from, to, V2),
       clients: regularClients(cid, s.byCustomer, now()).slice(0, 25),
       lost: (base.lost || []).map((l) => ({ customer: l.customer, stopped: l.stopped, to: l.to != null ? (ov?.rows.find((r) => r.id === l.to)?.name || 'another cleaner') : null })),
       ratings: lastRatings,
@@ -449,6 +608,7 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
       finished_early: [...base.earlyList].sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 30),
       complaints: (side.complaints.get(cid) || []).filter((c) => c.date >= from),
       google_reviews: side.reviews.get(cid) || [],
+      churn: { known: churn.known, days: CHURN.days, clients: churn.known ? (churn.byCleaner.get(cid) || []).filter((c) => c.status === 'at_risk' || c.churned_on >= from) : [] },
       raise,
     };
   }
@@ -462,7 +622,7 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
   async function raiseCheckCandidates(today) {
     const s = await need();
     const r13 = periodRange(s.today, '13w');
-    const stats13 = cleanerStats(s.visits, s.byCustomer, r13.from, r13.to, s.today);
+    const stats13 = cleanerStats(s.visits, s.byCustomer, r13.from, r13.to, s.today, V2);
     const side = await sideData(r13.from);
     const rates = ratesFor(s);
     const ratedShare = ratedShareOf(s, r13.from, r13.to);
@@ -503,7 +663,7 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
       for (const c of cleaners) {
         const text = c.next_step ? `Raise check: ${c.name} looks ready for ${c.next_step}` : `Raise check: ${c.name} looks ready for a raise review`;
         for (const u of admins) {
-          await q.query("INSERT INTO notifications (user_id, kind, conversation_id, text, link) VALUES ($1, 'raise_check', NULL, $2, $3)", [u.id, text, `/reports/cleaners/${c.id}#raise`]);
+          await q.query("INSERT INTO notifications (user_id, kind, conversation_id, text, link) VALUES ($1, 'raise_check', NULL, $2, $3)", [u.id, text, `/reports/cleaners-2/${c.id}#raise`]);
           n++;
         }
       }
@@ -571,7 +731,7 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
     // auto_build: whether the overnight build can run here (it needs a Launch27 sync login in
     // production). Without it, only an admin's "Build now" builds the reports.
     const auto_build = config.l27Mode === 'mock' || !!(config.l27SyncEmail && config.l27SyncPassword);
-    return { taken_at: s?.taken_at || null, running: !!running, last_error: last?.status === 'failed' ? last.error : null, covers_from: s?.from || null, auto_build };
+    return { taken_at: s?.taken_at || null, built_for: s?.today || null, running: !!running, last_error: last?.status === 'failed' ? last.error : null, covers_from: s?.from || null, auto_build };
   }
 
   // Utilization (read-only): of cleaners' open hours from..to, how much is spoken for and how
@@ -585,8 +745,10 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
       throw Object.assign(new Error(err.message), { status: err.status || 409 });
     }
     const maxTo = addDays(src.today, 55);
-    const range = clampRange(src.today, from, to, maxTo);
-    const facts = utilizationFacts({ today: src.today, cleaners: src.cleaners, visits: src.visits, holidays: src.holidays, unavailable: src.unavailable, locations });
+    // Past weeks back to what the planner keeps (its one-day changes and closed dates go back that far).
+    const minFrom = src.history_from && src.history_from < src.today ? src.history_from : src.today;
+    const range = clampRange(src.today, from, to, maxTo, minFrom);
+    const facts = utilizationFacts({ today: src.today, start: range.from < src.today ? range.from : src.today, cleaners: src.cleaners, visits: src.visits, holidays: src.holidays, unavailable: src.unavailable, locations });
     // Scheduling insights' own figures, for "Check the numbers".
     const { ov } = await plannerView(locations);
     let existing = null;
@@ -595,10 +757,10 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
       const w4 = (k) => rows.reduce((m, r) => m + r.weeks.slice(0, 4).reduce((a, x) => a + x[k], 0), 0);
       existing = { capacity4: w4('capacity'), booked4: w4('booked'), unassigned_visits: ov.counts.unassigned_visits, tolerance: Math.max(0.5, rows.length * 4 * 0.05) };
     }
-    return utilizationReport({ facts, ...range, maxTo, cfg: UTILIZATION, existing, takenAt: src.taken_at, cleaners: src.cleaners, source: { full_at: src.full_at, cleaners_by: src.cleaners_by } });
+    return utilizationReport({ facts, ...range, maxTo, minFrom, cfg: UTILIZATION, existing, takenAt: src.taken_at, cleaners: src.cleaners, source: { full_at: src.full_at, cleaners_by: src.cleaners_by } });
   }
 
   // The raw year of visits (for the Commercial area).
   const visitsSnapshot = () => need();
-  return { sync, start, maybeRun, scheduling, utilization, cleaners, cleaner, status, visitsSnapshot, recordDrop, codeChange, dropsForChanges, raiseDigest, raiseCheckCandidates, addReview, updateReview, deleteReview, isRunning: () => !!running, mondayOf };
+  return { sync, start, maybeRun, scheduling, utilization, cleaners, cleaner, cleaners2, cleaner2, status, visitsSnapshot, recordDrop, codeChange, dropsForChanges, raiseDigest, raiseCheckCandidates, addReview, updateReview, deleteReview, isRunning: () => !!running, mondayOf };
 }
