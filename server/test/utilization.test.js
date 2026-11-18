@@ -49,9 +49,12 @@ describe('utilization: the arithmetic, by hand', () => {
     assert.equal(t.spoken_h, 16);
     assert.equal(t.left_h, 68);
     assert.equal(t.utilization, 16 / 84);
-    // Typical booking 3h (12h over 4 cleaner-visits) + a 6-min leg = 3.1h each: 68 ÷ 3.1 → 21.
+    // Room for: 3.1 h slots (a typical 3 h booking + a 6-min drive) that fit into each cleaner's open
+    // stretches. A: Mon 1 (after v1), Tue 2, Wed 2, Thu 1 (own 4 h), Fri 1 (before v6; 54 min after
+    // is too short), Sat 2 = 9. B: Mon 1, Tue 2, Wed 1 (after v5), Thu 0 (closed), Fri 2, Sat 2 = 8.
+    // 17 slots − the unassigned visit − the visit to move = 15.
     assert.equal(t.typical_booking_h, 3);
-    assert.equal(t.room_bookings, 21);
+    assert.equal(t.room_bookings, 15);
   });
 
   test('brand view: the shared cleaner loses the hours booked for the other brand', () => {
@@ -270,4 +273,20 @@ describe('utilization: bookings that need a cleaner', () => {
     assert.equal(list[1].cleaner, 'On hold');
     assert.equal(list.filter((x) => x.kind === 'unassigned').length, r.totals.unassigned_visits);
   });
+});
+
+test('room for counts bookings that fit into real gaps, not hours ÷ length', () => {
+  // One cleaner, Monday 9–5 (8 h), with a 2 h visit at 12–2 in the middle: 3 h before, 3 h after.
+  const C = { id: 7, name: 'C', area: 'Central', assignable: true, location_ids: [1], ...HOME, rules: {}, availability: week() };
+  const f = utilizationFacts({ today: TODAY, cleaners: [C], visits: [visit('m', '2026-11-09', 720, 840, [7], { duration: 120 })], until: '2026-11-09' });
+  const t = utilizationReport({ facts: f, from: TODAY, to: TODAY, maxTo: '2026-11-15' }).totals;
+  // A typical booking here is 2 h + a 6-min drive = 126 min. Before: 9:00–11:54 (174 min) fits 1;
+  // after: 2:06–5:00 (174 min) fits 1.
+  // Four 1 h visits at 10, 12, 2 and 4: about 3.5 open hours remain, but every gap is under an hour
+  // (9:00–9:54, 11:06–11:54, …), too short for a 1 h visit plus its 6-min drive: room for none.
+  assert.equal(t.room_bookings, 2);
+  const g = utilizationFacts({ today: TODAY, cleaners: [C], visits: [visit('a', '2026-11-09', 600, 660, [7], { duration: 60 }), visit('b', '2026-11-09', 720, 780, [7], { duration: 60 }), visit('c', '2026-11-09', 840, 900, [7], { duration: 60 }), visit('d', '2026-11-09', 960, 1020, [7], { duration: 60 })], until: '2026-11-09' });
+  const u = utilizationReport({ facts: g, from: TODAY, to: TODAY, maxTo: '2026-11-15' }).totals;
+  assert.ok(u.left_h > 3, 'several open hours remain');
+  assert.equal(u.room_bookings, 0, 'no gap fits a 1 h visit plus its drive');
 });

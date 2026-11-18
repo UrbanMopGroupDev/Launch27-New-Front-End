@@ -13,10 +13,10 @@ const PAST_DAYS = 91;
 const AHEAD_DAYS = 56;
 // How cleaners' hours are read. Bump when that changes: the next look at the planner then re-reads
 // everyone's hours instead of waiting for the hourly refresh.
-const HOURS_VERSION = 3; // 3: one-day changes kept HISTORY_DAYS back
+const HOURS_VERSION = 4; // 3: one-day changes kept HISTORY_DAYS back; 4: 13 weeks back
 // How far back cleaners' one-day changes, closed dates and days marked unavailable are kept, so
 // Utilization can look at past weeks (visits go back PAST_DAYS).
-export const HISTORY_DAYS = 56;
+export const HISTORY_DAYS = 91;
 const AVAIL_CHUNK = 28; // days per availability request (Launch27's calendar asks for 42)
 const NEAR_DAYS = 14; // problems are raised for this many days ahead
 const NEAR_EVERY_MS = 3 * 60_000; // next 14 days of bookings
@@ -1140,6 +1140,22 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     };
   }
 
-  return { utilizationSource, reset, dataChanged, cleanerProfile, cleanerForBooking, sync, start, soon, maybeRun, status, overview, plan, gapOptions, unassigned, continuity, changes, resolveChange, findSlots, checkSlot, assign, markUnavailable, cleaners, isRunning: () => !!running, _load: load, _window: windowFor };
+  // Recommended cleaners for unassigned visits (by visit key), the same ranking the planner uses.
+  async function recommendFor(keys = [], limit = 3) {
+    const s = await need();
+    const ctx = ctxFor(s);
+    const byKey = new Map(s.visits.map((v) => [v.key, v]));
+    const out = {};
+    for (const key of keys) {
+      const v = byKey.get(key);
+      if (!v || v.team_ids.length || v.date < s.today) continue;
+      const cust = s.customers.get(v.customer_id);
+      const job = { dates: [v.date], start: v.start, duration: v.duration, place: { lat: v.lat, lng: v.lng }, customerId: v.customer_id, kind: v.kind, services: v.services, prefs: cust?.prefs, mainCleanerId: cust?.main?.id, history: cust?.history, firstDate: v.date };
+      out[key] = rankCleaners(job, s.cleaners, ctx, { limit }).map((c) => ({ cleaner_id: c.cleaner_id, name: c.name, score: c.score, free: c.fits > 0, travel: c.travel, reasons: c.reasons.map((r) => ({ text: r.text, tone: r.tone })) }));
+    }
+    return out;
+  }
+
+  return { utilizationSource, recommendFor, reset, dataChanged, cleanerProfile, cleanerForBooking, sync, start, soon, maybeRun, status, overview, plan, gapOptions, unassigned, continuity, changes, resolveChange, findSlots, checkSlot, assign, markUnavailable, cleaners, isRunning: () => !!running, _load: load, _window: windowFor };
 }
 
