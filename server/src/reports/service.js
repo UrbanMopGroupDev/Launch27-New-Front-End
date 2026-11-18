@@ -757,7 +757,12 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
       const w4 = (k) => rows.reduce((m, r) => m + r.weeks.slice(0, 4).reduce((a, x) => a + x[k], 0), 0);
       existing = { capacity4: w4('capacity'), booked4: w4('booked'), unassigned_visits: ov.counts.unassigned_visits, tolerance: Math.max(0.5, rows.length * 4 * 0.05) };
     }
-    return utilizationReport({ facts, ...range, maxTo, minFrom, cfg: UTILIZATION, existing, takenAt: src.taken_at, cleaners: src.cleaners, source: { full_at: src.full_at, cleaners_by: src.cleaners_by } });
+    const report = utilizationReport({ facts, ...range, maxTo, minFrom, cfg: UTILIZATION, existing, takenAt: src.taken_at, cleaners: src.cleaners, source: { full_at: src.full_at, cleaners_by: src.cleaners_by } });
+    // Recommended cleaners for the bookings with no cleaner yet (upcoming ones; the planner's ranking).
+    const keys = report.needs_cleaner.filter((x) => x.kind === 'unassigned' && x.date >= src.today).slice(0, 150).map((x) => x.key);
+    const recs = keys.length && schedule.recommendFor ? await schedule.recommendFor(keys, 3).catch(() => ({})) : {};
+    for (const x of report.needs_cleaner) x.recommended = recs[x.key] || [];
+    return report;
   }
 
   // The raw year of visits (for the Commercial area).
