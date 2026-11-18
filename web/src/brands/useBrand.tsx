@@ -1,35 +1,14 @@
-// The brand being viewed (Residential / Commercial / Both), shared by every screen.
-// A soft filter: people open on their own brand and can switch; the choice is kept per browser.
-import { useCallback, useMemo, useSyncExternalStore } from 'react';
+// The brand being viewed, shared by every screen. Fixed to Residential (see VIEW below).
+import { useCallback, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useLocations } from '../hooks';
 import { brandsApi } from './api';
 import { brandForLocation, brandsForLocations, type BrandSlug, type BrandView } from './rules';
 
-const KEY = 'urbanmop.brandView';
-const listeners = new Set<() => void>();
-function read(): BrandView | null {
-  try {
-    const v = localStorage.getItem(KEY);
-    return v === 'residential' || v === 'commercial' || v === 'both' ? v : null;
-  } catch {
-    return null;
-  }
-}
-let current: BrandView | null = read();
-function write(v: BrandView) {
-  current = v;
-  try {
-    localStorage.setItem(KEY, v);
-  } catch {
-    /* private window: keep it in memory */
-  }
-  listeners.forEach((l) => l());
-}
-const subscribe = (l: () => void) => {
-  listeners.add(l);
-  return () => listeners.delete(l);
-};
+// This portal is UrbanMop Residential. Commercial moved to the Luxoclean + Commercial portal,
+// so there is no switch any more: every screen shows Residential, whatever a browser had
+// chosen before.
+const VIEW: BrandView = 'residential';
 
 export function useBrandsData() {
   return useQuery({ queryKey: ['brands'], queryFn: brandsApi.get, staleTime: 5 * 60_000 });
@@ -38,8 +17,7 @@ export function useBrandsData() {
 export function useBrand() {
   const data = useBrandsData();
   const locations = useLocations();
-  const chosen = useSyncExternalStore(subscribe, () => current, () => current);
-  const view: BrandView = chosen ?? data.data?.me.brand ?? 'both';
+  const view: BrandView = VIEW;
   const overrides = useMemo(() => data.data?.overrides || {}, [data.data]);
   const names = useMemo(() => new Map((locations.data || []).map((l) => [l.id, l.name])), [locations.data]);
   const brandOf = useCallback((id: number | null | undefined, name?: string | null): BrandSlug | null => brandForLocation(id, name ?? (id != null ? names.get(id) : null), overrides), [names, overrides]);
@@ -60,7 +38,7 @@ export function useBrand() {
   const brands = data.data?.brands;
   const ready = !!data.data;
   return useMemo(
-    () => ({ view, setView: write, brands: brands || [], brandOf, cleanerBrands, showLocation, showCleaner, info: (slug: BrandSlug | null | undefined) => brands?.find((b) => b.slug === slug) || null, ready, locationIds }),
+    () => ({ view, brands: brands || [], brandOf, cleanerBrands, showLocation, showCleaner, info: (slug: BrandSlug | null | undefined) => brands?.find((b) => b.slug === slug) || null, ready, locationIds }),
     [view, brands, brandOf, cleanerBrands, showLocation, showCleaner, ready, locationIds],
   );
 }
