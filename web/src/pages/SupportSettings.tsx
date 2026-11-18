@@ -9,10 +9,11 @@ import { DurationInput, Switch } from '../inbox/settingsUi';
 import { formatMinutes } from '../lib/routingRules';
 import { RulesEditor } from './RoutingRules';
 import { SmsPanel } from '../inbox/SmsPanel';
+import { KustomerMigrationPanel } from '../inbox/KustomerMigrationPanel';
 import { BrandsSettings } from '../brands/BrandsSettings';
 import { AgentsSettings, HoursSettings, PoliciesSettings, QaCopySettings, QueuesSettings, StatusesSettings, TeamsSettings } from './WorkforceSettings';
 
-type Tab = 'channels' | 'rules' | 'queues' | 'sla' | 'hours' | 'policies' | 'agents' | 'teams' | 'statuses' | 'canned' | 'history' | 'writes' | 'qa' | 'brands' | 'placement';
+type Tab = 'kustomer' | 'channels' | 'rules' | 'queues' | 'sla' | 'hours' | 'policies' | 'agents' | 'teams' | 'statuses' | 'canned' | 'history' | 'writes' | 'qa' | 'brands' | 'placement';
 
 const SECTIONS: { title: string; items: { id: Tab; label: string; desc: string }[] }[] = [
   {
@@ -51,6 +52,7 @@ const SECTIONS: { title: string; items: { id: Tab; label: string; desc: string }
       { id: 'writes', label: 'Launch27 changes', desc: 'Every change sent to Launch27 from this app' },
       { id: 'placement', label: 'Sales Hub API', desc: 'Quotes, holds and bookings from the Sales Hub' },
       { id: 'qa', label: 'QA data', desc: 'Copy of real data for QA (emails and phones masked)' },
+      { id: 'kustomer', label: 'Kustomer migration', desc: 'Export history and preview where it would go' },
     ],
   },
 ];
@@ -132,6 +134,7 @@ export function InboxSettingsPage() {
           {tab === 'writes' && (isAdmin ? <WritesLog /> : <div className="muted">Only admins can see the list of changes sent to Launch27.</div>)}
           {tab === 'placement' && (isAdmin ? <PlacementAudit /> : <div className="muted">Only admins can see the Sales Hub API log.</div>)}
           {tab === 'qa' && <QaCopySettings canEdit={isAdmin} />}
+          {tab === 'kustomer' && (isAdmin ? <KustomerMigrationPanel /> : <div className="muted">Only admins can see the Kustomer migration.</div>)}
         </div>
       </div>
     </>

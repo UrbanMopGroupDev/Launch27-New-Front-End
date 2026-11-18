@@ -347,6 +347,59 @@ export interface SmsProviderStatus {
   last_error_at: string | null;
   events: Record<string, number>;
 }
+export type KustomerMatchKind = 'confident' | 'review' | 'ambiguous' | 'conflict' | 'unmatched' | 'cleaner' | 'internal';
+export interface KustomerExport {
+  id: number;
+  kind: 'full' | 'catchup';
+  status: 'queued' | 'running' | 'paused' | 'cancelled' | 'completed' | 'failed';
+  phase: 'customers' | 'conversations' | 'done';
+  source: 'kustomer' | 'synthetic';
+  scope: { since: string | null; attachments: boolean };
+  pages: number;
+  requests: number;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  last_error: string | null;
+  customers: { pending: number; done: number; failed: number; skipped: number };
+  errors: { customer_id: string; state: string; attempts: number; error: string | null }[];
+}
+export interface KustomerDryRunResults {
+  customers: number;
+  conversations: number;
+  messages: number;
+  notes: number;
+  attachments: number;
+  duplicate_messages: number;
+  preview_only_messages: number;
+  new_conversations: number;
+  already_imported: number;
+  match: Record<KustomerMatchKind, number>;
+  conversations_by_match: Record<KustomerMatchKind, number>;
+  by_channel: Record<string, number>;
+  by_direction: { in: number; out: number; unknown: number };
+  oldest: string | null;
+  newest: string | null;
+  duplicate_identities: number;
+  l27_customers: number;
+  errors: { kind: string; kustomer_id: string; error: string }[];
+}
+export interface KustomerDryRun { id: number; status: 'running' | 'completed' | 'failed'; results: KustomerDryRunResults | null; created_at: string; finished_at: string | null; last_error: string | null }
+export interface KustomerOverview {
+  available: boolean;
+  source: 'kustomer' | 'synthetic' | null;
+  setup_problem: string | null;
+  import_enabled: boolean;
+  stored: Partial<Record<'customer' | 'conversation' | 'message' | 'note' | 'attachment', { count: number; oldest: string | null; newest: string | null }>>;
+  export: KustomerExport | null;
+  exports: Pick<KustomerExport, 'id' | 'kind' | 'status' | 'phase' | 'source' | 'created_at' | 'finished_at' | 'last_error'>[];
+  dry_run: KustomerDryRun | null;
+}
+export interface KustomerTest { source: string; ok: boolean; checks: { name: string; ok: boolean; status?: number | null; error?: string; hint?: string | null }[]; sample: { customers_on_first_page: number; more_pages: boolean; total_reported: number | null } }
+export interface KustomerScope { source: string; customers_total: number | null; customers_on_first_page: number; more_pages: boolean; oldest_on_first_page: string | null; rate_per_minute: number | null; note: string }
+export interface KustomerMatch { kustomer_customer_id: string; name: string | null; match: KustomerMatchKind; method: string | null; l27_customer_id: number | null; contact_id: number | null; candidates: number[]; reason: string | null; conversations: number; messages: number; notes: number }
+export interface KustomerPlanConversation { kustomer_conversation_id: string; l27_customer_id: number | null; action: 'new' | 'already_imported' | 'skip'; match: string; channels: string[]; messages: number; notes: number; duplicate_messages: number; preview_only_messages: number; first_at: string | null; last_at: string | null; reason: string | null }
+
 export interface ChannelStatus {
   email: { state: ChannelState; provider: string | null; send_from?: string[]; accounts: ChannelAccount[]; read_only: boolean };
   sms: { state: ChannelState; provider: string | null; providers: SmsProviderStatus[] };
@@ -438,6 +491,15 @@ export const inbox = {
   saveSchedule: (s: Schedule) => call<Schedule>('PUT', s.id ? `/admin/schedules/${s.id}` : '/admin/schedules', s),
   meta: () => call<Meta>('GET', '/meta'),
   channels: () => call<ChannelStatus>('GET', '/channels'),
+  kustomer: () => call<KustomerOverview>('GET', '/admin/kustomer'),
+  kustomerTest: () => call<KustomerTest>('POST', '/admin/kustomer/test'),
+  kustomerScope: () => call<KustomerScope>('GET', '/admin/kustomer/scope'),
+  kustomerExport: (body: { kind: 'full' | 'catchup'; since?: string | null; attachments: boolean }) => call<KustomerExport>('POST', '/admin/kustomer/exports', body),
+  kustomerExportAction: (id: number, action: 'pause' | 'resume' | 'cancel') => call<KustomerExport>('POST', `/admin/kustomer/exports/${id}/${action}`),
+  kustomerDryRun: () => call<KustomerDryRun>('POST', '/admin/kustomer/dry-runs'),
+  kustomerMatches: (match: string | null, offset = 0) => call<{ run: KustomerDryRun | null; rows: KustomerMatch[] }>('GET', `/admin/kustomer/matches?limit=100&offset=${offset}${match ? `&match=${match}` : ''}`),
+  kustomerConversations: (kid: string) => call<KustomerPlanConversation[]>('GET', `/admin/kustomer/customers/${encodeURIComponent(kid)}/conversations`),
+  kustomerPurge: () => call<{ purged: boolean }>('POST', '/admin/kustomer/purge'),
   smsAction: (provider: string, action: 'check' | 'disconnect' | 'connect') => call<ChannelStatus>('POST', `/admin/sms/${provider}/${action}`),
   counts: () => call<Counts>('GET', '/counts'),
   list: (params: { view?: string; status?: string; channel?: string; role?: string; q?: string; contact_id?: number; booking_id?: number }) => call<ConversationRow[]>('GET', `/conversations${qs(params)}`),
