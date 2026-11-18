@@ -44,6 +44,7 @@ export function registerComplaintRoutes(r, { complaints, needRole, wrap, now = (
     await complaints.setCategory(Number(req.params.id), { category, hard_route }, req.user.id);
     res.json(await complaints.getCase(Number(req.params.id)));
   }));
+  r.get('/complaints/clients', lead, h(async (req, res) => res.json(await complaints.clients())));
   r.post('/complaints/run', admin, h(async (req, res) => {
     const w = { from: DAY.test(req.body?.from || '') ? req.body.from : null, to: DAY.test(req.body?.to || '') ? req.body.to : null };
     const def = await windowOf({ query: {} });
