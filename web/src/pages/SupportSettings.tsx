@@ -8,6 +8,7 @@ import { ago, useInboxMe, useMeta } from '../inbox/util';
 import { DurationInput, Switch } from '../inbox/settingsUi';
 import { formatMinutes } from '../lib/routingRules';
 import { RulesEditor } from './RoutingRules';
+import { SmsPanel } from '../inbox/SmsPanel';
 import { BrandsSettings } from '../brands/BrandsSettings';
 import { AgentsSettings, HoursSettings, PoliciesSettings, QaCopySettings, QueuesSettings, StatusesSettings, TeamsSettings } from './WorkforceSettings';
 
@@ -124,7 +125,7 @@ export function InboxSettingsPage() {
           {tab === 'agents' && <AgentsSettings canEdit={canEdit} isAdmin={isAdmin} />}
           {tab === 'teams' && <TeamsSettings canEdit={isAdmin} />}
           {tab === 'statuses' && <StatusesSettings canEdit={canEdit} />}
-          {tab === 'channels' && <ChannelsPanel />}
+          {tab === 'channels' && <ChannelsPanel isAdmin={isAdmin} />}
           {tab === 'canned' && <CannedEditor canEdit={canEdit} />}
           {tab === 'history' && <HistoryPanel />}
           {tab === 'brands' && <BrandsSettings canEdit={isAdmin} />}
@@ -440,7 +441,7 @@ const CHANNEL_STATE: Record<ChannelState, { label: string; cls: string; text: st
   not_connected: { label: 'Not connected', cls: 'wl-blocked', text: 'Replies are saved but not sent. An admin sets this up on the server (see docs/email.md).' },
 };
 
-function ChannelsPanel() {
+function ChannelsPanel({ isAdmin }: { isAdmin: boolean }) {
   const q = useQuery({ queryKey: ['inbox', 'channels'], queryFn: inbox.channels, refetchInterval: 30_000 });
   if (q.isLoading) return <div className="muted">Loading…</div>;
   if (q.isError || !q.data) return <div className="muted">Couldn't load the channels.</div>;
@@ -474,10 +475,7 @@ function ChannelsPanel() {
         </table>
       )}
       {email.state === 'live' && !email.accounts.length && <p className="muted small">Waiting for the first mailbox check (runs every minute).</p>}
-      <section className="channel-block">
-        <h3>Text messages</h3>
-        <p className="small"><span className={`wl-pill ${CHANNEL_STATE[sms.state].cls}`}>{CHANNEL_STATE[sms.state].label}</span> {sms.state === 'not_connected' ? 'Texts are not connected yet: replies are saved, not sent.' : CHANNEL_STATE[sms.state].text}</p>
-      </section>
+      <SmsPanel sms={sms} isAdmin={isAdmin} />
     </>
   );
 }
