@@ -209,6 +209,11 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, visits = []
     taxonomy,
     ladder,
     reclean_vs_refund: recleanVsRefund,
+    reclean_vs_refund_total: {
+      reclean: outcomeStats(ladderRows.filter((c) => c.reclean && !c.refund)),
+      refund: outcomeStats(ladderRows.filter((c) => c.refund && !c.reclean)),
+      neither: outcomeStats(ladderRows.filter((c) => !c.reclean && !c.refund)),
+    },
     like_for_like: likeForLike,
     root_causes: rootCauses,
     hard_routes: Object.entries(HARD_ROUTES).map(([key, label]) => ({ key, label, n: rows.filter((c) => c.hard_route === key).length })),

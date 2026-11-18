@@ -34,6 +34,7 @@ export interface Playbook {
   })[];
   ladder: (Rung & OutcomeStats)[];
   reclean_vs_refund: { key: string; label: string; reclean: OutcomeStats; refund: OutcomeStats; neither: OutcomeStats; verdict: string }[];
+  reclean_vs_refund_total: { reclean: OutcomeStats; refund: OutcomeStats; neither: OutcomeStats };
   like_for_like: {
     groups_compared: number;
     matched_pairs: number;
@@ -114,6 +115,7 @@ export interface Status {
   running: boolean;
   sources: Record<string, string>;
   window: { from: string; to: string };
+  mined: { window_from: string; window_to: string; finished_at: string | null; status: string }[];
   last_run: null | { id: number; started_at: string; finished_at: string | null; status: string; window_from: string; window_to: string; log: { at: string; level: string; msg: string }[] };
 }
 

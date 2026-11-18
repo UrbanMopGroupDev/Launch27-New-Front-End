@@ -571,7 +571,9 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
 
   async function status() {
     const last = await one(db, 'SELECT id, started_at, finished_at, status, window_from, window_to, log FROM complaint_runs ORDER BY id DESC LIMIT 1');
-    return { running: !!running, sources: sources(), last_run: last };
+    // Which periods have been mined (finished runs), so the page can say what a date range covers.
+    const mined = await many(db, "SELECT window_from, window_to, finished_at, status FROM complaint_runs WHERE status IN ('done', 'partial') ORDER BY window_from");
+    return { running: !!running, sources: sources(), last_run: last, mined };
   }
 
   async function listCases({ from, to, category, limit = 500 }) {
