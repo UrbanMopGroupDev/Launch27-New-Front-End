@@ -11,7 +11,13 @@ export function PortalSwitcher() {
   const name = portal?.name || 'UrbanMop';
   const here = typeof window !== 'undefined' ? window.location.origin : '';
   // Other brands only: this portal (by address, or by name on dev and QA) isn't listed again.
-  const others = (portal?.links || []).filter((l) => l.url !== here && l.name.toLowerCase() !== name.toLowerCase());
+  // "UrbanMop" in the list is this portal when it is named "UrbanMop Residential".
+  const same = (other: string) => {
+    const a = other.trim().toLowerCase();
+    const b = name.trim().toLowerCase();
+    return a === b || b.startsWith(`${a} `);
+  };
+  const others = (portal?.links || []).filter((l) => l.url !== here && !same(l.name));
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
 
