@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { l27 } from '../api';
+import { l27, l27All } from '../api';
+import { crewFor, recommendedMinutes, type CatalogParam, type CatalogService } from '../lib/duration';
 import type { Booking, BookingComment, Charge } from '../types';
 import { BookingActions } from '../components/BookingActions';
 import { CallButton } from '../components/CallButton';
@@ -31,6 +32,10 @@ export function BookingDetailPage() {
   const booking = useQuery({ queryKey: ['booking', id], queryFn: () => l27<Booking>(`/v1/staff/bookings/${id}`), refetchInterval: 60_000 });
   const comments = useQuery({ queryKey: ['booking', id, 'comments'], queryFn: () => l27<BookingComment[] | null>(`/v1/staff/bookings/${id}/comments`) });
   const next = useQuery({ queryKey: ['booking', id, 'recurring'], queryFn: () => l27<Booking[] | null>(`/v1/staff/bookings/${id}/recurring`, { mode: 'next' }) });
+  // The services catalog (base time, extras' time) and pricing parameters' time, for the recommended duration.
+  const locId = booking.data?.location?.id;
+  const catalog = useQuery({ queryKey: ['booking-services', locId], queryFn: () => l27<CatalogService[]>('/v1/booking/services', { location_id: locId! }), enabled: !!locId, staleTime: 30 * 60_000 });
+  const params = useQuery({ queryKey: ['pricing-parameters'], queryFn: () => l27All<CatalogParam>('/v1/staff/pricing_parameters'), staleTime: 30 * 60_000 });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,6 +49,10 @@ export function BookingDetailPage() {
   const t = b.time_tracking?.[0];
   const onSite = mins(t?.checkin_at, t?.checkout_at);
   const booked = b.duration ? Math.round(b.duration) : null;
+  const rec = catalog.data && params.data ? recommendedMinutes(b.services || [], Array.isArray(catalog.data) ? catalog.data : [], params.data) : null;
+  const recommended = rec && rec.minutes > 0 ? rec.minutes : null;
+  const manual = recommended != null && booked != null && Math.abs(recommended - booked) >= 10;
+  const crew = Math.max(crewFor(recommended ?? 0), crewFor(booked ?? 0));
   const state = !b.active ? { label: 'Cancelled', cls: 'chip neg' } : b.completed ? { label: 'Completed', cls: 'chip ok' } : status.stage !== 'booked' ? { label: status.stage === 'done' ? 'Checked out' : status.stage === 'arrived' ? 'Checked in' : 'En route', cls: 'chip accent' } : { label: 'Upcoming', cls: 'chip' };
   const windowText = status.windowEnd > status.windowStart ? `${fmtTime(b.service_date)}–${fmtTime(new Date(status.windowEnd).toISOString())}` : fmtTime(b.service_date);
   const cleaner = b.teams?.[0];
@@ -106,7 +115,7 @@ export function BookingDetailPage() {
             </h1>
             <p className="c360-summary">
               {b.services?.map((x) => x.name).join(', ')}
-              {booked ? ` · ${hm(booked)} booked` : ''} · {b.address?.full_address || 'No address'}
+              {booked ? ` · ${hm(booked)} booked` : ''}{recommended != null && manual ? ` (recommended ${hm(recommended)})` : ''} · {b.address?.full_address || 'No address'}
             </p>
           </div>
           <div className="c360-actions">
@@ -133,6 +142,16 @@ export function BookingDetailPage() {
                   {t?.distance != null && <span className="chip">{t.distance} km driven</span>}
                 </div>
                 <Stepper booking={b} />
+                {(booked != null || recommended != null) && (
+                  <div className={`bd-duration${crew > 1 ? ' long' : ''}`}>
+                    <div><span className="eyebrow">Duration</span></div>
+                    <div className="bd-duration-rows">
+                      <div><span className="muted small">Recommended</span><b>{recommended != null ? hm(recommended) : '—'}</b>{rec && !rec.complete && <span className="muted small" title="Some services or extras on this booking have no time set in Launch27, so this may be short"> · partial</span>}</div>
+                      <div><span className="muted small">{manual ? 'Booked (set manually)' : 'Booked'}</span><b>{booked != null ? hm(booked) : '—'}</b></div>
+                      {crew > 1 && <div className="bd-crew"><span className="muted small">Crew</span><b>About {crew} cleaners</b><span className="small muted">~{hm(Math.round((recommended ?? booked ?? 0) / crew))} each</span></div>}
+                    </div>
+                  </div>
+                )}
                 {(b.teams?.length ? b.teams : [{ id: undefined, title: undefined }]).map((team, i) => (
                   <div key={team.id ?? i} className="visit-who">
                     <Avatar name={cleanName(team.title) || '?'} size={40} />
