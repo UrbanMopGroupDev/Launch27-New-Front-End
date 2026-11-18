@@ -344,6 +344,7 @@ function Report({ r, area, setArea, otherBrand: ob }: { r: UtilizationReport; ar
   return (
     <>
       <Summary r={r} f={f} area={area} onDrill={setDrill} drill={drill} />
+      <HistoryNote r={r} />
       {drill && <NeedsCleaner r={r} area={area} setArea={setArea} kind={drill} onKind={setDrill} onClose={() => setDrill(null)} />}
       <section className="card flush">
         <div className="seg-table-head"><h2>By area</h2><span className="muted small">Cleaners by home address; unassigned visits by the client's address. "Room for" = about how many more typical bookings fit into the open gaps in cleaners' days (unassigned ones already counted). Click a row to focus on it; click a heading to sort.</span></div>
@@ -431,6 +432,23 @@ function Report({ r, area, setArea, otherBrand: ob }: { r: UtilizationReport; ar
 
       <Reconcile r={r} />
     </>
+  );
+}
+
+// Where past days come from: the daily record (cleaners' hours as they were that day), or rebuilt
+// from cleaners' current hours where no record exists yet.
+function HistoryNote({ r }: { r: UtilizationReport }) {
+  const hs = r.history;
+  if (!hs || hs.past_days === 0) return null;
+  const all = hs.recorded_days >= hs.past_days;
+  return (
+    <p className={`small ut-history${all ? '' : ' partial'}`}>
+      {all
+        ? <>Past days here come from the <b>daily record</b>: cleaners' hours and bookings as they were on each day.</>
+        : hs.recorded_days > 0
+          ? <><b>{hs.recorded_days} of {hs.past_days}</b> past days here come from the daily record (hours as they were). The other {hs.past_days - hs.recorded_days} are rebuilt from cleaners' <i>current</i> hours, so they're estimates.</>
+          : <>These past days are rebuilt from cleaners' <i>current</i> hours, so they're estimates. The daily record {hs.first_recorded ? `started ${dayName(hs.first_recorded, { month: 'short', day: 'numeric' })}` : 'starts today'}: from then on, past days use hours as they were.</>}
+    </p>
   );
 }
 
