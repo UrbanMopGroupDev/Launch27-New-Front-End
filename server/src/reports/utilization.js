@@ -29,6 +29,17 @@ function merge(list) {
 }
 const clip = (list, [w0, w1]) => list.map(([a, b]) => [Math.max(a, w0), Math.min(b, w1)]).filter(([a, b]) => b > a);
 const total = (list) => merge(list).reduce((m, [a, b]) => m + (b - a), 0);
+// Lengths (minutes) of the open stretches of a window once the blocks are taken out.
+function openStretches(window, blocks) {
+  const out = [];
+  let t = window[0];
+  for (const [a, b] of merge(clip(blocks, window))) {
+    if (a > t) out.push(a - t);
+    t = Math.max(t, b);
+  }
+  if (window[1] > t) out.push(window[1] - t);
+  return out;
+}
 
 /**
  * The per-day facts every figure is summed from.
@@ -98,15 +109,24 @@ export function utilizationFacts({ today, start = today, cleaners, visits, holid
       const route = [...list].sort((a, b) => a.start - b.start);
       let travel = 0;
       let at = home;
+      const busyBlocks = []; // every visit (either brand) plus the drive to it, for the open gaps
       for (const v of route) {
         const m = leg(at, v, transit);
         if (inBrand(v)) travel += m;
         legs.push(m);
+        busyBlocks.push([v.start - m, v.end]);
         at = v;
       }
       const last = route[route.length - 1];
-      if (last && cfg.travelReturnHome && inBrand(last)) travel += leg(last, home, transit);
-      days.push({ d, sunday, cid: c.id, area: c.area || 'Unknown', base, closed: closedMin, other: otherMin, avail, assigned, otherBooked, travel, visits: mine.length });
+      if (last && cfg.travelReturnHome) {
+        const m = leg(last, home, transit);
+        if (inBrand(last)) travel += m;
+        busyBlocks.push([last.end, last.end + m]);
+      }
+      // Open stretches of the day once visits, their drives and closed hours are taken out:
+      // "Room for" counts how many bookings actually fit into these, not hours ÷ booking length.
+      const gaps = w ? openStretches(w, [...closed, ...busyBlocks]) : [];
+      days.push({ d, sunday, cid: c.id, area: c.area || 'Unknown', base, closed: closedMin, other: otherMin, avail, assigned, otherBooked, travel, visits: mine.length, gaps });
     }
   }
 
@@ -149,14 +169,18 @@ function sum(facts, inRange, area = null, cfg = UTILIZATION) {
   const travel = add(days, 'travel') + add(loose, 'travel');
   const spoken = assigned + unassignedH + notTakingH + travel;
   const left = avail - spoken;
-  // Room for more bookings: hours left ÷ (a typical booking + one average leg of travel).
+  // Room for more bookings: how many typical bookings (plus a drive to each) fit into the open
+  // stretches of each cleaner's day, less the unassigned visits that will need those slots.
   const visits = days.reduce((m, x) => m + x.visits, 0);
   const typical = visits ? assigned / visits : cfg.typicalBookingHours;
   const perBooking = typical + facts.avg_leg_min / 60;
+  const slot = perBooking * 60;
+  const fits = slot > 0 ? days.reduce((m, x) => m + (x.gaps || []).reduce((k, g) => k + Math.floor(g / slot), 0), 0) : 0;
+  const room = Math.max(0, fits - unassigned.length - new Set(notTaking.map((x) => x.key)).size);
   return {
     closed: add(days, 'closed'), avail, assigned, unassigned: unassignedH, unassigned_visits: unassigned.length,
     not_taking: notTakingH, not_taking_visits: new Set(notTaking.map((x) => x.key)).size, travel, spoken, left,
-    utilization: ratio(spoken, avail), room: left > 0 && perBooking > 0 ? Math.floor(left / perBooking) : 0, typical,
+    utilization: ratio(spoken, avail), room: left > 0 ? room : 0, typical,
   };
 }
 const rounded = (s) => ({

@@ -137,7 +137,7 @@ function DataCheckView({ r, area, otherBrand: ob }: { r: UtilizationReport; area
       <section className="card flush">
         <div className="seg-table-head"><h2>By cleaner{area && ` · ${area}`}</h2><span className="muted small">Cleaners taking bookings, plus anyone else with bookings in these dates. Problems first.</span></div>
         <div className="table-scroll">
-          <table className="seg-table">
+          <table className="seg-table ut-table">
             <thead><tr>{dsort.th('name', 'Cleaner')}{dsort.th('flags', 'What to check', true)}{dsort.th('status', 'Status')}{dsort.th('area', 'Area')}{dsort.th('weekly', 'Weekly hours in Launch27', true)}{dsort.th('available', 'Cleaner hours', true)}{dsort.th('booked', 'Booked', true)}</tr></thead>
             <tbody>
               {dsort.sorted.map((c) => (
@@ -179,8 +179,14 @@ function RangePicker({ value, onChange, today: t, minFrom, maxTo }: { value: { f
   // Last week: the Monday to Sunday before this week.
   const thisMonday = addDays(t, -((new Date(`${t}T12:00:00`).getDay() + 6) % 7));
   const lastWeek = { label: 'Last week', from: addDays(thisMonday, -7), to: addDays(thisMonday, -1) };
-  const canLastWeek = lastWeek.from >= minFrom;
-  const active = [...presets, lastWeek].find((p) => p.from === value.from && p.to === value.to);
+  // Last 4 weeks: the four full weeks (Monday to Sunday) before this week.
+  const last4 = { label: 'Last 4 weeks', from: addDays(thisMonday, -28), to: addDays(thisMonday, -1) };
+  // Last month: the previous calendar month (from the earliest date kept, if that's later).
+  const firstOfMonth = `${t.slice(0, 7)}-01`;
+  const lastMonthEnd = addDays(firstOfMonth, -1);
+  const lastMonth = { label: 'Last month', from: `${lastMonthEnd.slice(0, 7)}-01` < minFrom ? minFrom : `${lastMonthEnd.slice(0, 7)}-01`, to: lastMonthEnd };
+  const past = [lastWeek, last4, lastMonth].filter((p) => p.to >= minFrom && p.from >= minFrom);
+  const active = [...presets, ...past].find((p) => p.from === value.from && p.to === value.to);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
@@ -194,7 +200,9 @@ function RangePicker({ value, onChange, today: t, minFrom, maxTo }: { value: { f
   return (
     <div className="ut-range" ref={ref}>
       <div className="seg-period" role="group" aria-label="Dates">
-        {canLastWeek && <button className={active === lastWeek ? 'active' : ''} aria-pressed={active === lastWeek} onClick={() => { onChange({ from: lastWeek.from, to: lastWeek.to }); setOpen(false); }}>Last week</button>}
+        {past.map((p) => (
+          <button key={p.label} className={active === p ? 'active' : ''} aria-pressed={active === p} onClick={() => { onChange({ from: p.from, to: p.to }); setOpen(false); }}>{p.label}</button>
+        ))}
         <span className="ut-next muted small">Next</span>
         {presets.map((p) => (
           <button key={p.label} className={active === p ? 'active' : ''} aria-pressed={active === p} onClick={() => { onChange({ from: p.from, to: p.to }); setOpen(false); }}>{p.label}</button>
@@ -214,6 +222,7 @@ function Calendar({ value, min, max, onChange }: { value: { from: string; to: st
   const [anchor, setAnchor] = useState<string | null>(null); // first click / drag start
   const [hover, setHover] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  const clicked = useRef<string | null>(null); // the first click of a click-click
   const first = new Date(`${month}-01T12:00:00`);
   const startPad = (first.getDay() + 6) % 7; // Monday first
   const daysIn = new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
@@ -252,22 +261,33 @@ function Calendar({ value, min, max, onChange }: { value: { from: string; to: st
               key={d}
               disabled={off}
               className={`ut-cal-day${sel ? ' sel' : ''}${d === lo || d === hi ? ' end' : ''}${sun ? ' sun' : ''}`}
-              onMouseDown={(e) => { e.preventDefault(); setAnchor(d); setHover(d); setDragging(true); }}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                if (anchor && !dragging) return; // second click: handled by onClick
+                clicked.current = null;
+                setAnchor(d);
+                setHover(d);
+                setDragging(true);
+              }}
               onMouseEnter={() => anchor && setHover(d)}
               onMouseUp={() => {
                 if (!anchor) return;
                 if (dragging && d !== anchor) finish(anchor, d);
                 else setDragging(false); // a click: wait for the end date
               }}
-              onClick={() => { if (anchor && !dragging && d !== anchor) finish(anchor, d); }}
-              onDoubleClick={() => finish(d, d)}
+              onClick={(e) => {
+                if (!anchor || dragging) return;
+                // The second click of a click-click (or a double-click): same day = just that day.
+                if (d !== anchor || e.detail >= 2 || clicked.current === d) finish(anchor, d);
+                else clicked.current = d;
+              }}
             >
               {Number(d.slice(8))}
             </button>
           );
         })}
       </div>
-      <p className="small muted ut-cal-help">{anchor ? 'Now pick the last day (or double-click for one day).' : 'Click the first day and then the last, or drag across. Sundays are left out of the numbers.'}</p>
+      <p className="small muted ut-cal-help">{anchor ? 'Now click the last day, or the same day again for just that day.' : 'Click the first day and then the last (or drag across). Click a day twice for just that day. Sundays are left out of the numbers.'}</p>
     </div>
   );
 }
@@ -324,12 +344,12 @@ function Report({ r, area, setArea, otherBrand: ob }: { r: UtilizationReport; ar
   return (
     <>
       <Summary r={r} f={f} area={area} onDrill={setDrill} drill={drill} />
-      {drill && <NeedsCleaner r={r} area={area} kind={drill} onKind={setDrill} onClose={() => setDrill(null)} />}
+      {drill && <NeedsCleaner r={r} area={area} setArea={setArea} kind={drill} onKind={setDrill} onClose={() => setDrill(null)} />}
       <section className="card flush">
-        <div className="seg-table-head"><h2>By area</h2><span className="muted small">Cleaners by home address; unassigned visits by the client's address. "Room for" = about how many more typical bookings fit. Click a row to focus on it; click a heading to sort.</span></div>
+        <div className="seg-table-head"><h2>By area</h2><span className="muted small">Cleaners by home address; unassigned visits by the client's address. "Room for" = about how many more typical bookings fit into the open gaps in cleaners' days (unassigned ones already counted). Click a row to focus on it; click a heading to sort.</span></div>
         <div className="table-scroll">
-          <table className="seg-table">
-            <thead><tr>{areaSort.th('area', 'Area')}{areaSort.th('cleaners', 'Cleaners', true)}{areaSort.th('customers', 'Customers', true)}{areaSort.th('available', 'Cleaner hours', true)}{areaSort.th('assigned', 'Assigned', true)}{areaSort.th('unassigned', 'Unassigned', true)}{areaSort.th('travel', 'Travel', true)}{areaSort.th('left', 'Open hours remaining', true)}{areaSort.th('util', 'Utilization')}{areaSort.th('room', 'Room for', true)}</tr></thead>
+          <table className="seg-table ut-table">
+            <thead><tr>{areaSort.th('area', 'Area')}{areaSort.th('cleaners', 'Cleaners', true)}{areaSort.th('customers', 'Customers', true)}{areaSort.th('available', 'Cleaner hours', true)}{areaSort.th('assigned', 'Assigned', true)}{areaSort.th('unassigned', 'Unassigned', true)}{areaSort.th('travel', 'Travel', true)}{areaSort.th('left', 'Open hours remaining', true)}{areaSort.th('util', 'Utilization')}{areaSort.th('room', 'Room for (bookings)', true)}</tr></thead>
             <tbody>
               {areaSort.sorted.map((x) => (
                 <tr key={x.area} className={`clickable${area === x.area ? ' ut-row-on' : ''}`} onClick={() => setArea(area === x.area ? null : x.area)}>
@@ -361,8 +381,8 @@ function Report({ r, area, setArea, otherBrand: ob }: { r: UtilizationReport; ar
       <section className="card flush">
         <div className="seg-table-head"><h2>By day{area && ` · ${area}`}</h2><span className="muted small">Some days fill up before others: book into the days with open hours remaining.</span></div>
         <div className="table-scroll ut-days">
-          <table className="seg-table compact">
-            <thead><tr>{daySort.th('date', 'Day')}{daySort.th('available', 'Cleaner hours', true)}{daySort.th('committed', 'Committed', true)}{daySort.th('left', 'Open hours remaining', true)}{daySort.th('util', 'Utilization')}{daySort.th('room', 'Room for', true)}</tr></thead>
+          <table className="seg-table compact ut-table">
+            <thead><tr>{daySort.th('date', 'Day')}{daySort.th('available', 'Cleaner hours', true)}{daySort.th('committed', 'Committed', true)}{daySort.th('left', 'Open hours remaining', true)}{daySort.th('util', 'Utilization')}{daySort.th('room', 'Room for (bookings)', true)}</tr></thead>
             <tbody>
               {daySort.sorted.map((d) => (
                 <tr key={d.date}>
@@ -383,7 +403,7 @@ function Report({ r, area, setArea, otherBrand: ob }: { r: UtilizationReport; ar
       <section className="card flush">
         <div className="seg-table-head"><h2>By cleaner{area && ` · ${area}`}</h2><span className="muted small">Fullest first. "If they left" = their booked + travel hours ÷ their area's open hours remaining; over 100% means the area couldn't absorb their work.</span></div>
         <div className="table-scroll">
-          <table className="seg-table">
+          <table className="seg-table ut-table">
             <thead><tr>{cleanerSort.th('name', 'Cleaner')}{cleanerSort.th('area', 'Area')}{cleanerSort.th('available', 'Cleaner hours', true)}{cleanerSort.th('assigned', 'Assigned', true)}{cleanerSort.th('travel', 'Travel', true)}{cleanerSort.th('left', 'Open hours remaining', true)}{cleanerSort.th('util', 'Utilization')}{cleanerSort.th('ifleft', 'If they left', true)}</tr></thead>
             <tbody>
               {cleanerSort.sorted.map((x) => (
@@ -416,50 +436,79 @@ function Report({ r, area, setArea, otherBrand: ob }: { r: UtilizationReport; ar
 
 // ---------- drill-down: the bookings that still need a cleaner ----------
 type NeedRow = UtilizationReport['needs_cleaner'][number];
-function NeedsCleaner({ r, area, kind, onKind, onClose }: { r: UtilizationReport; area: string | null; kind: 'unassigned' | 'not_taking'; onKind: (k: 'unassigned' | 'not_taking') => void; onClose: () => void }) {
+function NeedsCleaner({ r, area, setArea, kind, onKind, onClose }: { r: UtilizationReport; area: string | null; setArea: (a: string | null) => void; kind: 'unassigned' | 'not_taking'; onKind: (k: 'unassigned' | 'not_taking') => void; onClose: () => void }) {
   const all = useMemo(() => r.needs_cleaner.filter((x) => !area || x.area === area), [r.needs_cleaner, area]);
   const rows = useMemo(() => all.filter((x) => x.kind === kind), [all, kind]);
   const counts = { unassigned: all.filter((x) => x.kind === 'unassigned').length, not_taking: all.filter((x) => x.kind === 'not_taking').length };
-  const sort = useSort<NeedRow>(rows, { date: (x) => `${x.date} ${String(x.start).padStart(4, '0')}`, customer: (x) => x.customer, area: (x) => x.area, hours: (x) => x.hours, freq: (x) => x.freq, cleaner: (x) => x.cleaner }, 'date', 'asc');
-  const ref = useRef<HTMLElement>(null);
-  useEffect(() => { ref.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, []);
+  const sort = useSort<NeedRow>(rows, { date: (x) => `${x.date} ${String(x.start).padStart(4, '0')}`, customer: (x) => x.customer, area: (x) => x.area, hours: (x) => x.hours, rec: (x) => x.recommended?.[0]?.name, cleaner: (x) => x.cleaner }, 'date', 'asc');
+  const [more, setMore] = useState<string | null>(null);
+  useEffect(() => {
+    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', esc);
+    return () => document.removeEventListener('keydown', esc);
+  }, [onClose]);
   const time = (min: number) => { const hh = Math.floor(min / 60), mm = min % 60; return `${hh % 12 || 12}${mm ? `:${pad(mm)}` : ''}${hh >= 12 ? 'pm' : 'am'}`; };
+  const when = r.from === r.to ? dayName(r.from) : `${dayName(r.from, { month: 'short', day: 'numeric' })} – ${dayName(r.to, { month: 'short', day: 'numeric' })}`;
   return (
-    <section className="card flush ut-drill" ref={ref}>
-      <div className="seg-table-head">
-        <div>
-          <h2>{kind === 'unassigned' ? 'Bookings with no cleaner yet' : 'Bookings on cleaners not taking bookings'}{area && ` · ${area}`}</h2>
-          <span className="muted small">{dayName(r.from)} – {dayName(r.to)} · Monday to Saturday · {kind === 'unassigned' ? 'these still need a cleaner assigned' : 'their cleaner is on hold / not ready, so these need moving'}</span>
+    <>
+      <div className="ut-drawer-backdrop" onClick={onClose} />
+      <aside className="ut-drawer" role="dialog" aria-label={kind === 'unassigned' ? 'Bookings with no cleaner yet' : 'Bookings to move'}>
+        <div className="ut-drawer-head">
+          <div>
+            <h2>{kind === 'unassigned' ? 'Bookings with no cleaner yet' : 'Bookings to move'}</h2>
+            <div className="ut-chips">
+              <span className="ut-chip">📅 {when}</span>
+              {area ? <span className="ut-chip">{area} Ottawa <button aria-label={`Show all areas, not just ${area}`} onClick={() => setArea(null)}>✕</button></span> : <span className="ut-chip muted">All areas</span>}
+              <span className="ut-chip muted">Mon–Sat</span>
+            </div>
+          </div>
+          <button className="icon-button" aria-label="Close" onClick={onClose}>✕</button>
         </div>
-        <div className="ut-drill-actions">
+        <div className="ut-drawer-bar">
           <div className="seg-period" role="tablist">
             <button className={kind === 'unassigned' ? 'active' : ''} onClick={() => onKind('unassigned')}>No cleaner yet · {counts.unassigned}</button>
             <button className={kind === 'not_taking' ? 'active' : ''} onClick={() => onKind('not_taking')}>To move · {counts.not_taking}</button>
           </div>
-          <Link to="/schedule" className="small">Open the Scheduling planner →</Link>
-          <button className="icon-button" aria-label="Close" onClick={onClose}>✕</button>
+          <span className="small muted">{kind === 'unassigned' ? 'Recommended = the planner\'s best match: usual cleaner, history with the client, free then, nearby.' : 'Their cleaner is on hold or not ready, so these need a new cleaner.'}</span>
         </div>
-      </div>
-      <div className="table-scroll ut-days">
-        <table className="seg-table compact">
-          <thead><tr>{sort.th('date', 'When')}{sort.th('customer', 'Client')}{sort.th('area', 'Area')}{sort.th('hours', 'Length', true)}{sort.th('freq', 'Frequency')}{kind === 'not_taking' && sort.th('cleaner', 'Current cleaner')}<th>Booking</th></tr></thead>
-          <tbody>
-            {sort.sorted.map((x) => (
-              <tr key={`${x.kind}${x.key}`}>
-                <td>{dayName(x.date)} · {time(x.start)}</td>
-                <td>{x.customer || '—'}{x.address && <div className="small muted">{x.address}</div>}</td>
-                <td className="muted">{x.area}</td>
-                <td className="num">{h(x.hours)}</td>
-                <td className="muted">{x.freq || '—'}</td>
-                {kind === 'not_taking' && <td>{x.cleaner || '—'}</td>}
-                <td>{x.booking_id ? <Link to={`/bookings/${x.booking_id}`}>Open</Link> : <span className="muted small" title="A future visit of a recurring booking that Launch27 hasn't created yet">Projected</span>}</td>
-              </tr>
-            ))}
-            {rows.length === 0 && <tr><td colSpan={7} className="muted">None in these dates{area ? ` for ${area}` : ''}.</td></tr>}
-          </tbody>
-        </table>
-      </div>
-    </section>
+        <div className="ut-drawer-body">
+          <table className="seg-table compact ut-table">
+            <thead><tr>{sort.th('date', 'When')}{sort.th('customer', 'Client')}{sort.th('hours', 'Length', true)}{kind === 'unassigned' ? sort.th('rec', 'Recommended') : sort.th('cleaner', 'Current cleaner')}<th /></tr></thead>
+            <tbody>
+              {sort.sorted.map((x) => {
+                const recs = x.recommended || [];
+                const top = recs[0];
+                return (
+                  <tr key={`${x.kind}${x.key}`}>
+                    <td className="ut-nowrap">{dayName(x.date)}<div className="small muted">{time(x.start)}</div></td>
+                    <td>{x.customer || '—'}<div className="small muted">{[x.area, x.freq].filter(Boolean).join(' · ')}</div></td>
+                    <td className="num">{h(x.hours)}</td>
+                    {kind === 'unassigned' ? (
+                      <td>
+                        {top ? (
+                          <>
+                            <Link to={`/schedule/cleaner/${top.cleaner_id}`} className="seg-name">{top.name}</Link>
+                            <div className="ut-reasons">{top.reasons.slice(0, 3).map((t, i) => <span key={i} className={`ut-reason ${t.tone}`}>{t.text}</span>)}</div>
+                            {recs.length > 1 && (more === x.key ? (
+                              <div className="small ut-more">Also: {recs.slice(1).map((c, i) => <span key={c.cleaner_id}>{i ? ', ' : ''}<Link to={`/schedule/cleaner/${c.cleaner_id}`}>{c.name}</Link>{c.reasons[0] ? <span className="muted"> ({c.reasons[0].text.toLowerCase()})</span> : null}</span>)}</div>
+                            ) : <button type="button" className="ut-link small" onClick={() => setMore(x.key)}>{recs.length - 1} more</button>)}
+                          </>
+                        ) : <span className="muted small">{x.date < r.today ? 'Past date' : 'No one free and suitable'}</span>}
+                      </td>
+                    ) : <td>{x.cleaner || '—'}</td>}
+                    <td className="ut-nowrap">
+                      {x.date >= r.today && <Link className="ut-assign" to="/schedule?tab=changes&kind=unassigned" title="Assign in the Scheduling planner (production is read-only for now, so assigning finishes in Launch27)">Assign</Link>}
+                      {x.booking_id ? <Link className="small" to={`/bookings/${x.booking_id}`}>Booking</Link> : <span className="muted small" title="A future visit of a recurring booking that Launch27 hasn't created yet">Projected</span>}
+                    </td>
+                  </tr>
+                );
+              })}
+              {rows.length === 0 && <tr><td colSpan={5} className="muted">None in these dates{area ? ` for ${area}` : ''}.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </aside>
+    </>
   );
 }
 
@@ -486,7 +535,7 @@ function Summary({ r, f, area, onDrill, drill }: { r: UtilizationReport; f: Util
               : r.past
                 ? 'Past dates: cleaner hours that no booking used.'
                 : f.room_bookings
-                ? <>Room for about <b>{f.room_bookings} more bookings</b> (a typical {h(f.typical_booking_h)} visit plus about {r.avg_leg_min} min of driving).</>
+                ? <>Room for about <b>{f.room_bookings} more bookings</b>: typical {h(f.typical_booking_h)} visits (plus about {r.avg_leg_min} min of driving) that fit into the open gaps in cleaners' days.</>
                 : 'No room for another typical booking.'}
           </span>
         </div>
