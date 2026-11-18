@@ -373,3 +373,21 @@ export function needsCleaner(facts, inWin) {
   }
   return out.sort((a, b) => a.date.localeCompare(b.date) || a.start - b.start).slice(0, 1000);
 }
+
+// Past days from the daily record replace the same days rebuilt from today's planner copy (which
+// only knows cleaners' current weekly hours). `recorded` = facts built from each saved day.
+export function withRecordedDays(live, recorded = []) {
+  if (!recorded.length) return live;
+  const days = new Set(recorded.flatMap((f) => f.recorded_days || []));
+  const keep = (x) => !days.has(x.d);
+  const taking = new Map(live.taking.map((c) => [c.id, c]));
+  for (const f of recorded) for (const c of f.taking) if (!taking.has(c.id)) taking.set(c.id, c);
+  return {
+    ...live,
+    days: [...live.days.filter(keep), ...recorded.flatMap((f) => f.days)],
+    loose: [...live.loose.filter(keep), ...recorded.flatMap((f) => f.loose)],
+    customers: [...live.customers.filter(keep), ...recorded.flatMap((f) => f.customers)],
+    taking: [...taking.values()],
+    recorded_days: [...days].sort(),
+  };
+}

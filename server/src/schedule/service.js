@@ -536,6 +536,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
         added = await recordChanges(q, found);
       });
       snap = next;
+      await recordDays(next);
       lastRun = (await db.query("UPDATE schedule_runs SET status = 'done', finished_at = now(), visits = $2, cleaners = $3, changes = $4 WHERE id = $1 RETURNING *", [run.id, data.visits.length, data.cleaners.length, added])).rows[0];
       log.info('schedule updated', { trigger, kind: doNear ? 'near' : 'full', visits: data.visits.length, cleaners: data.cleaners.length, changes: added });
       return lastRun;
@@ -1119,6 +1120,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       await q.query('DELETE FROM schedule_snapshots');
       await q.query("UPDATE schedule_changes SET resolved_at = now(), resolution = 'gone' WHERE resolved_at IS NULL");
       await q.query('DELETE FROM schedule_unavailable');
+      await q.query('DELETE FROM utilization_days'); // sample/QA data switched: its history goes too
     });
     snap = null;
   }
@@ -1140,6 +1142,45 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     };
   }
 
+  // ---------- daily history (Utilization) ----------
+  // Today's and yesterday's picture, saved on every refresh and then left alone: the cleaners with
+  // the hours they had set for that day, the day's visits, closed dates and days marked unavailable.
+  // Past weeks in Utilization use these instead of rebuilding from cleaners' current hours.
+  // Never fails a refresh.
+  const VISIT_FIELDS = ['key', 'id', 'date', 'start', 'end', 'duration', 'team_ids', 'team_hours', 'location_id', 'customer_id', 'customer', 'kind', 'freq', 'addr', 'lat', 'lng'];
+  function dayRecord(s, d) {
+    return {
+      v: 1,
+      day: d,
+      cleaners: s.cleaners.map((c) => ({
+        ...cleanerOut(c),
+        rules: { transit: !!c.rules?.transit },
+        availability: (c.availability || []).filter((r) => !r.date || String(r.date).slice(0, 10) === d),
+      })),
+      visits: s.visits.filter((v) => v.date === d).map((v) => Object.fromEntries(VISIT_FIELDS.map((k) => [k, v[k] ?? null]))),
+      holidays: (s.holidays || []).filter((h) => h.date === d),
+      unavailable: [...unavailable].filter(([, days]) => days.has(d)).map(([id]) => id),
+    };
+  }
+  async function recordDays(s) {
+    try {
+      for (const d of [addDays(s.today, -1), s.today]) {
+        await db.query('INSERT INTO utilization_days (day, data, recorded_at) VALUES ($1, $2::jsonb, now()) ON CONFLICT (day) DO UPDATE SET data = EXCLUDED.data, recorded_at = now()', [d, JSON.stringify(dayRecord(s, d))]);
+      }
+    } catch (err) {
+      log.warn('utilization: could not save the daily record', { error: err.message });
+    }
+  }
+  // Saved days between from and to (inclusive), oldest first.
+  async function recordedDays(from, to) {
+    const rows = (await db.query('SELECT day, data FROM utilization_days WHERE day >= $1 AND day <= $2 ORDER BY day', [from, to])).rows;
+    return rows.map((r) => ({ day: dateStr(r.day), ...r.data }));
+  }
+  async function firstRecordedDay() {
+    const row = (await db.query('SELECT min(day) AS d FROM utilization_days')).rows[0];
+    return row?.d ? dateStr(row.d) : null;
+  }
+
   // Recommended cleaners for unassigned visits (by visit key), the same ranking the planner uses.
   async function recommendFor(keys = [], limit = 3) {
     const s = await need();
@@ -1156,6 +1197,6 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     return out;
   }
 
-  return { utilizationSource, recommendFor, reset, dataChanged, cleanerProfile, cleanerForBooking, sync, start, soon, maybeRun, status, overview, plan, gapOptions, unassigned, continuity, changes, resolveChange, findSlots, checkSlot, assign, markUnavailable, cleaners, isRunning: () => !!running, _load: load, _window: windowFor };
+  return { utilizationSource, recommendFor, recordedDays, firstRecordedDay, reset, dataChanged, cleanerProfile, cleanerForBooking, sync, start, soon, maybeRun, status, overview, plan, gapOptions, unassigned, continuity, changes, resolveChange, findSlots, checkSlot, assign, markUnavailable, cleaners, isRunning: () => !!running, _load: load, _window: windowFor };
 }
 
