@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState, type ReactNode, useRef } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { inbox } from '../inbox/api';
+import { scheduleApi } from '../schedule/api';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { l27, l27All, l27Write } from '../api';
 import { Icon } from '../components/Icon';
@@ -920,8 +921,12 @@ function TeamPicker({ teams, selected, onChange, customerId }: { teams: { id: nu
     staleTime: 15 * 60_000,
   });
   const affinity = useMemo(() => cleanerAffinity(history.data || []), [history.data]);
+  // The client's Launch27 tags about cleaners ("do not assign…", "prefers…"), as the planner reads them.
+  const tags = useQuery({ queryKey: ['schedule', 'client-tags', customerId], queryFn: () => scheduleApi.clientTags(customerId!), enabled: !!customerId && customerId > 0, retry: false, staleTime: 5 * 60_000 });
+  const tagged = (id: number) => (tags.data?.avoid_ids.includes(id) ? 'avoid' : tags.data?.prefer_ids.includes(id) ? 'prefers' : null);
+  const blocked = teams.filter((t) => selected.includes(t.id) && tagged(t.id) === 'avoid');
   const statsFor = (id: number) => affinity.all.find((c) => c.id === id);
-  const rank = (id: number) => (affinity.preferred?.id === id ? 0 : statsFor(id) ? 1 : affinity.avoid.some((a) => a.id === id) ? 3 : 2);
+  const rank = (id: number) => (tagged(id) === 'avoid' ? 4 : tagged(id) === 'prefers' ? -1 : affinity.preferred?.id === id ? 0 : statsFor(id) ? 1 : affinity.avoid.some((a) => a.id === id) ? 3 : 2);
   const shown = teams
     .filter((t) => selected.includes(t.id) || t.title.toLowerCase().includes(filter.toLowerCase()))
     .sort((a, b) => Number(selected.includes(b.id)) - Number(selected.includes(a.id)) || rank(a.id) - rank(b.id) || (statsFor(b.id)?.visits || 0) - (statsFor(a.id)?.visits || 0));
@@ -942,6 +947,8 @@ function TeamPicker({ teams, selected, onChange, customerId }: { teams: { id: nu
               <Avatar name={t.title} size={32} />
               <span className="grow">
                 <strong>{t.title}</strong>
+                {tagged(t.id) === 'prefers' && <span className="chip ok">client prefers</span>}
+                {tagged(t.id) === 'avoid' && <span className="chip neg">tagged: do not assign</span>}
                 {affinity.preferred?.id === t.id && <span className="chip ok">preferred</span>}
                 {avoid && <span className="chip neg">rated unhappy</span>}
                 <span className="muted small"> {st ? `${st.visits} visit${st.visits === 1 ? '' : 's'} for this customer · ${st.happy} happy` : customerId ? 'New to this customer' : ''}</span>
@@ -951,6 +958,11 @@ function TeamPicker({ teams, selected, onChange, customerId }: { teams: { id: nu
           );
         })}
       </div>
+      {blocked.length > 0 && (
+        <p className="error bf-tag-warn" role="alert">
+          This client is tagged "do not assign" for {blocked.map((t) => t.title).join(', ')}. You can still save, but check with the client first.
+        </p>
+      )}
       <div className="muted small">{selected.length ? `${selected.length} selected · Launch27 notifies assigned cleaners` : 'Unassigned: you can assign from the dispatch board later'}</div>
     </>
   );

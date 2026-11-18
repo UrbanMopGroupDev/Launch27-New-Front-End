@@ -107,12 +107,12 @@ export function customerPrefs(tags = []) {
   const prefers = [];
   const avoid = [];
   for (const x of lc) {
-    const no = x.match(/do\s*not\s*assign\s+(.+)/);
+    const no = x.match(/(?:do\s*not|don'?t|never)\s*(?:assign|send)\s*[:–-]?\s+(.+)/);
     if (no) {
       avoid.push(no[1].replace(/[^a-zÀ-ɏ' -]/gi, '').trim());
       continue;
     }
-    const p = x.match(/^#?\s*prefer(?:s|red)?\s+(.+)/);
+    const p = x.match(/^#?\s*prefer(?:s|red)?\s*[:–-]?\s+(.+)/);
     if (p && !/female|male|consistent|same/.test(p[1])) prefers.push(p[1].replace(/[^a-zÀ-ɏ' -]/gi, '').trim());
   }
   return {
@@ -124,13 +124,53 @@ export function customerPrefs(tags = []) {
     avoid,
   };
 }
-const firstWord = (s) => String(s || '').toLowerCase().split(/\s+/)[0] || '';
+// Names as typed in tags vs. the roster: accents and case don't matter, and a first name of
+// five letters or more may be one letter off (Silvia / Sylvia).
+const plainName = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z' -]/g, ' ').replace(/\s+/g, ' ').trim();
+const firstWord = (s) => plainName(s).split(' ')[0] || '';
+function oneOff(a, b) {
+  if (a === b) return true;
+  if (Math.min(a.length, b.length) < 5 || Math.abs(a.length - b.length) > 1) return false;
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  const rest = (x, n) => x.slice(i + n);
+  return rest(a, 1) === rest(b, 1) || rest(a, 1) === rest(b, 0) || rest(a, 0) === rest(b, 1);
+}
 export const nameMatches = (cleanerName, wanted) => {
-  const w = String(wanted || '').toLowerCase().trim();
+  const w = plainName(wanted);
   if (!w) return false;
-  const n = String(cleanerName || '').toLowerCase();
-  return n === w || firstWord(n) === firstWord(w) || n.includes(w);
+  const n = plainName(cleanerName);
+  return n === w || oneOff(firstWord(n), firstWord(w)) || ` ${n} `.includes(` ${w} `); // whole words: "Ann" is not "Joanna"
 };
+// Which cleaners a name in a tag means. Several cleaners with that first name: the last
+// initial in the tag ("Silvia R") narrows it down; without one, all of them match.
+export function matchCleaners(wanted, cleaners = []) {
+  const hits = cleaners.filter((c) => nameMatches(c.name, wanted));
+  if (hits.length < 2) return hits;
+  const second = plainName(wanted).split(' ')[1];
+  const narrowed = second ? hits.filter((c) => (plainName(c.name).split(' ')[1] || '').startsWith(second[0])) : [];
+  return narrowed.length ? narrowed : hits;
+}
+// Customer preferences with the names tied to cleaner records: avoidIds / preferIds, and
+// `matches` for showing which cleaner each tag was read as (none = a name we couldn't place).
+export function resolvePrefs(prefs, cleaners = []) {
+  const matches = [];
+  const ids = (rule, names) => {
+    const out = new Set();
+    for (const name of names) {
+      const hits = matchCleaners(name, cleaners);
+      matches.push({ rule, name, cleaners: hits.map((c) => ({ id: c.id, name: c.name })) });
+      for (const c of hits) out.add(c.id);
+    }
+    return [...out];
+  };
+  const avoidIds = ids('avoid', prefs.avoid || []);
+  const preferIds = ids('prefers', prefs.prefers || []).filter((id) => !avoidIds.includes(id));
+  return { ...prefs, avoidIds, preferIds, matches };
+}
+const avoided = (prefs, c) => (prefs?.avoidIds ? prefs.avoidIds.includes(c.id) : !!prefs?.avoid?.some((n) => nameMatches(c.name, n)));
+const preferred = (prefs, c) => (prefs?.preferIds ? prefs.preferIds.includes(c.id) : !!prefs?.prefers?.some((n) => nameMatches(c.name, n)));
+export { avoided as clientAvoids };
 
 // ---------- availability ----------
 // Launch27 rows: weekly (date null, weekday 0-6) and date-specific overrides; plus dates the
@@ -218,7 +258,7 @@ export function rankCleaners(job, cleaners, ctx, { limit = 5, ignoreKeys = null 
   const out = [];
   for (const c of cleaners) {
     if (!c.assignable) continue;
-    if (job.prefs?.avoid?.some((n) => nameMatches(c.name, n))) continue;
+    if (avoided(job.prefs, c)) continue;
     if (job.prefs?.femaleOnly && c.gender !== 'F') continue;
     if (c.rules.noShort && job.duration <= 120) continue;
     const homeKm = km(c, job.place);
@@ -247,7 +287,8 @@ export function rankCleaners(job, cleaners, ctx, { limit = 5, ignoreKeys = null 
       score += Math.min(seen * 5, 25);
       reasons.push({ text: `Cleaned here ${seen} time${seen === 1 ? '' : 's'} before`, tone: 'good' });
     } else reasons.push({ text: 'New to this client', tone: 'neutral' });
-    if (job.prefs?.prefers?.some((n) => nameMatches(c.name, n))) {
+    const isPreferred = preferred(job.prefs, c);
+    if (isPreferred) {
       score += 40;
       reasons.push({ text: 'Client asked for them', tone: 'good' });
     }
@@ -287,9 +328,10 @@ export function rankCleaners(job, cleaners, ctx, { limit = 5, ignoreKeys = null 
     }
     if (c.isNew) reasons.push({ text: 'New hire', tone: 'neutral' });
     if (c.rules.confirmFirst) reasons.push({ text: 'Call or text to confirm first', tone: 'warn' });
-    out.push({ cleaner_id: c.id, name: c.name, color: c.color, status: c.status, score: Math.round(Math.min(score / 160, 1) * 100) / 100, fits, total: job.dates.length, travel, reasons, misses });
+    out.push({ cleaner_id: c.id, name: c.name, color: c.color, status: c.status, preferred: isPreferred, score: Math.round(Math.min(score / 160, 1) * 100) / 100, fits, total: job.dates.length, travel, reasons, misses });
   }
-  return out.sort((a, b) => b.score - a.score).slice(0, limit);
+  // A cleaner the client asked for by name comes first; everyone else follows by score.
+  return out.sort((a, b) => Number(b.preferred) - Number(a.preferred) || b.score - a.score).slice(0, limit);
 }
 
 // The client's main cleaner: who did most of their last 6 assigned visits.

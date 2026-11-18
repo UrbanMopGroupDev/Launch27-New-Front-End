@@ -1068,7 +1068,8 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       await schedule.resolveChange(Number(req.params.id), req.body?.resolution, req.user.id);
       res.status(204).end();
     }));
-    r.post('/schedule/find-slots', sched(async (req, res) => res.json(await schedule.findSlots(req.body || {}))));
+    r.post('/schedule/find-slots', sched(async (req, res) => res.json(await schedule.findSlots({ ...(req.body || {}), bearer: req.bearer }))));
+    r.get('/schedule/client/:id/tags', sched(async (req, res) => res.json(await schedule.clientTags(Number(req.params.id), req.bearer))));
     r.post('/schedule/assign', sched(async (req, res) => {
       const out = await schedule.assign(req.body || {}, req.bearer, req.user.email);
       await svc.audit(db, req.user.id, 'schedule.assign', 'cleaner', req.body?.cleaner_id, { visits: (req.body?.visit_keys || []).length });

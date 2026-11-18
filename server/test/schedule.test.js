@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseCleaner, customerPrefs, cycleWeek, cycleWeeks, frequencyKind, fitsDay, rankCleaners, workingWindow, openGaps, mainCleaner, seriesDates } from '../src/schedule/rules.js';
-import { createSchedule } from '../src/schedule/service.js';
+import { parseCleaner, customerPrefs, cycleWeek, cycleWeeks, frequencyKind, fitsDay, rankCleaners, workingWindow, openGaps, mainCleaner, seriesDates, nameMatches, matchCleaners, resolvePrefs } from '../src/schedule/rules.js';
+import { createSchedule, placeFromPostal } from '../src/schedule/service.js';
 import { createWriteLog } from '../src/writes.js';
 import { openDb } from '../src/db/index.js';
 import { loadConfig } from '../src/config.js';
@@ -91,6 +91,34 @@ describe('schedule: fitting and ranking', () => {
     const female = rankCleaners({ ...job, prefs: customerPrefs([{ name: 'female cleaner only' }]), mainCleanerId: null }, cleaners, ctx);
     assert.ok(female.every((r) => r.cleaner_id !== 1));
   });
+  test('tags are tied to cleaner records: spelling variants, last initials, names nobody has', () => {
+    assert.ok(nameMatches('Sylvia Moreno', 'silvia') && nameMatches('Silvia M', 'Sylvia') && nameMatches('Zoé Roy', 'zoe'));
+    assert.ok(!nameMatches('Anna Lee', 'Ann') && !nameMatches('Maria P', 'Marie-Eve'), 'short names and different names stay exact');
+    const roster = [{ id: 1, name: 'Sylvia Moreno' }, { id: 2, name: 'Silvia Ruiz' }, { id: 3, name: 'Caysi T' }];
+    assert.deepEqual(matchCleaners('silvia', roster).map((c) => c.id), [1, 2], 'no initial: every Silvia');
+    assert.deepEqual(matchCleaners('silvia r', roster).map((c) => c.id), [2]);
+    const p = resolvePrefs(customerPrefs(['Do not assign: Silvia R', 'Prefers Caysi', "Don't send Zelda", 'Prefers Sylvia']), roster);
+    assert.deepEqual(p.avoidIds, [2]);
+    assert.deepEqual(p.preferIds, [3, 1], 'a cleaner who is also "do not assign" is never preferred');
+    assert.deepEqual(p.matches.find((m) => m.name === 'zelda').cleaners, []);
+  });
+  test('a cleaner the client asked for comes before the usual cleaner; do-not-assign is never offered', () => {
+    const mk = (id, title) => ({ ...parseCleaner({ id, title, latitude: 45.40, longitude: -75.70 }), availability: rows });
+    const cleaners = [mk(1, '(1)(F)Sylvia Moreno'), mk(2, '(1)(F)Caysi T'), mk(3, '(1)(F)Usual One')];
+    const ctx = { today: '2026-11-02', windowFor: (c, d) => workingWindow(c.availability, d), busyFor: () => [], weekLoad: () => ({ booked: 10, capacity: 40 }) };
+    const prefs = resolvePrefs(customerPrefs(['do not assign Silvia', 'Prefers Caysi']), cleaners);
+    const ranked = rankCleaners({ dates: ['2026-11-03'], start: 600, duration: 180, place: { lat: 45.4, lng: -75.7 }, kind: 'one', prefs, mainCleanerId: 3, history: new Map([[3, 6], [1, 2]]) }, cleaners, ctx);
+    assert.deepEqual(ranked.map((r) => [r.cleaner_id, r.preferred]), [[2, true], [3, false]]);
+  });
+  test('postal code -> centre of its postal area; clear errors', () => {
+    const p = placeFromPostal('k1c2b3');
+    assert.ok(p.approximate && p.postal === 'K1C 2B3' && /K1C/.test(p.label) && Math.abs(p.lat - 45.4) < 0.3);
+    assert.equal(placeFromPostal('12 Main St, Ottawa ON K2P 1L4').postal, 'K2P 1L4');
+    assert.equal(placeFromPostal(' K1C ').postal, 'K1C');
+    assert.throws(() => placeFromPostal('12 Main St, Ottawa'), (e) => e.status === 400 && /postal code/.test(e.message));
+    assert.throws(() => placeFromPostal('M5V 2T6'), (e) => e.status === 400 && /M5V/.test(e.message));
+    assert.throws(() => placeFromPostal('K1Z9'), (e) => e.status === 400);
+  });
   test('main cleaner = most of the last 6 visits', () => {
     const v = (date, id) => ({ date, team_ids: [id] });
     assert.deepEqual(mainCleaner([v('2026-01-01', 9), v('2026-09-01', 1), v('2026-09-15', 2), v('2026-09-29', 1), v('2026-10-13', 1)]), { id: 1, visits: 3, of: 5 });
@@ -123,6 +151,7 @@ function world() {
     B(3, '2026-11-05', 9, 'One time', 2),
   ];
   const posts = [];
+  const custTags = {}; // customer id -> Launch27 tags
   const fetchImpl = async (url, init = {}) => {
     const u = new URL(url);
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'content-type': 'application/json' } });
@@ -140,6 +169,8 @@ function world() {
       }
       return json({});
     }
+    const tg = u.pathname.match(/^\/v1\/staff\/customers\/(\d+)\/tags$/);
+    if (tg) return json(custTags[tg[1]] || []);
     const one = u.pathname.match(/^\/v1\/staff\/bookings\/(\d+)$/);
     if (one) {
       const b = bookings.find((x) => x.id === Number(one[1]));
@@ -154,7 +185,7 @@ function world() {
     }
     return json({ error: 'nf' }, 404);
   };
-  return { teams, avail, dated, bookings, posts, fetchImpl };
+  return { teams, avail, dated, bookings, posts, custTags, fetchImpl };
 }
 
 describe('schedule: sync, plan, assign, changes', () => {
@@ -216,6 +247,27 @@ describe('schedule: sync, plan, assign, changes', () => {
     const fresh = await s.findSlots({ duration: 180, kind: 'one', cleaner: 'same' });
     assert.equal(fresh.no_usual, true);
     assert.equal(fresh.cleaner, 'any');
+    // Not a customer yet: a postal code places them. A lookup only: nothing is written anywhere.
+    const before = w.posts.length;
+    const prospect = await s.findSlots({ duration: 180, kind: 'one', postal: '99 Any St, Ottawa K1C 2B3' });
+    assert.ok(prospect.place.approximate && prospect.place_known && prospect.customer === null && prospect.slots.length > 0);
+    assert.ok(prospect.slots.every((x) => x.reasons.some((r) => /min away/.test(r.text))), 'distance is used');
+    assert.equal(w.posts.length, before);
+    await assert.rejects(s.findSlots({ duration: 180, kind: 'one', postal: 'nowhere' }), (e) => e.status === 400);
+    // Launch27 tags, read live with the viewer's login: "do not assign" hides the cleaner (even the
+    // usual one), "prefers" comes first and is marked.
+    w.custTags[1] = [{ id: 1, name: 'Do not assign: Ann' }, { id: 2, name: 'Prefers Bea' }, { id: 3, name: 'Prefers Zelda' }];
+    const tagged = await s.findSlots({ customer_id: 1, duration: 180, kind: 'bi', bearer: 'b' });
+    assert.ok(tagged.slots.length > 0 && tagged.slots.every((x) => x.cleaner.name === 'Bea Backup' && x.preferred));
+    assert.deepEqual(tagged.client_tags.avoid, [{ name: 'Ann', cleaners: [{ id: 1, name: 'Ann Usual' }] }]);
+    assert.deepEqual(tagged.client_tags.prefers.find((r) => r.name === 'Zelda').cleaners, [], 'a name nobody has is reported, not ignored');
+    assert.equal((await s.findSlots({ customer_id: 1, duration: 180, kind: 'bi', cleaner: 'same', bearer: 'b' })).slots.length, 0, 'usual cleaner only, but she is do-not-assign');
+    // A client with no visits in the planner's copy still has their tags applied.
+    w.custTags[77] = [{ id: 4, name: 'DO NOT ASSIGN Bea' }];
+    const old = await s.findSlots({ customer_id: 77, duration: 180, kind: 'one', bearer: 'b' });
+    assert.ok(old.slots.length > 0 && old.slots.every((x) => x.cleaner.name !== 'Bea Backup'));
+    assert.deepEqual((await s.clientTags(77, 'b')).avoid_ids, [2]);
+    delete w.custTags[1];
     // Moving an existing booking: its own time no longer blocks the search.
     const own = w.bookings.find((b) => b.team_ids?.includes?.(1) || (b.teams || []).some((t) => t.id === 1));
     assert.ok(own, "Ann has a booking to move");

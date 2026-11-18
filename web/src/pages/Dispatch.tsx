@@ -561,14 +561,16 @@ function BookingDrawer({
       {(b.staff_notes || b.customer_notes) && (
         <div className="drawer-notes small">
           {b.staff_notes && (
-            <p>
-              <strong>Staff notes:</strong> {b.staff_notes}
-            </p>
+            <div>
+              <div className="eyebrow">Staff notes</div>
+              <p className="pre">{b.staff_notes}</p>
+            </div>
           )}
           {b.customer_notes && (
-            <p>
-              <strong>Customer notes:</strong> {b.customer_notes}
-            </p>
+            <div>
+              <div className="eyebrow">Customer notes</div>
+              <p className="pre">{b.customer_notes}</p>
+            </div>
           )}
         </div>
       )}

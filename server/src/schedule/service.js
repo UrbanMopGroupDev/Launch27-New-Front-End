@@ -1,12 +1,27 @@
 // Scheduling planner: sync from Launch27 (read-only), detect changes, answer the screens.
 // Writes (assigning a cleaner) go to Launch27 with the signed-in user's own login.
+import { readFileSync } from 'node:fs';
 import { SAMPLE_VERSION } from '../mock/launch27.js';
 import { clientId, clientLabel, harmonizePartners, noteHints, partnerOf } from '../commercial/partners.js';
 import {
   FREQ_LABEL, STATUS_LABEL, addDays, areaOf, customerPrefs, cycleWeek, cycleWeeks, daysBetween, fitsDay, frequencyKind,
-  isPrepaid, km, nameMatches, localDate, localMinutes, mainCleaner, mondayOf, openGaps, parseCleaner, rankCleaners, seriesDates,
+  isPrepaid, km, clientAvoids, resolvePrefs, localDate, localMinutes, mainCleaner, mondayOf, openGaps, parseCleaner, rankCleaners, seriesDates,
   weekday, weeklyHours, workingWindow, toMinutes as toMinutesHM, travelMinutes,
 } from './rules.js';
+
+// Centre of each "K" postal area (© GeoNames, CC BY 4.0): places someone who isn't a customer
+// yet from their postal code. The same table the Commercial plan uses.
+const FSA = JSON.parse(readFileSync(new URL('../commercial/data/postal-area-centres.json', import.meta.url), 'utf8'));
+const bad = (message) => Object.assign(new Error(message), { status: 400 });
+// A postal code, alone or inside a typed address -> the centre of its postal area.
+export function placeFromPostal(text) {
+  const t = String(text || '').toUpperCase();
+  const full = t.match(/\b([A-Z]\d[A-Z])[ -]?(\d[A-Z]\d)\b/);
+  const area = full ? full[1] : (t.trim().match(/^[A-Z]\d[A-Z]$/) || [])[0];
+  if (!area) throw bad('Enter a postal code like K1C 2B3 (the first three characters are enough). An address needs its postal code.');
+  if (!FSA[area]) throw bad(`We can't place postal area ${area} on the map. Check the code; only "K" areas (Ottawa and eastern Ontario) are covered.`);
+  return { lat: FSA[area][0], lng: FSA[area][1], approximate: true, postal: full ? `${full[1]} ${full[2]}` : area, label: `centre of postal area ${area} (${FSA[area][2]})` };
+}
 
 const PAST_DAYS = 91;
 const AHEAD_DAYS = 56;
@@ -197,7 +212,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       c.main = mainCleaner(c.past.filter((v) => v.kind !== 'one')) || mainCleaner(c.past) || (recurring ? mainCleaner(c.future) : null);
       c.history = new Map();
       for (const v of c.past) for (const id of v.team_ids) c.history.set(id, (c.history.get(id) || 0) + 1);
-      c.prefs = customerPrefs(c.tags || []);
+      c.prefs = resolvePrefs(customerPrefs(c.tags || []), cleaners);
     }
     return { ...data, byId, future, past, busy, customers };
   }
@@ -274,7 +289,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       if (cust?.main && v.kind !== 'one' && !v.team_ids.includes(cust.main.id)) {
         // Only when the usual cleaner could take it back: that is the one dispatch can act on.
         const main = s.byId.get(cust.main.id);
-        const allowed = main && !cust.prefs.avoid.some((n) => nameMatches(main.name, n)) && !(cust.prefs.femaleOnly && main.gender !== 'F');
+        const allowed = main && !clientAvoids(cust.prefs, main) && !(cust.prefs.femaleOnly && main.gender !== 'F');
         const free = allowed && main?.assignable && fitsDay({ window: windowFor(main, v.date), busy: busyFor(s)(main.id, v.date), start: v.start, duration: v.duration, place: v, transit: main.rules.transit, ignoreKeys: new Set([v.key]) }).ok;
         if (main && free) out.push({ ...base, cleaner_id: cust.main.id, kind: 'different_cleaner', key: `different_cleaner:${v.key}:${v.team_ids.join('-')}`, title: `${main.name} is free to take back ${v.customer} · ${when}`, detail: { main: main.name, booked: v.team_ids.map((id) => s.byId.get(id)?.name || 'Unknown') } });
       }
@@ -595,6 +610,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     const options = [];
     // Unassigned visits that day (or series that include that day) which fit.
     for (const v of s.future.filter((x) => !x.team_ids.length && x.date === date)) {
+      if (clientAvoids(s.customers.get(v.customer_id)?.prefs, c)) continue; // client asked never to have them
       const startAt = Math.max(gapStart, Math.min(v.start, gapEnd - v.duration));
       if (startAt + v.duration > gapEnd) continue;
       const f = fitsDay({ window: windowFor(c, date), busy: busyFor(s)(c.id, date), start: v.start, duration: v.duration, place: v, transit: c.rules.transit });
@@ -685,7 +701,8 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       if (!cu?.main || v.team_ids.includes(cu.main.id)) continue;
       const main = s.byId.get(cu.main.id);
       if (!main) continue;
-      const f = main.assignable ? fitsDay({ window: windowFor(main, v.date), busy: busyFor(s)(main.id, v.date), start: v.start, duration: v.duration, place: v, transit: main.rules.transit, ignoreKeys: new Set([v.key]) }) : { ok: false, reason: STATUS_LABEL[main.status].toLowerCase() };
+      const f = clientAvoids(cu.prefs, main) ? { ok: false, reason: 'the client has asked not to have them' }
+        : main.assignable ? fitsDay({ window: windowFor(main, v.date), busy: busyFor(s)(main.id, v.date), start: v.start, duration: v.duration, place: v, transit: main.rules.transit, ignoreKeys: new Set([v.key]) }) : { ok: false, reason: STATUS_LABEL[main.status].toLowerCase() };
       upcoming.push({ visit: visitOut(s, v), main: { id: main.id, name: main.name }, history: cu.main.visits, main_free: f.ok, why: f.ok ? 'Usual cleaner is free' : `Usual cleaner: ${f.reason}` });
     }
     const noMain = [...s.customers.values()].filter((cu) => cu.recurring && cu.future.some(inLoc) && !cu.main).length;
@@ -715,6 +732,29 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       },
       notes: (cu.tags || []).filter((t) => !PREF_TAG.test(t)).slice(0, 6),
     };
+  }
+
+  // A client's cleaner tags for the screens: every tag as written, and which cleaner each
+  // "prefers" / "do not assign" was read as. With a Launch27 login the tags are read live, so a
+  // client with no recent visits (not in the planner's copy) is covered too.
+  async function prefsFor(s, customerId, bearer) {
+    const id = Number(customerId);
+    const cu = s.customers.get(id) || null;
+    let live = null;
+    if (bearer && id > 0) live = await get(bearer, `/v1/staff/customers/${id}/tags`).then((rows) => (Array.isArray(rows) ? rows.map((t) => String(t?.name || '').trim()).filter(Boolean) : null)).catch(() => null);
+    if (!live) return { prefs: cu?.prefs || null, tags: cu?.tags || [] };
+    const seen = new Set(live.map((t) => t.toLowerCase()));
+    const tags = [...live, ...(cu?.tags || []).filter((t) => !seen.has(String(t).toLowerCase()))];
+    return { prefs: resolvePrefs(customerPrefs(tags), s.cleaners), tags };
+  }
+  const tagsOut = ({ prefs, tags }) => {
+    if (!prefs) return null;
+    const rule = (r) => prefs.matches.filter((m) => m.rule === r).map((m) => ({ name: titleCase(m.name), cleaners: m.cleaners }));
+    return { tags, prefers: rule('prefers'), avoid: rule('avoid'), prefer_ids: prefs.preferIds, avoid_ids: prefs.avoidIds, female_only: prefs.femaleOnly };
+  };
+  async function clientTags(customerId, bearer = null) {
+    const s = await need();
+    return tagsOut(await prefsFor(s, customerId, bearer)) || { tags: [], prefers: [], avoid: [], prefer_ids: [], avoid_ids: [], female_only: false };
   }
 
   async function changes() {
@@ -769,11 +809,14 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
   // reschedules). With 'same' and nothing free, any_count says how many slots other cleaners have.
   // locations: only cleaners working in these Launch27 locations (one brand); null = all.
   // held: slots reserved but not booked yet [{ cleaner_id, date, start, end }]; they count as busy.
-  async function findSlots({ customer_id, lat, lng, duration = 180, kind = 'one', from, days = 14, weekdays = null, earliest = 0, latest = 24 * 60, limit = 12, cleaner = 'any', booking_id = null, locations = null, held = [] } = {}) {
+  async function findSlots({ customer_id, lat, lng, duration = 180, kind = 'one', from, days = 14, weekdays = null, earliest = 0, latest = 24 * 60, limit = 12, cleaner = 'any', booking_id = null, locations = null, held = [], postal = null, bearer = null } = {}) {
     const s = await need();
     const ctx = ctxFor(s);
     const cu = customer_id ? s.customers.get(Number(customer_id)) : null;
-    let place = { lat: lat == null ? null : Number(lat), lng: lng == null ? null : Number(lng) };
+    // Not a customer yet: a postal code places them (nothing is saved, nobody is created).
+    const approx = postal && String(postal).trim() ? placeFromPostal(postal) : null;
+    const wants = customer_id ? await prefsFor(s, customer_id, bearer) : { prefs: null, tags: [] };
+    let place = approx ? { lat: approx.lat, lng: approx.lng } : { lat: lat == null ? null : Number(lat), lng: lng == null ? null : Number(lng) };
     if (place.lat == null && cu) {
       const any = [...cu.future, ...cu.past].find((v) => v.lat != null);
       if (any) place = { lat: any.lat, lng: any.lng };
@@ -814,13 +857,13 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
         }
         if (picked == null) continue;
         const dates = seriesDates(k, d, horizon);
-        const job = { dates, start: picked, duration: dur, place, kind: k, prefs: cu?.prefs, mainCleanerId: cu?.main?.id, history: cu?.history, firstDate: d };
+        const job = { dates, start: picked, duration: dur, place, kind: k, prefs: wants.prefs, mainCleanerId: cu?.main?.id, history: cu?.history, firstDate: d };
         const [rank] = rankCleaners(job, [c], rankCtx, { limit: 1, ignoreKeys: ignore });
         if (!rank || rank.fits < dates.length) continue; // recurring: must be free every time
-        found.push({ date: d, day: DAYNAME[weekday(d)], start: picked, time: clock(picked), end: clock(picked + dur), cycle: cycleWeek(d), weeks: cycleWeeks(k, d), repeats: dates.length, cleaner: { id: c.id, name: c.name, color: c.color, is_new: c.isNew }, score: rank.score - i * 0.004, reasons: rank.reasons, travel: rank.travel });
+        found.push({ date: d, day: DAYNAME[weekday(d)], start: picked, time: clock(picked), end: clock(picked + dur), cycle: cycleWeek(d), weeks: cycleWeeks(k, d), repeats: dates.length, cleaner: { id: c.id, name: c.name, color: c.color, is_new: c.isNew }, preferred: rank.preferred, score: rank.score - i * 0.004, reasons: rank.reasons, travel: rank.travel });
       }
     }
-    found.sort((a, b) => b.score - a.score);
+    found.sort((a, b) => Number(b.preferred) - Number(a.preferred) || b.score - a.score);
     const seen = new Set();
     const slots = [];
     for (const f of found) {
@@ -832,11 +875,13 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     }
     let anyCount = null;
     if (sameApplies && !slots.length) {
-      const other = await findSlots({ customer_id, lat, lng, duration, kind, from, days, weekdays, earliest, latest, limit, cleaner: 'any', booking_id, locations, held });
+      const other = await findSlots({ customer_id, lat, lng, duration, kind, from, days, weekdays, earliest, latest, limit, cleaner: 'any', booking_id, locations, held, postal, bearer });
       anyCount = other.slots.length;
     }
     return {
       place_known: place.lat != null,
+      place: approx ? { approximate: true, postal: approx.postal, label: approx.label } : null,
+      client_tags: tagsOut(wants),
       kind: k,
       frequency: FREQ_LABEL[k],
       duration: dur,
@@ -960,7 +1005,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       return { ...visitOut(s, v), end: clock(v.end), services: v.services, drive_before: drive, issues, note: cu?.prefs.consistent ? 'wants the same cleaner every time' : null };
     });
     // Clients who asked never to have them; usual hours as plain text.
-    const avoidedBy = [...s.customers.values()].filter((cu) => cu.prefs.avoid.some((n) => nameMatches(c.name, n))).length;
+    const avoidedBy = [...s.customers.values()].filter((cu) => clientAvoids(cu.prefs, c)).length;
     const rows = c.availability || [];
     const groups = [];
     for (const wd of [1, 2, 3, 4, 5, 6, 0]) {
@@ -1031,6 +1076,6 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     };
   }
 
-  return { utilizationSource, reset, dataChanged, cleanerProfile, sync, start, soon, maybeRun, status, overview, plan, gapOptions, unassigned, continuity, changes, resolveChange, findSlots, checkSlot, assign, markUnavailable, cleaners, isRunning: () => !!running, _load: load, _window: windowFor };
+  return { clientTags, utilizationSource, reset, dataChanged, cleanerProfile, sync, start, soon, maybeRun, status, overview, plan, gapOptions, unassigned, continuity, changes, resolveChange, findSlots, checkSlot, assign, markUnavailable, cleaners, isRunning: () => !!running, _load: load, _window: windowFor };
 }
 

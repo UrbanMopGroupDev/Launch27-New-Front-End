@@ -5,7 +5,7 @@ import { useBrand } from '../brands/useBrand';
 import { BrandPill, brandLabel } from '../brands/ui';
 import { segmentsApi } from '../segments/api';
 import { scheduleApi, type Candidate, type Change, type ChangeKind, type Overview, type Series, type Slot, type Visit } from '../schedule/api';
-import { FreqPill, Reasons, ScheduleStatus, niceDate, CleanerDot } from '../schedule/ui';
+import { ClientTagsPanel, FreqPill, Reasons, ScheduleStatus, niceDate, CleanerDot } from '../schedule/ui';
 
 type Tab = 'changes' | 'capacity' | 'continuity' | 'find';
 const TABS: [Tab, string][] = [['changes', 'Changes to handle'], ['capacity', 'Capacity'], ['continuity', 'Same cleaner'], ['find', 'Find a slot']];
@@ -535,6 +535,8 @@ export function FindSlotTab({ presetCustomer, reschedule }: { presetCustomer?: {
   const navigate = useNavigate();
   const [customer, setCustomer] = useState<{ id: number; name: string } | null>(presetCustomer || null);
   const [q, setQ] = useState('');
+  // Someone who isn't a customer yet: placed by postal code, nothing is saved.
+  const [postal, setPostal] = useState('');
   const [hours, setHours] = useState(reschedule?.hours || 3);
   // Rescheduling starts with "just this visit" (one-time); pick the rhythm to move this and future visits.
   const [kind, setKind] = useState<Visit['kind']>(reschedule ? 'one' : 'bi');
@@ -544,7 +546,7 @@ export function FindSlotTab({ presetCustomer, reschedule }: { presetCustomer?: {
   // Asked when a client is picked (e.g. rescheduling): their usual cleaner only, or anyone.
   const [who, setWho] = useState<'same' | 'any' | null>(null);
   const search = useQuery({ queryKey: ['schedule', 'customer-search', q], queryFn: () => segmentsApi.customers({ q, limit: 6 }), enabled: q.trim().length >= 2 && !customer });
-  const slots = useMutation({ mutationFn: (override?: 'same' | 'any') => scheduleApi.findSlots({ customer_id: customer?.id, duration: Math.round(hours * 60), kind, from: from || undefined, weekdays: days.length ? days : undefined, earliest: time === 'pm' ? 12 * 60 : 0, latest: time === 'am' ? 12 * 60 + 30 : 24 * 60, cleaner: (override ?? who) === 'same' ? 'same' : 'any', booking_id: reschedule?.bookingId }) });
+  const slots = useMutation({ mutationFn: (override?: 'same' | 'any') => scheduleApi.findSlots({ customer_id: customer?.id, postal: !customer && postal.trim() ? postal.trim() : undefined, duration: Math.round(hours * 60), kind, from: from || undefined, weekdays: days.length ? days : undefined, earliest: time === 'pm' ? 12 * 60 : 0, latest: time === 'am' ? 12 * 60 + 30 : 24 * 60, cleaner: (override ?? who) === 'same' ? 'same' : 'any', booking_id: reschedule?.bookingId }) });
   const needWho = !!customer && !who;
   const anyInstead = () => { setWho('any'); slots.mutate('any'); };
   const moveTo = (s: Slot) => {
@@ -576,6 +578,12 @@ export function FindSlotTab({ presetCustomer, reschedule }: { presetCustomer?: {
             </>
           )}
         </label>
+        {!customer && !reschedule && (
+          <label>Not a client yet? Their postal code
+            <input value={postal} onChange={(e) => setPostal(e.target.value)} placeholder="K1C 2B3, or an address with its postal code" maxLength={120} />
+            <span className="muted small">Uses the centre of the postal area for distance. Nothing is saved and no customer is created.</span>
+          </label>
+        )}
         <div className="sch-find-grid">
           <label>How often
             <select value={kind} onChange={(e) => setKind(e.target.value as Visit['kind'])}>
@@ -600,11 +608,13 @@ export function FindSlotTab({ presetCustomer, reschedule }: { presetCustomer?: {
         )}
         <button disabled={slots.isPending || needWho} onClick={() => slots.mutate(undefined)}>{slots.isPending ? 'Looking…' : 'Find slots'}</button>
         {needWho && <p className="muted small">Ask the client whether they want their usual cleaner before searching.</p>}
-        {!customer && <p className="muted small">Without a client, distance can't be used. Pick the client for the best match.</p>}
+        {!customer && !postal.trim() && <p className="muted small">Without a client or a postal code, distance can't be used.</p>}
       </section>
       {slots.isError && <div className="error">{(slots.error as Error).message}</div>}
       {slots.data && (
         <section className="sch-list">
+          {slots.data.place && <p className="small sch-approx"><span className="sch-reason t-neutral">Approximate location</span> Using the {slots.data.place.label}. Drive times are estimates from there, not from the exact address.</p>}
+          {slots.data.client_tags && <ClientTagsPanel tags={slots.data.client_tags} name={slots.data.customer?.name || customer?.name} />}
           <p className="muted small">
             {slots.data.cleaner === 'same' ? (
               slots.data.slots.length
@@ -629,7 +639,7 @@ export function FindSlotTab({ presetCustomer, reschedule }: { presetCustomer?: {
                 <b>{niceDate(s.date)} · {s.time}–{s.end}</b>
                 <span className="muted small">{s.repeats > 1 ? `Repeats ${s.repeats} times in 8 weeks · weeks ${s.weeks.split('').join('/')}` : 'One visit'}</span>
               </div>
-              <div className="sch-who"><CleanerDot color={s.cleaner.color} /><Link to={`/schedule/cleaner/${s.cleaner.id}`} className="seg-name">{s.cleaner.name}</Link>{s.cleaner.is_new && <span className="seg-trait">New hire</span>}</div>
+              <div className="sch-who"><CleanerDot color={s.cleaner.color} /><Link to={`/schedule/cleaner/${s.cleaner.id}`} className="seg-name">{s.cleaner.name}</Link>{s.preferred && <span className="chip ok">Preferred</span>}{s.cleaner.is_new && <span className="seg-trait">New hire</span>}</div>
               <Reasons reasons={s.reasons} />
               {reschedule ? <button onClick={() => moveTo(s)}>Move to this slot</button> : <button onClick={() => book(s)}>Book this slot</button>}
             </article>
