@@ -11,7 +11,7 @@ import { createVault } from '../src/kustomer-migration/vault.js';
 import { createKustomerSource } from '../src/kustomer-migration/source.js';
 import { createKustomerExport, migrationDb } from '../src/kustomer-migration/export.js';
 import { buildDirectory, createKustomerDryRun, matchCustomer, readOnlyDb } from '../src/kustomer-migration/dryrun.js';
-import { createKustomerImporter, KUSTOMER_IMPORT_ENABLED } from '../src/kustomer-migration/import.js';
+import { createKustomerImporter, createKustomerImportJob, KUSTOMER_IMPORT_ENABLED } from '../src/kustomer-migration/import.js';
 import { createKustomerMigration } from '../src/kustomer-migration/service.js';
 import { createSyntheticKustomer } from '../src/kustomer-migration/synthetic.js';
 import * as K from '../src/kustomer-migration/normalize.js';
@@ -351,15 +351,15 @@ describe('resuming', () => {
   });
 });
 
-describe('the prepared import (not enabled)', () => {
-  test('is off: no route, and the importer refuses without an approved code change', async () => {
-    assert.equal(KUSTOMER_IMPORT_ENABLED, false);
-    const imp = createKustomerImporter({ db: null, vault });
+describe('the import', () => {
+  test('is switched on (approved); switched off, the importer refuses', async () => {
+    assert.equal(KUSTOMER_IMPORT_ENABLED, true);
+    const imp = createKustomerImporter({ db: null, vault, enabled: false });
     await assert.rejects(imp.importBatch(1, []), /not enabled/);
     await assert.rejects(imp.rollback(1), /not enabled/);
   });
 
-  test('when enabled (test database only): closed, idempotent, no side effects, rollback and reconcile', async () => {
+  test('closed, idempotent, no side effects, rollback and reconcile', async () => {
     const db = await openDb();
     await seed(db);
     const fixtures = await liveFixtures(db);
@@ -441,15 +441,17 @@ describe('admin page API', () => {
     return { status: res.status, body: json, text, headers: res.headers };
   };
 
-  test('admins test, export, dry-run and download a sanitized report; others cannot', async () => {
+  test('everyone on the team can test, export, dry-run and download a sanitized report', async () => {
     const admin = await login('boss@example.com');
     await call(admin, '/me'); // the first person in becomes an admin
     const agent = await login('agent@example.com');
-    assert.equal((await call(agent, '/admin/kustomer')).status, 403);
-    assert.equal((await call(agent, '/admin/kustomer/exports', {})).status, 403);
+    assert.equal((await call(agent, '/me')).body.role, 'agent');
+    assert.equal((await call(agent, '/admin/kustomer')).status, 200); // not admins only
+    assert.equal((await fetch(`${base}/api/admin/kustomer`)).status, 401); // but signed in
     const o = await call(admin, '/admin/kustomer');
     assert.equal(o.body.available, true);
-    assert.equal(o.body.import_enabled, false);
+    assert.equal(o.body.import_enabled, true);
+    assert.deepEqual(o.body.imports, []);
     assert.equal((await call(admin, '/admin/kustomer/test', {})).body.ok, true);
     assert.equal((await call(admin, '/admin/kustomer/dry-runs', {})).status, 409); // nothing exported yet
     const started = await call(admin, '/admin/kustomer/exports', { kind: 'full' });
@@ -466,7 +468,85 @@ describe('admin page API', () => {
     assert.match(report.headers.get('content-type'), /csv/);
     assert.equal(report.text.trim().split('\n').length, 12); // header + 11 conversations
     for (const secret of ['Alice', 'alice@example.com', 'windows', '613']) assert.ok(!report.text.includes(secret), secret);
-    assert.equal((await call(admin, '/admin/kustomer/purge', {})).status, 200);
+    assert.equal((await call(agent, '/admin/kustomer/report.csv')).status, 200);
+    assert.equal((await call(agent, '/admin/kustomer/purge', {})).status, 200);
     assert.deepEqual((await call(admin, '/admin/kustomer')).body.stored, {});
+  });
+
+  test('an agent imports the plan in batches, with progress, stop/resume, a check and rollback', async () => {
+    const agent = await login('agent@example.com');
+    assert.equal((await call(agent, '/admin/kustomer/imports', {})).status, 409); // nothing exported or planned
+    const ex = await call(agent, '/admin/kustomer/exports', { kind: 'full' });
+    assert.equal(ex.status, 201);
+    await migration._export.wait(ex.body.id);
+    assert.equal((await call(agent, '/admin/kustomer/imports', {})).status, 409); // no dry run yet
+    assert.equal((await call(agent, '/admin/kustomer/dry-runs', {})).status, 201);
+    await migration._dryRun.wait();
+    const planned = (await call(agent, '/admin/kustomer')).body.dry_run.results.new_conversations;
+    assert.ok(planned > 0);
+    const notificationsBefore = (await db.query('SELECT count(*)::int AS n FROM notifications')).rows[0].n;
+    const liveBefore = (await db.query("SELECT id, status, updated_at FROM conversations WHERE source IS NULL ORDER BY id")).rows;
+
+    const started = await call(agent, '/admin/kustomer/imports', {});
+    assert.equal(started.status, 201);
+    assert.equal(started.body.planned, planned);
+    await migration._imports.wait();
+    let run = (await call(agent, '/admin/kustomer')).body.imports[0];
+    assert.equal(run.status, 'completed');
+    assert.equal(run.processed, planned);
+    assert.equal(run.conversations, planned);
+    assert.ok(run.batches >= 1);
+    assert.equal(run.reconcile.planned, planned);
+    assert.equal(run.reconcile.imported, planned);
+    assert.equal(run.reconcile.missing, 0);
+    assert.equal(run.reconcile.different, 0);
+    const imported = (await db.query("SELECT status, owner_id, queue_id, import_run_id FROM conversations WHERE source = 'kustomer'")).rows;
+    assert.equal(imported.length, planned);
+    assert.ok(imported.every((c) => c.status === 'done' && c.owner_id === null && c.queue_id === null && Number(c.import_run_id) === run.id));
+    // Nothing live changed and no one was notified; nothing was sent.
+    assert.deepEqual((await db.query("SELECT id, status, updated_at FROM conversations WHERE source IS NULL ORDER BY id")).rows, liveBefore);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM notifications')).rows[0].n, notificationsBefore);
+    assert.equal((await db.query("SELECT count(*)::int AS n FROM messages WHERE external_id LIKE 'kustomer:%' AND delivery_state <> 'historical' AND kind = 'message'")).rows[0].n, 0);
+
+    // Importing the same plan again adds nothing.
+    const again = await call(agent, '/admin/kustomer/imports', {});
+    await migration._imports.wait();
+    const second = (await call(agent, '/admin/kustomer')).body.imports[0];
+    assert.equal(second.id, again.body.id);
+    assert.equal(second.conversations, 0);
+    assert.equal(second.skipped, planned);
+    assert.equal((await db.query("SELECT count(*)::int AS n FROM conversations WHERE source = 'kustomer'")).rows[0].n, planned);
+
+    // Roll back the first run: its conversations, messages and notes go.
+    assert.equal((await call(agent, `/admin/kustomer/imports/${run.id}/resume`, {})).status, 409); // only stopped or failed runs resume
+    const rb = await call(agent, `/admin/kustomer/imports/${run.id}/rollback`, {});
+    assert.equal(rb.status, 200);
+    assert.equal(rb.body.status, 'rolled_back');
+    assert.equal(rb.body.rolled_back_conversations, planned);
+    assert.equal((await db.query("SELECT count(*)::int AS n FROM conversations WHERE source = 'kustomer'")).rows[0].n, 0);
+    assert.equal((await db.query("SELECT count(*)::int AS n FROM messages WHERE external_id LIKE 'kustomer:%'")).rows[0].n, 0);
+    assert.equal((await call(agent, `/admin/kustomer/imports/${run.id}/rollback`, {})).status, 409);
+    assert.deepEqual((await db.query("SELECT id, status, updated_at FROM conversations WHERE source IS NULL ORDER BY id")).rows, liveBefore);
+
+    // Stop after the first batch, a restart, then resume to the same result.
+    const small = migration._imports;
+    const job = createKustomerImportJob({ db, importer: createKustomerImporter({ db, vault: migration._vault }), dedupe: (m) => migration._dryRun.duplicates(m), batch: 1 });
+    const dryRunId = (await call(agent, '/admin/kustomer')).body.dry_run;
+    const r3 = await job.start({ id: null }, dryRunId);
+    await assert.rejects(job.start({ id: null }, dryRunId), /already running/); // one at a time
+    await job.stop(r3.id);
+    await job.wait();
+    let mid = await job.get(r3.id);
+    assert.equal(mid.status, 'stopped');
+    assert.ok(mid.processed >= 1 && mid.processed < planned);
+    await job.resume(r3.id);
+    await job.wait();
+    mid = await job.get(r3.id);
+    assert.equal(mid.status, 'completed');
+    assert.equal(mid.conversations, planned);
+    assert.equal(mid.batches, planned);
+    assert.equal(mid.reconcile.missing, 0);
+    assert.equal((await small.list())[0].id, r3.id);
+    await job.rollback({ id: null }, r3.id);
   });
 });

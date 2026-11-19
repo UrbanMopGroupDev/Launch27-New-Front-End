@@ -394,6 +394,26 @@ export interface KustomerOverview {
   export: KustomerExport | null;
   exports: Pick<KustomerExport, 'id' | 'kind' | 'status' | 'phase' | 'source' | 'created_at' | 'finished_at' | 'last_error'>[];
   dry_run: KustomerDryRun | null;
+  imports: KustomerImport[];
+}
+export interface KustomerImport {
+  id: number;
+  dry_run_id: number;
+  status: 'running' | 'stopped' | 'completed' | 'failed' | 'rolled_back';
+  planned: number;
+  processed: number;
+  batches: number;
+  conversations: number;
+  messages: number;
+  notes: number;
+  skipped: number;
+  reconcile: { planned: number; imported: number; missing: number; different: number; missing_ids: string[]; different_ids: string[] } | null;
+  created_by_name: string | null;
+  created_at: string;
+  finished_at: string | null;
+  rolled_back_at: string | null;
+  rolled_back_conversations: number | null;
+  last_error: string | null;
 }
 export interface KustomerTest { source: string; ok: boolean; checks: { name: string; ok: boolean; status?: number | null; error?: string; hint?: string | null }[]; sample: { customers_on_first_page: number; more_pages: boolean; total_reported: number | null } }
 export interface KustomerScope { source: string; customers_total: number | null; customers_on_first_page: number; more_pages: boolean; oldest_on_first_page: string | null; rate_per_minute: number | null; note: string }
@@ -499,6 +519,8 @@ export const inbox = {
   kustomerDryRun: () => call<KustomerDryRun>('POST', '/admin/kustomer/dry-runs'),
   kustomerMatches: (match: string | null, offset = 0) => call<{ run: KustomerDryRun | null; rows: KustomerMatch[] }>('GET', `/admin/kustomer/matches?limit=100&offset=${offset}${match ? `&match=${match}` : ''}`),
   kustomerConversations: (kid: string) => call<KustomerPlanConversation[]>('GET', `/admin/kustomer/customers/${encodeURIComponent(kid)}/conversations`),
+  kustomerImport: () => call<KustomerImport>('POST', '/admin/kustomer/imports'),
+  kustomerImportAction: (id: number, action: 'stop' | 'resume' | 'rollback') => call<KustomerImport>('POST', `/admin/kustomer/imports/${id}/${action}`),
   kustomerPurge: () => call<{ purged: boolean }>('POST', '/admin/kustomer/purge'),
   smsAction: (provider: string, action: 'check' | 'disconnect' | 'connect') => call<ChannelStatus>('POST', `/admin/sms/${provider}/${action}`),
   counts: () => call<Counts>('GET', '/counts'),

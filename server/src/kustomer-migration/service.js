@@ -1,14 +1,15 @@
-// The Kustomer migration as the admin page sees it: connection test, export scope, the export
-// job, the dry run and its report. Production reads the real Kustomer (KUSTOMER_API_KEY, a key
-// with read-only roles); development and QA read a synthetic Kustomer built from their
-// synthetic Launch27, so real messages never reach them. The live import is not part of this.
+// The Kustomer migration as its page sees it (open to everyone signed in): connection test,
+// export scope, the export job, the dry run and its report, and the import of a dry run's plan
+// with progress, stop/resume and rollback. Production reads the real Kustomer (KUSTOMER_API_KEY,
+// a key with read-only roles); development and QA read a synthetic Kustomer built from their
+// synthetic Launch27, so real messages never reach them.
 import { createKustomerClient } from '../complaints/sources/kustomer.js';
 import { createVault } from './vault.js';
 import { createKustomerSource } from './source.js';
 import { createKustomerExport, MigrationError, migrationDb } from './export.js';
 import { createKustomerDryRun } from './dryrun.js';
 import { createSyntheticKustomer, generateKustomerData } from './synthetic.js';
-import { KUSTOMER_IMPORT_ENABLED } from './import.js';
+import { KUSTOMER_IMPORT_ENABLED, createKustomerImporter, createKustomerImportJob } from './import.js';
 
 const MATCHES = ['confident', 'review', 'ambiguous', 'conflict', 'unmatched', 'cleaner', 'internal'];
 const csv = (v) => {
@@ -45,6 +46,8 @@ export function createKustomerMigration({ db, config, fetchImpl = fetch, l27Dire
 
   const exporter = vault ? createKustomerExport({ db, vault, getSource, log }) : null;
   const dryRun = vault ? createKustomerDryRun({ db, vault, l27Directory, ourDomains, log }) : null;
+  const importer = vault ? createKustomerImporter({ db, vault }) : null;
+  const imports = vault ? createKustomerImportJob({ db, importer, dedupe: (messages) => dryRun.duplicates(messages), log }) : null;
   const need = () => {
     if (!vault) throw new MigrationError(409, `Kustomer migration is not set up: ${vaultError}`);
   };
@@ -58,6 +61,7 @@ export function createKustomerMigration({ db, config, fetchImpl = fetch, l27Dire
     async recover() {
       await exporter?.recover();
       await dryRun?.recover();
+      await imports?.recover();
     },
     async overview() {
       const src = vault ? await getSource().catch(() => null) : null;
@@ -72,6 +76,7 @@ export function createKustomerMigration({ db, config, fetchImpl = fetch, l27Dire
         export: latest ? await exporter.detail(latest.id) : null,
         exports: exporter ? await exporter.list() : [],
         dry_run: run,
+        imports: imports ? await imports.list() : [],
       };
     },
     async testConnection() {
@@ -108,8 +113,29 @@ export function createKustomerMigration({ db, config, fetchImpl = fetch, l27Dire
     async startDryRun(user) {
       need();
       if (await exporter.isActive()) throw new MigrationError(409, 'Wait for the export to finish (or pause it) before a dry run');
+      if (imports.isActive()) throw new MigrationError(409, 'Wait for the import to finish (or stop it) before a dry run');
       if (!(await stored()).customer) throw new MigrationError(409, 'Export from Kustomer first');
       return dryRun.start(user);
+    },
+    /** Import the latest completed dry run's plan into the inbox, as history. */
+    async startImport(user) {
+      need();
+      if (!KUSTOMER_IMPORT_ENABLED) throw new MigrationError(403, 'Importing Kustomer history is switched off');
+      if (await exporter.isActive()) throw new MigrationError(409, 'Wait for the export to finish (or pause it) before importing');
+      if (dryRun.isActive()) throw new MigrationError(409, 'Wait for the dry run to finish before importing');
+      const run = await dryRun.latest();
+      if (!run || run.status !== 'completed') throw new MigrationError(409, 'Run a dry run first: the import follows its plan');
+      return imports.start(user, run);
+    },
+    importAction: async (user, id, action) => {
+      need();
+      if (action === 'stop') return imports.stop(id);
+      if (action === 'resume') {
+        if (await exporter.isActive()) throw new MigrationError(409, 'Wait for the export to finish (or pause it) before importing');
+        return imports.resume(id);
+      }
+      if (action === 'rollback') return imports.rollback(user, id);
+      throw new MigrationError(404, 'Unknown action');
     },
     async matches({ match = null, limit = 100, offset = 0 } = {}) {
       need();
@@ -123,7 +149,7 @@ export function createKustomerMigration({ db, config, fetchImpl = fetch, l27Dire
           [run.id, MATCHES.includes(match) ? match : null, Math.min(500, limit), offset],
         )
       ).rows;
-      // Names for the page (admins only; never in the downloadable report).
+      // Names for the page (signed-in team only; never in the downloadable report).
       const names = new Map();
       const recs = (await store.query("SELECT kustomer_id, data FROM kustomer_records WHERE kind = 'customer' AND kustomer_id = ANY($1::text[])", [rows.map((r) => r.kustomer_customer_id)])).rows;
       for (const r of recs) {
@@ -160,10 +186,11 @@ export function createKustomerMigration({ db, config, fetchImpl = fetch, l27Dire
       const lines = [head.join(',')].concat(rows.map((r) => head.map((h) => csv(r[h] instanceof Date ? r[h].toISOString() : r[h])).join(',')));
       return { filename: `kustomer-dry-run-${run.id}.csv`, csv: `${lines.join('\n')}\n`, summary: run.results };
     },
-    /** Admin: delete everything exported (and the dry runs). Kustomer itself is untouched. */
+    /** Delete everything exported (and the dry runs). Kustomer itself, and anything already imported, are untouched. */
     async purge() {
       need();
       if (await exporter.isActive()) throw new MigrationError(409, 'Cancel the export first');
+      if (imports.isActive() || dryRun.isActive()) throw new MigrationError(409, 'Wait for the import or dry run to finish first');
       await store.query('DELETE FROM kustomer_plan_conversations');
       await store.query('DELETE FROM kustomer_plan_customers');
       await store.query('DELETE FROM kustomer_dry_runs');
@@ -173,6 +200,7 @@ export function createKustomerMigration({ db, config, fetchImpl = fetch, l27Dire
     },
     _export: exporter,
     _dryRun: dryRun,
+    _imports: imports,
     _vault: vault,
   };
 }

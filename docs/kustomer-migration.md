@@ -1,14 +1,16 @@
 # Kustomer historical migration
 
 Moves UrbanMop's communication history out of Kustomer so it can appear in each customer's
-**Story → Conversations**. Built in steps; only the first two are switched on:
+**Story → Conversations**. Built in three steps, all switched on:
 
 1. **Export** (on): copy everything accessible in Kustomer into encrypted storage here.
 2. **Dry run** (on): match each Kustomer customer to a Launch27 customer and report what an
    import would do. Nothing in the live inbox changes.
-3. **Import** (built, **not enabled**): needs approval and a code change.
+3. **Import** (on, approved): import the latest dry run's plan into the inbox as closed,
+   historical conversations, in batches, with progress, stop/resume and rollback.
 
-Admins: Support settings → **Kustomer migration**.
+Everyone on the team (agents, supervisors and admins, signed in, whatever their queue access):
+Support settings → **Kustomer migration**.
 
 ## What runs where
 
@@ -59,8 +61,8 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 | Encrypted storage (gzip + AES-256-GCM) | `server/src/kustomer-migration/vault.js` |
 | Export job (resumable) | `server/src/kustomer-migration/export.js` |
 | Matching and dry run | `server/src/kustomer-migration/dryrun.js` |
-| Import (disabled) | `server/src/kustomer-migration/import.js` |
-| Admin API / page | `server/src/kustomer-migration/api.js`, `web/src/inbox/KustomerMigrationPanel.tsx` |
+| Import (importer + batched job) | `server/src/kustomer-migration/import.js`, `server/migrations/0027_kustomer_import.sql` |
+| API / page | `server/src/kustomer-migration/api.js`, `web/src/inbox/KustomerMigrationPanel.tsx` |
 | Tables | `server/migrations/0026_kustomer_migration.sql` |
 
 **Storage.** Every Kustomer record is kept whole, compressed and encrypted, once per Kustomer id
@@ -98,11 +100,21 @@ live Gmail channel stored, or an SMS has the same number, text and minute as a l
 conversation whose messages are all already there would be skipped. A conversation already
 imported (same Kustomer id) is never imported twice.
 
-## The import (not enabled)
+## The import
 
-`import.js` is complete and tested on a test database but nothing calls it, and it refuses to
-run while `KUSTOMER_IMPORT_ENABLED` is `false`. When enabled (separately approved), for each
-planned conversation it:
+**Import N conversations** (step 4 on the page) imports the latest *completed* dry run's plan:
+every conversation marked *new*, 50 per batch, one transaction per batch. Progress (processed,
+batches, conversations, messages, notes, skipped) is saved after each batch in
+`kustomer_import_runs`, so **Stop** halts it after the current batch and **Resume** carries on
+from the next one; a server restart leaves a running import *stopped*. Only one import, export
+or dry run runs at a time. When it finishes, the run is checked against the plan (imported vs
+planned; missing; fewer messages or notes than planned) and the result shown. **Roll back**
+deletes everything one run imported (its conversations, their messages and notes); contacts it
+created for Launch27 customers stay (empty) so a re-import reuses them. Who started and who
+rolled back each run is recorded. `KUSTOMER_IMPORT_ENABLED = false` in `import.js` switches the
+import off again.
+
+For each planned conversation it:
 
 - creates one historical conversation: status *done*, original dates, **no queue, owner, reply
   target or SLA clock**, linked to the matched customer's support contact (an existing one, or one
@@ -119,9 +131,14 @@ carries `import_run_id`: `rollback(run)` deletes a run's conversations (messages
 `reconcile(dryRun, run)` compares what was imported with the plan. Batches run one transaction
 each; a catch-up export plus a new dry run plan the conversations updated after the first import.
 
-**Before enabling it:** approve the plan from a dry run; decide what to do with Review, Ambiguous,
-Conflict and Unmatched; add an admin action that runs the import in batches with progress, using
-the dry run's duplicate list; try it on one month of history and check a few Stories by hand.
+Matching: only **Confident** matches are put on a customer's Story. Conversations of Review,
+Ambiguous, Conflict, Unmatched, Cleaner and Internal profiles are imported without a customer
+(closed, with Kustomer's customer id in `source_meta`), so nothing is guessed. Duplicates are
+checked again at import time against the live inbox (email Message-ID; SMS number, text and
+minute), not only from the dry run.
+
+**Before importing for real:** run a fresh export (or catch-up) and dry run, read its report,
+and check a few Stories by hand after the import; roll back if anything is wrong.
 
 ## Limits and things to check on the real account
 
