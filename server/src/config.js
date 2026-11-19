@@ -237,6 +237,9 @@ export function loadConfig(env = process.env) {
     // narrows it to those logins.
     utilizationEnabled: true,
     utilizationEmails: String(env.UTILIZATION_EMAILS || '').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean),
+    // KPI scorecard (Reports → KPI scorecard). Dev and QA: everyone, synthetic data. Production:
+    // only these logins (comma-separated); empty = nobody.
+    kpiEmails: String(env.KPI_EMAILS || '').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean),
     simulator: env.INBOX_SIMULATOR === undefined ? !isProd : truthy(env.INBOX_SIMULATOR),
     // Sample inbox conversations on an empty database. Never in production.
     sampleData: !isProd && truthy(env.SAMPLE_DATA),
