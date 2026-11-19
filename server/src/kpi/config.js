@@ -4,7 +4,7 @@
 // Brands shown on the scorecard. To add a brand: add an entry here, give its connectors data
 // (connectors.js) and list which KPIs apply. No UI change is needed.
 export const KPI_BRANDS = [
-  { key: 'urbanmop', name: 'UrbanMop', detail: 'Ottawa Residential', kpis: ['ocr', 'churn', 'fulfilment', 'complaints', 'reviews', 'billing'] },
+  { key: 'urbanmop', name: 'UrbanMop', detail: 'Ottawa Residential', locations: /^ottawa$/i, complaintBrand: 'residential', kpis: ['ocr', 'churn', 'fulfilment', 'complaints', 'reviews', 'billing'] },
   // { key: 'cleanbee', name: 'Clean Bee', detail: 'Spokane', kpis: ['ocr', 'churn', 'complaints', 'reviews', 'billing'] },
 ];
 
