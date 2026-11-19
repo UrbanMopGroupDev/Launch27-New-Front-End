@@ -2,6 +2,7 @@
 // as the rest of the app); the agent's Launch27 token is used for lookups so Launch27
 // keeps enforcing their permissions.
 import { canSeeUtilization } from '../config.js';
+import { canSeeKpi } from '../kpi/service.js';
 import { registerComplaintRoutes } from '../complaints/api.js';
 import { registerKustomerRoutes } from '../kustomer-migration/api.js';
 import express from 'express';
@@ -28,7 +29,7 @@ export function diffRules(before, after) {
 }
 const many = async (q, sql, p) => (await q.query(sql, p)).rows;
 
-export function createInboxRouter({ db, sessions, cookieName, config, l27, connectors = {}, log = (lvl, msg, f) => console.error(msg, f), qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, complaints = null, smsProviders = {}, kustomerMigration = null }) {
+export function createInboxRouter({ db, sessions, cookieName, config, l27, connectors = {}, log = (lvl, msg, f) => console.error(msg, f), qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, complaints = null, smsProviders = {}, kustomerMigration = null, kpi = null }) {
   const r = express.Router();
   r.use(express.json({ limit: '1mb' }));
 
@@ -1223,6 +1224,26 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
 
   if (complaints) registerComplaintRoutes(r, { complaints, needRole, wrap });
   if (kustomerMigration) registerKustomerRoutes(r, { migration: kustomerMigration, needRole, wrap });
+
+  // ---------- KPI scorecard (read-only; docs/kpi.md) ----------
+  if (kpi) {
+    const k = (fn) => wrap(async (req, res) => {
+      if (!canSeeKpi(config, req.user.email)) return res.status(404).json({ error: 'Not found' });
+      try {
+        res.json(await fn(req));
+      } catch (err) {
+        if (err.status) return res.status(err.status).json({ error: err.message });
+        throw err;
+      }
+    });
+    const q = (req) => ({ brand: req.query.brand ? String(req.query.brand) : null, month: req.query.month ? String(req.query.month) : null, mode: String(req.query.mode || 'month'), outage: req.query.outage ? String(req.query.outage) : null });
+    r.get('/kpi/scorecard', k((req) => kpi.scorecard(q(req))));
+    r.get('/kpi/drill', k((req) => kpi.drill({ ...q(req), kpi: String(req.query.kpi || '') })));
+    r.post('/kpi/refresh', k(() => kpi.refresh()));
+    // Manual Google review entry: the service refuses it in production.
+    r.put('/kpi/reviews/:month', k((req) => kpi.saveManualReviews({ brand: req.body?.brand, month: req.params.month, entry: req.body, email: req.user.email })));
+    r.delete('/kpi/reviews/:month', k((req) => kpi.clearManualReviews({ brand: req.query.brand ? String(req.query.brand) : null, month: req.params.month })));
+  }
 
   return r;
 }
