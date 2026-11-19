@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useBrand } from '../brands/useBrand';
 import { BrandPill, brandLabel } from '../brands/ui';
 import { segmentsApi } from '../segments/api';
-import { scheduleApi, type Candidate, type Change, type ChangeKind, type ClientPrefs, type Overview, type Series, type Slot, type Visit } from '../schedule/api';
+import { assignAsking, scheduleApi, type Candidate, type Change, type ChangeKind, type ClientPrefs, type Overview, type Series, type Slot, type Visit } from '../schedule/api';
 import { FreqPill, Reasons, ScheduleStatus, niceDate, CleanerDot } from '../schedule/ui';
 
 type Tab = 'changes' | 'capacity' | 'continuity' | 'find';
@@ -89,7 +89,7 @@ function NotLoaded({ message }: { message: string }) {
 function useAssign(onDone?: (msg: string) => void) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ keys, cleaner, recommended }: { keys: string[]; cleaner: number; recommended?: boolean }) => scheduleApi.assign(keys, cleaner, recommended),
+    mutationFn: ({ keys, cleaner, recommended }: { keys: string[]; cleaner: number; recommended?: boolean }) => assignAsking(keys, cleaner, recommended),
     onSuccess: (r) => {
       const parts = [`Assigned ${r.assigned} visit${r.assigned === 1 ? '' : 's'} to ${r.cleaner}.`];
       if (r.projected) parts.push(`${r.projected} projected visit${r.projected === 1 ? '' : 's'} follow the series in Launch27.`);
@@ -370,7 +370,7 @@ function BulkAssign({ series, onDone }: { series: Series[]; onDone: (msg: string
     let visits = 0;
     try {
       for (const s of chosen) {
-        const r = await scheduleApi.assign(s.visits.map((v) => v.key), picked[s.key]!);
+        const r = await assignAsking(s.visits.map((v) => v.key), picked[s.key]!);
         visits += r.assigned;
       }
       onDone(`Assigned ${visits} visits across ${chosen.length} series.`);

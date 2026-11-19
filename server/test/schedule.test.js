@@ -295,6 +295,9 @@ describe('schedule: sync, plan, assign, changes', () => {
     const un = await s.unassigned();
     await assert.rejects(() => s.assign({ visit_keys: un.series[0].visits.map((v) => v.key), cleaner_id: 1 }, 'user-bearer'), (err) => err.status === 409 && /asked never to have Ann Usual/.test(err.message));
     assert.equal(w.posts.length, 0);
+    // "Assign anyway": the office overrides the tag for one visit.
+    assert.equal((await s.assign({ visit_keys: [un.series[0].visits[0].key], cleaner_id: 1, override: true }, 'user-bearer')).assigned, 1);
+    assert.equal(w.posts.length, 1);
     assert.equal((await s.assign({ visit_keys: un.series[0].visits.map((v) => v.key), cleaner_id: 2 }, 'user-bearer')).assigned, 2);
     // Launch27 unreachable: fall back to the synced tags rather than failing the search.
     const down = createSchedule({ db, config, fetchImpl: async (url, init) => (/\/customers\//.test(url) ? Promise.reject(new Error('down')) : w.fetchImpl(url, init)), log: quiet, now: () => NOW });

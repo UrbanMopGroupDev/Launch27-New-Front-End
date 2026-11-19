@@ -1042,7 +1042,7 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       try {
         await fn(req, res);
       } catch (err) {
-        if (err.status) return res.status(err.status).json({ error: err.message });
+        if (err.status) return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
         throw err;
       }
     });
@@ -1072,7 +1072,7 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     r.get('/schedule/client/:id/wishes', sched(async (req, res) => res.json(await schedule.clientWishes(Number(req.params.id), req.bearer))));
     r.post('/schedule/assign', sched(async (req, res) => {
       const out = await schedule.assign(req.body || {}, req.bearer, req.user.email);
-      await svc.audit(db, req.user.id, 'schedule.assign', 'cleaner', req.body?.cleaner_id, { visits: (req.body?.visit_keys || []).length });
+      await svc.audit(db, req.user.id, 'schedule.assign', 'cleaner', req.body?.cleaner_id, { visits: (req.body?.visit_keys || []).length, ...(req.body?.override ? { override: 'client wishes' } : {}) });
       res.json(out);
     }));
     r.put('/schedule/unavailable', sched(async (req, res) => {

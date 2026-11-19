@@ -921,7 +921,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
 
   // Assign a cleaner in Launch27 (signed-in user's login). Projected visits of a series can't
   // be assigned one by one in Launch27; they are reported back.
-  async function assign({ visit_keys = [], cleaner_id, recommended = false }, bearer, email = null) {
+  async function assign({ visit_keys = [], cleaner_id, recommended = false, override = false }, bearer, email = null) {
     const s = await need();
     const logWrite = (entry) => (writes ? writes.record({ email, source: 'planner assign', method: 'POST', path: '/v1/staff/bookings/assign/teams', ...entry }) : Promise.resolve());
     if (!config.allowWrites) {
@@ -932,14 +932,15 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     if (!c) throw Object.assign(new Error('Unknown cleaner'), { status: 404 });
     if (!c.assignable) throw Object.assign(new Error(`${c.name} is ${STATUS_LABEL[c.status].toLowerCase()} and can't take bookings`), { status: 400 });
     const visits = visit_keys.map((k) => s.visits.find((v) => v.key === String(k))).filter(Boolean);
-    // Never hand a client the cleaner their tags rule out, whichever screen the pick came from.
-    for (const cid of new Set(visits.map((v) => v.customer_id).filter((x) => x != null))) {
+    // Never hand a client the cleaner their tags rule out, whichever screen the pick came from,
+    // unless the office says to assign anyway (override; the caller asks first).
+    for (const cid of override ? [] : new Set(visits.map((v) => v.customer_id).filter((x) => x != null))) {
       const why = blockedWhy((await clientWishes(s, cid, bearer))?.prefs, c);
       if (!why) continue;
       const who = s.customers.get(cid)?.name || 'This client';
       const msg = why.startsWith('Client asked') ? `${who} asked never to have ${c.name} ("do not assign" tag). Pick another cleaner, or remove the tag in Launch27 if that has changed.` : `${who} wants a female cleaner only, so ${c.name} can't take this.`;
       await logWrite({ outcome: 'blocked', status: 409, body: { visit_keys, cleaner_id }, error: msg });
-      throw Object.assign(new Error(msg), { status: 409 });
+      throw Object.assign(new Error(msg), { status: 409, code: 'client_wishes' });
     }
     const real = visits.filter((v) => v.id);
     const projected = visits.filter((v) => !v.id);
