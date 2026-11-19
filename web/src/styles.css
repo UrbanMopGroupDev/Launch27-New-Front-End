@@ -2051,6 +2051,13 @@ a.rep-factor:hover b { text-decoration: underline; }
 .sc-weeks > div { display: flex; gap: 6px; flex-wrap: wrap; }
 .sc-weeks > div span { display: flex; flex-direction: column; align-items: center; padding: 4px 8px; background: var(--bg); border-radius: 6px; font-size: 12px; min-width: 48px; }
 .sc-weeks i { font-style: normal; color: var(--muted); font-size: 10px; }
+.sc-refs { margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.sc-refs div { background: var(--bg); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sc-refs dt { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.sc-refs dd { margin: 0; font-size: 14px; font-weight: 600; font-feature-settings: 'tnum'; }
+.sc-more { display: flex; flex-direction: column; gap: 10px; }
+.sc-foot-actions { display: flex; gap: 14px; flex: none; }
+.sc-sources summary { font-size: 15px; font-weight: 600; cursor: pointer; }
 .sc-foot { display: flex; justify-content: space-between; align-items: flex-end; gap: 10px; margin-top: auto; padding-top: 8px; border-top: 1px solid var(--border); }
 .sc-foot button, .sc-details button, .sc-dev button.link, .sc-drill button.link { min-height: 28px; white-space: nowrap; }
 
