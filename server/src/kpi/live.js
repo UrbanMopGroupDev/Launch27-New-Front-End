@@ -97,10 +97,12 @@ export function createLaunch27Kpi({ db, config, fetchImpl = fetch, syncBearer, b
       .catch((err) => log.warn('kpi refresh log failed', { error: err.message }));
   }
 
-  async function sync({ full = false } = {}) {
+  // `bearer`: the signed-in person's own Launch27 login, when they click "Refresh Launch27 now".
+  // Without one, the read-only sync login is used.
+  async function sync({ full = false, bearer = null } = {}) {
     lastAttempt = now();
     try {
-      const bearer = await syncBearer();
+      bearer = bearer || (await syncBearer());
       if (!bearer) throw new Error('No Launch27 login for the KPI refresh (set L27_SYNC_EMAIL and L27_SYNC_PASSWORD)');
       const today = localDate(now());
       const prev = await stored();
@@ -155,6 +157,8 @@ export function createLaunch27Kpi({ db, config, fetchImpl = fetch, syncBearer, b
       // Once a day after 5 am Toronto, at boot if never run, and no more than every 30 minutes after a failure.
       async maybeRun() {
         if (running || now() - lastAttempt < 30 * 60_000) return;
+        // No sync login configured: only "Refresh Launch27 now" (the person's own login) can run it.
+        if (config.l27Mode === 'live' && !(config.l27SyncEmail && config.l27SyncPassword)) return;
         const s = memo || (await stored());
         const hour = Number(new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Toronto', hour: 'numeric', hourCycle: 'h23' }).format(new Date(now())));
         if (!s || (localDate(Date.parse(s.taken_at)) < localDate(now()) && hour >= 5)) start();
