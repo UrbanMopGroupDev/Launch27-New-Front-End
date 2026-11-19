@@ -1239,7 +1239,7 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     const q = (req) => ({ brand: req.query.brand ? String(req.query.brand) : null, month: req.query.month ? String(req.query.month) : null, mode: String(req.query.mode || 'month'), outage: req.query.outage ? String(req.query.outage) : null });
     r.get('/kpi/scorecard', k((req) => kpi.scorecard(q(req))));
     r.get('/kpi/drill', k((req) => kpi.drill({ ...q(req), kpi: String(req.query.kpi || '') })));
-    r.post('/kpi/refresh', k(() => kpi.refresh()));
+    r.post('/kpi/refresh', k((req) => kpi.refresh({ bearer: req.bearer })));
     // Manual Google review entry: the service refuses it in production.
     r.put('/kpi/reviews/:month', k((req) => kpi.saveManualReviews({ brand: req.body?.brand, month: req.params.month, entry: req.body, email: req.user.email })));
     r.delete('/kpi/reviews/:month', k((req) => kpi.clearManualReviews({ brand: req.query.brand ? String(req.query.brand) : null, month: req.params.month })));
