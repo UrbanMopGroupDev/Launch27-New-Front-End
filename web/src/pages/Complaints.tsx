@@ -134,9 +134,21 @@ function RunBar({ status, isAdmin, period, onPeriod }: { status: Status; isAdmin
           <label className="cmp-date">To<input type="date" value={period.to} min={period.from} max={end} onChange={(e) => setDate('to', e.target.value)} /></label>
         </div>
         {isAdmin && (
-          <button disabled={status.running || run.isPending || tooLong} title={tooLong ? 'Updates read at most about 3 months at a time. Pick 90 days or less, or set the dates to a 3-month block.' : 'Read Kustomer, Slack, info@ and Launch27 for the dates shown'} onClick={() => run.mutate()}>
-            {status.running || run.isPending ? 'Updating…' : 'Update these dates from sources'}
+          <button className="secondary" disabled={status.running || run.isPending || tooLong} title={tooLong ? 'Updates read at most about 3 months at a time. Pick 90 days or less, or set the dates to a 3-month block.' : 'Read Kustomer, Slack, info@ and Launch27 for the dates shown'} onClick={() => run.mutate()}>
+            {status.running || run.isPending ? 'Updating…' : 'Update these dates now'}
           </button>
+        )}
+      </div>
+      <div className={`cmp-note ${status.auto.enabled ? 'ok' : ''}`}>
+        {status.auto.enabled ? (
+          <>
+            <b>Updates itself every day.</b>{' '}
+            {status.auto.overnight ? 'It runs overnight.' : 'It runs the first time a supervisor or admin opens this page each day (there is no overnight Launch27 login yet).'}{' '}
+            {status.auto.last_daily_update ? `Last daily update: ${day(status.auto.last_daily_update)} ${clock(status.auto.last_daily_update)}.` : 'No daily update has finished yet.'}{' '}
+            {status.auto.next?.kind === 'history' ? `Still reading history automatically: next ${day(status.auto.next.from)} – ${day(status.auto.next.to)}, then older months back to ${status.auto.history_months} months.` : status.auto.next ? "Today's update is about to start." : `History is read back ${status.auto.history_months} months. Nothing waiting.`}
+          </>
+        ) : (
+          <><b>Automatic updates are off.</b> Turn them on in Rules &amp; budget, or update dates by hand.</>
         )}
       </div>
       <p className="muted small">
@@ -602,7 +614,8 @@ function RulesTab({ canEdit }: { canEdit: boolean }) {
             <label key={k}>{label}<input type="number" step="0.1" value={s.costs[k]} onChange={(e) => set({ costs: { ...s.costs, [k]: Number(e.target.value) } })} /></label>
           ))}
           <label>Credit expiry (days)<input type="number" value={s.credit_expiry_days} onChange={(e) => set({ credit_expiry_days: Number(e.target.value) })} /></label>
-          <label>Pilot window (months)<input type="number" value={s.pilot_months} onChange={(e) => set({ pilot_months: Number(e.target.value) })} /></label>
+          <label>Keep this many months of history (1–12)<input type="number" min={1} max={12} value={s.auto.history_months} onChange={(e) => set({ auto: { ...s.auto, history_months: Number(e.target.value) } })} /></label>
+          <label className="check"><input type="checkbox" checked={s.auto.enabled} onChange={(e) => set({ auto: { ...s.auto, enabled: e.target.checked } })} /> Update automatically every day</label>
         </div>
       </section>
       {canEdit && (
