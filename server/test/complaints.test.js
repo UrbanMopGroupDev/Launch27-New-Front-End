@@ -527,3 +527,72 @@ describe('complaints: one-time clients, service type, clients view', () => {
     assert.equal(c.google_reviews_connected, false);
   });
 });
+
+describe('complaints: automatic updates', () => {
+  test('plan: newest unread days first, then older months, then the daily refresh, then nothing', async () => {
+    const { planAuto } = await import('../src/complaints/service.js');
+    const today = '2026-11-19';
+    // Nothing read yet: the most recent month.
+    let j = planAuto({ mined: [], today, historyDays: 365, recentDone: null });
+    assert.deepEqual([j.kind, j.from, j.to], ['history', '2026-10-19', '2026-11-18']);
+    // Aug 15 – Nov 15 read: first catch up the days since.
+    j = planAuto({ mined: [{ from: '2026-08-15', to: '2026-11-15' }], today, historyDays: 365, recentDone: null });
+    assert.deepEqual([j.kind, j.from, j.to], ['history', '2026-11-16', '2026-11-18']);
+    // Caught up: next the month before what's been read.
+    const mined = [{ from: '2026-08-15', to: '2026-11-15' }, { from: '2026-11-16', to: '2026-11-18' }];
+    j = planAuto({ mined, today, historyDays: 365, recentDone: null });
+    assert.deepEqual([j.kind, j.from, j.to], ['history', '2026-07-15', '2026-08-14']);
+    // History target reached: the daily two-week refresh, once.
+    const all = [{ from: '2025-11-19', to: '2026-11-18' }];
+    j = planAuto({ mined: all, today, historyDays: 365, recentDone: '2026-11-18' });
+    assert.deepEqual([j.kind, j.from, j.to, j.refreshFrom], ['recent', '2026-11-05', '2026-11-18', '2026-07-12']);
+    assert.equal(planAuto({ mined: all, today, historyDays: 365, recentDone: today }), null);
+    // The last chunk stops at the history target.
+    j = planAuto({ mined: [{ from: '2025-12-01', to: '2026-11-18' }], today, historyDays: 365, recentDone: today });
+    assert.deepEqual([j.from, j.to], ['2025-11-19', '2025-11-30']);
+  });
+
+  test('runs by itself until history is read, survives a restart, and never re-sends a classified case to Claude', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await schedule.sync();
+    await reports.sync();
+    let calls = 0;
+    const classifier = async () => {
+      calls++;
+      return { is_complaint: true, category: 'quality_missed', tone: 'frustrated', severity: 2, areas: [], hard_route: null, summary: 'x', confidence: 0.9 };
+    };
+    const { createSyncBearer } = await import('../src/inbox/lookup.js');
+    const make = () => createComplaints({ db, config, reports, fetchImpl, classifier, syncBearer: createSyncBearer({ config, fetchImpl }), log: quiet });
+    let complaints = make();
+    await complaints.saveSettings({ auto: { enabled: true, history_months: 3 } });
+    const drain = async (c) => {
+      for (let i = 0; i < 400; i++) {
+        const st = await c.status();
+        if (!st.running && !st.auto.next) return st;
+        if (!st.running) await c.maybeRun();
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      throw new Error('automatic updates never finished');
+    };
+    assert.equal(await complaints.maybeRun(), true, 'starts without anyone clicking');
+    // "Restart" part-way: a run left running is marked interrupted and its dates are read again.
+    await db.query("INSERT INTO complaint_runs (window_from, window_to, status, log) VALUES ('2026-01-01', '2026-01-31', 'running', '[]')");
+    complaints = make();
+    await complaints.markInterrupted();
+    const st = await drain(complaints);
+    assert.equal(st.auto.next, null);
+    assert.ok(st.auto.last_daily_update, 'the daily update ran after the history was read');
+    assert.ok(st.mined.length >= 3, 'history read in monthly pieces');
+    const cases = Number((await db.query('SELECT count(*)::int AS n FROM complaint_cases')).rows[0].n);
+    assert.ok(cases > 0);
+    assert.ok(calls <= cases, `each case classified once (${calls} Claude calls for ${cases} cases)`);
+    // Turned off in settings: nothing more is planned.
+    await complaints.saveSettings({ auto: { enabled: false } });
+    assert.equal(await complaints.maybeRun(), false);
+    await db.close();
+  });
+});
