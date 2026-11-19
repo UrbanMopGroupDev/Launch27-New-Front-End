@@ -1894,6 +1894,7 @@ i.rep-cell { width: 14px; height: 14px; }
 .sc-details dt { color: var(--muted); }
 .sc-details dd { margin: 0; text-align: right; font-feature-settings: 'tnum'; }
 .sc-breakdown, .sc-weeks { display: flex; flex-direction: column; gap: 4px; border-top: 1px solid var(--border); padding-top: 8px; }
+.sc-miss i { font-style: normal; }
 .sc-miss { display: grid; grid-template-columns: minmax(0, 1.5fr) 1fr 28px; gap: 8px; align-items: center; font-size: 12px; }
 .sc-miss-bar { height: 8px; background: var(--bg); border-radius: 4px; overflow: hidden; }
 .sc-miss-bar span { display: block; height: 100%; background: #64748b; border-radius: 0 4px 4px 0; }

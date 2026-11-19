@@ -121,11 +121,11 @@ function TileCard({ tile: t, onDrill }: { tile: Tile; onDrill: (kpi: string) => 
           </dl>
           {t.breakdown && t.breakdown.length > 0 && (
             <div className="sc-breakdown">
-              <span className="small muted">Misses by reason</span>
+              <span className="small muted">Not fulfilled, by reason</span>
               {t.breakdown.map((m) => (
-                <div key={m.label} className="sc-miss">
-                  <span>{m.label}</span>
-                  <span className="sc-miss-bar"><span style={{ width: `${(m.n / t.breakdown![0].n) * 100}%` }} /></span>
+                <div key={m.kind + m.label} className="sc-miss">
+                  <span>{m.label} <i className="muted">· {m.kind === 'company' ? 'ours' : m.kind === 'client' ? 'client' : 'unclear'}</i></span>
+                  <span className="sc-miss-bar"><span style={{ width: `${(m.n / Math.max(...t.breakdown!.map((x) => x.n))) * 100}%` }} /></span>
                   <span className="sc-num">{m.n}</span>
                 </div>
               ))}
@@ -320,7 +320,7 @@ function DrillTabs({ data }: { data: Drill }) {
     return tab.rows.filter((r: DrillRow) => {
       if (filter === 'counted' && r.counted === false) return false;
       if (filter === 'excluded' && r.counted !== false) return false;
-      if (filter === 'issues' && r.kind === 'done') return false;
+      if (filter === 'issues' && r.issue === false) return false;
       return !needle || tab.columns.some((c) => String(r[c.key] ?? '').toLowerCase().includes(needle));
     });
   }, [tab, filter, text]);
@@ -331,7 +331,7 @@ function DrillTabs({ data }: { data: Drill }) {
     if (c.kind === 'pct') return `${Number(v).toFixed(1)}%`;
     return String(v);
   };
-  const filters: [Filter, string][] = tab.defaultFilter === 'issues' ? [['issues', 'Misses and cancellations'], ['all', 'All bookings']] : hasExcluded ? [['all', 'All'], ['counted', 'Counted'], ['excluded', 'Excluded']] : [];
+  const filters: [Filter, string][] = tab.defaultFilter === 'issues' ? [['issues', 'Not fulfilled or late'], ['all', 'All bookings']] : hasExcluded ? [['all', 'All'], ['counted', 'Counted'], ['excluded', 'Excluded']] : [];
   return (
     <>
       {data.tabs.length > 1 && (

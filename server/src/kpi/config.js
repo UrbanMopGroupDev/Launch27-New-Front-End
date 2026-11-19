@@ -37,6 +37,9 @@ export const KPI_RULES = {
   // "Came back": a later active recurring booking. null = any time after the cancellation;
   // a number limits it to that many days.
   returnWindowDays: null,
+  // Temporary cancellations: back within this many days = not churn; no return by then = churn.
+  temporaryReturnDays: 90,
+  returnBuckets: [30, 60, 90],
   churnBands: [
     { max: 7, label: 'Excellent', tone: 'good' },
     { max: 10, label: 'Healthy', tone: 'good' },

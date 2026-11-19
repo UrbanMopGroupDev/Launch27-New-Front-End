@@ -126,7 +126,7 @@ export function buildSyntheticDataset({ today, now = Date.now(), outage = null, 
         }
         if (x < 0.9) {
           visit(c, next, freq.name, { cancellation: cancel(when, r.pick(TEMPORARY), r.chance(0.5) ? 'staff' : 'customer') });
-          if (r.chance(0.55)) series(c, addDays(when, 30 + r.int(75)), freq);
+          if (r.chance(0.6)) series(c, addDays(when, 20 + r.int(95)), freq);
           return;
         }
         if (x < 0.93) {

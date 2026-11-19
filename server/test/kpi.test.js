@@ -72,7 +72,7 @@ describe('kpi rules', () => {
 describe('churn', () => {
   // Ten ordinary recurring clients active through October, plus the cases under test.
   const steady = () => Array.from({ length: 10 }, (_, i) => [b(100 + i, `Steady ${i}`, '2026-10-06'), b(100 + i, `Steady ${i}`, '2026-10-20'), b(100 + i, `Steady ${i}`, '2026-11-03')]).flat();
-  const res = (extra) => churnMonth(ix([...steady(), ...extra]), '2026-10');
+  const res = (extra) => churnMonth(ix([...steady(), ...extra]), '2026-10', TODAY);
 
   test('events ÷ active recurring clients at the start of the month', () => {
     const r = res([b(1, 'Gone One', '2026-10-02'), b(1, 'Gone One', '2026-10-16', { cancellation: cx('2026-10-10', 'Moving out of Ottawa') })]);
@@ -86,7 +86,7 @@ describe('churn', () => {
     const oct = res(extra);
     assert.equal(oct.num, 1);
     assert.equal(oct.events[0].last_cleaner, 'Kofi A.');
-    assert.equal(churnMonth(ix([...steady(), ...extra]), '2026-11').num, 0);
+    assert.equal(churnMonth(ix([...steady(), ...extra]), '2026-11', TODAY).num, 0);
   });
   test('test entries and institutional clients are out of numerator and denominator', () => {
     const r = res([
@@ -116,21 +116,33 @@ describe('churn', () => {
     assert.equal(r.num, 1);
     assert.equal(r.den, 11);
   });
-  test('LuxoClean transfers, temporary cancellations and admin errors are not churn, but stay in the base', () => {
-    const r = res([
-      b(1, 'Luxo', '2026-10-05', { cancellation: cx('2026-10-03', 'Transferred to LuxoClean', 'staff') }),
-      b(2, 'Traveller', '2026-10-05', { cancellation: cx('2026-10-03', 'Travelling until spring') }),
-      b(3, 'Holder', '2026-10-05', { cancellation: cx('2026-10-03', 'On hold') }),
-      b(4, 'Reno', '2026-10-05', { cancellation: cx('2026-10-03', 'Renovation') }),
-      b(5, 'Host', '2026-10-05', { cancellation: cx('2026-10-03', 'Airbnb for the season') }),
-      b(6, 'Parent', '2026-10-05', { cancellation: cx('2026-10-03', 'Postpartum, family helping') }),
-      b(7, 'Oops', '2026-10-05', { cancellation: cx('2026-10-03', 'Admin error', 'staff') }),
-    ]);
+  test('LuxoClean transfers and admin errors are not churn, but stay in the base', () => {
+    const r = res([b(1, 'Luxo', '2026-10-05', { cancellation: cx('2026-10-03', 'Transferred to LuxoClean', 'staff') }), b(7, 'Oops', '2026-10-05', { cancellation: cx('2026-10-03', 'Admin error', 'staff') })]);
     assert.equal(r.num, 0);
-    assert.equal(r.den, 17);
+    assert.equal(r.den, 12);
     assert.equal(outcome(r, 'Luxo'), 'Excluded: transfer to luxoclean');
-    assert.match(outcome(r, 'Traveller'), /temporary/);
     assert.equal(outcome(r, 'Oops'), 'Excluded: admin error');
+  });
+  test('temporary cancellations: back within 90 days is not churn; no return after 90 days is; pending until then', () => {
+    const june = (extra) => churnMonth(ix([b(50, 'Steady', '2026-06-02'), ...extra]), '2026-06', TODAY);
+    const away = (id, name, reason = 'Travelling for the summer') => [b(id, name, '2026-06-01'), b(id, name, '2026-06-15', { cancellation: cx('2026-06-10', reason) })];
+    const r = june([
+      ...away(1, 'Back In 30'), b(1, 'Back In 30', '2026-07-05'),
+      ...away(2, 'Back In 60', 'On hold'), b(2, 'Back In 60', '2026-08-01'),
+      ...away(3, 'Back In 90', 'Renovation'), b(3, 'Back In 90', '2026-09-08'),
+      ...away(4, 'Back Too Late', 'Airbnb for the season'), b(4, 'Back Too Late', '2026-09-09'),
+      ...away(5, 'Never Back', 'Postpartum, family helping'),
+      ...away(6, 'One Time Later'), b(6, 'One Time Later', '2026-07-01', { frequency: 'One time' }),
+    ]);
+    assert.equal(outcome(r, 'Back In 30'), 'Excluded: temporary, back within 30 days');
+    assert.equal(outcome(r, 'Back In 60'), 'Excluded: temporary, back within 60 days');
+    assert.equal(outcome(r, 'Back In 90'), 'Excluded: temporary, back within 90 days');
+    for (const n of ['Back Too Late', 'Never Back', 'One Time Later']) assert.equal(outcome(r, n), 'Counted as churn (temporary, no return within 90 days)', n);
+    assert.equal(r.num, 3);
+    // Still inside the window: not counted yet, and reported as pending.
+    const recent = res([b(1, 'Just Left', '2026-10-02'), b(1, 'Just Left', '2026-10-16', { cancellation: cx('2026-10-10', 'Travelling until spring') })]);
+    assert.equal(outcome(recent, 'Just Left'), 'Pending: temporary, inside the 90-day return window');
+    assert.deepEqual([recent.num, recent.pending], [0, 1]);
   });
   test('came back: a later active recurring booking means it was not permanent', () => {
     const r = res([
@@ -165,7 +177,7 @@ describe('churn', () => {
     assert.deepEqual(r.over_cancel.map((e) => e.customer), ['Flagged']);
   });
   test('no recurring clients: no data, not zero', () => {
-    const r = churnMonth(ix([]), '2026-10');
+    const r = churnMonth(ix([]), '2026-10', TODAY);
     assert.equal(r.state, 'no_data');
     assert.equal(r.value, null);
   });
@@ -183,29 +195,29 @@ describe('service fulfilment', () => {
     b(8, 'Simon Test', '2026-10-07'),
     b(9, 'Booked Late', '2026-10-08', { created_at: '2026-10-07T15:00' }),
   ];
-  test('completed as scheduled ÷ scheduled, client cancellations out of the denominator', () => {
+  test('completed ÷ scheduled: late is still fulfilled; anything not completed is not, whoever caused it', () => {
     const r = fulfilmentMonth(ix(rows()), '2026-10', TODAY);
-    // done: On Time, Exactly 30, Booked Late. misses: Late 31, No Check-in, Cleaner Sick.
-    assert.equal(r.num, 3);
-    assert.equal(r.den, 6);
+    // fulfilled: On Time, Exactly 30, Late 31, Booked Late. not: No Check-in, Cleaner Sick, Client Cancelled, Vague.
+    assert.equal(r.num, 4);
+    assert.equal(r.den, 8);
     assert.equal(r.value, 50);
-    assert.equal(r.client_cancelled, 1);
-    assert.equal(r.unclassified, 1);
-    assert.deepEqual(Object.fromEntries(r.misses.map((m) => [m.label, m.n])), { 'Late arrival (over 30 min)': 1, 'Not completed (no check-in)': 1, 'Cleaner cancelled': 1 });
+    assert.deepEqual([r.company, r.client, r.unclassified, r.late], [2, 1, 1, 1]);
+    assert.deepEqual(r.misses.map((m) => [m.kind, m.label, m.n]), [['company', 'Not completed (no check-in)', 1], ['company', 'Cleaner cancelled', 1], ['client', 'Client cancelled', 1], ['unclassified', 'Unclassified staff cancellation', 1]]);
     assert.ok(!r.rows.some((x) => x.customer === 'Simon Test'));
+    assert.equal(r.rows.find((x) => x.customer === 'Late 31').result, 'Completed, arrived late (over 30 min)');
+    assert.equal(r.rows.find((x) => x.customer === 'Exactly 30').late, false);
   });
   test('late threshold is configurable', () => {
-    const r = fulfilmentMonth(ix(rows()), '2026-10', TODAY, { ...KPI_RULES, lateMinutes: 45 });
-    assert.equal(r.num, 4);
+    assert.equal(fulfilmentMonth(ix(rows()), '2026-10', TODAY, { ...KPI_RULES, lateMinutes: 45 }).late, 0);
+    assert.equal(fulfilmentMonth(ix(rows()), '2026-10', TODAY, { ...KPI_RULES, lateMinutes: 20 }).late, 2);
   });
   test('48-hour snapshot and weekly split', () => {
     const r = fulfilmentMonth(ix(rows()), '2026-10', TODAY);
     // On the books 48 h ahead: all but the client who cancelled a week early and the late booking.
-    assert.equal(r.snapshot.on_books, 6);
-    assert.equal(r.snapshot.added_late, 1);
+    assert.deepEqual([r.snapshot.on_books, r.snapshot.completed, r.snapshot.added_late], [6, 3, 1]);
     assert.equal(r.weeks[0].from, '2026-10-01');
     assert.equal(r.weeks[0].to, '2026-10-04');
-    assert.equal(r.weeks[1].den, 6);
+    assert.equal(r.weeks[1].den, 8);
     assert.equal(r.weeks.at(-1).to, '2026-10-31');
   });
   test('visits that have not happened yet are not counted', () => {
@@ -324,8 +336,8 @@ describe('scorecard', () => {
   test('month-over-month change is in percentage points and says which way is better', () => {
     const data = build();
     const c = scorecard(data, { brand, month: '2026-10', now: NOW, today: TODAY });
-    const oct = churnMonth(data, '2026-10').value;
-    const sep = churnMonth(data, '2026-09').value;
+    const oct = churnMonth(data, '2026-10', TODAY).value;
+    const sep = churnMonth(data, '2026-09', TODAY).value;
     const d = tile(c, 'churn').delta;
     assert.equal(d.unit, 'pp');
     assert.equal(d.value, Math.round((oct - sep) * 10) / 10);
@@ -353,7 +365,7 @@ describe('scorecard', () => {
     assert.equal(sourceState({ refreshed_at: null }, 'kustomer', NOW), 'missing');
   });
   test('the synthetic month carries the edge cases', () => {
-    const r = churnMonth(build(), '2026-10');
+    const r = churnMonth(build(), '2026-10', TODAY);
     assert.equal(outcome(r, 'Leslie Test'), 'Excluded: test entry');
     assert.equal(outcome(r, 'Morgan Ellery'), 'Excluded: test entry');
     assert.equal(outcome(r, 'Metis Nation Homemaking - client A'), 'Excluded: institutional client');
@@ -373,17 +385,18 @@ describe('scorecard', () => {
     let num = 0;
     let den = 0;
     for (let m = 0; m < 12; m++) {
-      const r = churnMonth(data, m < 2 ? `2025-${11 + m}` : `2026-${String(m - 1).padStart(2, '0')}`);
+      const r = churnMonth(data, m < 2 ? `2025-${11 + m}` : `2026-${String(m - 1).padStart(2, '0')}`, TODAY);
       num += r.num;
       den += r.den;
     }
     assert.equal(tile(t12, 'churn').value, Math.round((num / den) * 1000) / 10);
     const d = drill(data, { kpi: 'churn', month: '2026-10', today: TODAY });
-    const oct = churnMonth(data, '2026-10');
+    const oct = churnMonth(data, '2026-10', TODAY);
     assert.equal(d.tabs[0].rows.filter((r) => r.counted).length, oct.num);
     assert.equal(d.tabs[1].rows.length, oct.den);
     const f = drill(data, { kpi: 'fulfilment', month: '2026-10', today: TODAY });
     assert.equal(f.tabs[0].rows.filter((r) => r.kind === 'done').length, fulfilmentMonth(data, '2026-10', TODAY).num);
+    assert.equal(f.tabs[0].rows.length, fulfilmentMonth(data, '2026-10', TODAY).den);
   });
   test('the dataset is the same every time it is built for the same day', () => {
     assert.deepEqual(card().tiles.map((t) => t.value), card().tiles.map((t) => t.value));
