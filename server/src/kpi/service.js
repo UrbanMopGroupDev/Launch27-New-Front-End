@@ -4,6 +4,7 @@ import { localDate } from '../schedule/rules.js';
 import { indexDataset, scorecard, drill, lastClosedMonth, addMonths, monthOf, monthsBetween, monthLabel } from './calc.js';
 import { KPI_BRANDS, KPI_RULES } from './config.js';
 import { createKpiConnectors } from './connectors.js';
+import { createLiveKpiConnectors } from './live.js';
 
 export const KPI_OUTAGES = { launch27_stale: 'Launch27 stale (61 h)', kustomer_missing: 'Kustomer not connected', qbo_missing: 'QuickBooks not connected', syft_missing: 'Syft report not received', google_stale: 'Google stale (75 h)' };
 const MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -16,16 +17,18 @@ export function canSeeKpi(config, email) {
   return (config.kpiEmails || []).includes(String(email || '').toLowerCase());
 }
 
-export function createKpi({ db, config, log = { info() {}, warn() {}, error() {} }, now = () => Date.now(), connectors = createKpiConnectors({ synthetic: !config.production }) }) {
+export function createKpi({ db, config, log = { info() {}, warn() {}, error() {} }, now = () => Date.now(), fetchImpl = fetch, syncBearer = null, connectors = null }) {
   const synthetic = !config.production;
+  // Dev and QA: synthetic. Production: live Launch27 and Kustomer; the rest read "No data" until connected.
+  connectors = connectors || (synthetic || !syncBearer ? createKpiConnectors({ synthetic }) : createLiveKpiConnectors({ db, config, fetchImpl, syncBearer, brand: KPI_BRANDS[0], log, now }));
+  const jobs = connectors.map((c) => c.job).filter(Boolean);
   let cache = null;
   let manualVersion = 0;
 
   async function load(brandKey, outage) {
     const today = localDate(now());
-    const key = `${brandKey}|${today}|${outage || ''}|${manualVersion}`;
-    if (cache?.key === key) return cache;
     const ds = { brand: brandKey, sources: {}, bookings: [], complaints: [], reviews: null, reviewBaseline: null, ocr: { qbo: [], syft: [] }, manualReviews: {} };
+    const pulled = [];
     for (const c of connectors) {
       let got;
       try {
@@ -35,12 +38,21 @@ export function createKpi({ db, config, log = { info() {}, warn() {}, error() {}
         log.error('kpi source pull failed', { source: c.key, error: err.message });
         got = { refreshed_at: null, note: 'refresh failed' };
       }
+      pulled.push([c, got]);
       ds.sources[c.key] = { refreshed_at: got.refreshed_at || null, note: got.note || null };
       if (got.bookings) ds.bookings = got.bookings;
       if (got.complaints) ds.complaints = got.complaints;
       if (got.reviews) (ds.reviews = got.reviews), (ds.reviewBaseline = got.reviewBaseline);
       if (got.qbo) ds.ocr.qbo = got.qbo;
       if (got.syft) ds.ocr.syft = got.syft;
+    }
+    // Nothing new from any source since the last build: reuse it. Synthetic refresh times move
+    // with the clock, so there the day is the version.
+    const version = synthetic ? '' : pulled.map(([c, got]) => `${c.key}:${got.refreshed_at || got.note || ''}:${(got.complaints || []).length}`).join(',');
+    const key = `${brandKey}|${today}|${outage || ''}|${manualVersion}|${version}`;
+    if (cache?.key === key) return synthetic ? cache : { ...cache, ds: { ...cache.ds, sources: ds.sources } };
+    for (const [c, got] of pulled) {
+      if (c.job) continue; // a connector with its own daily job logs its own refreshes
       const rows = (got.bookings || got.complaints || got.reviews || got.qbo || got.syft || []).length;
       // Idempotent: one log row per source per day, updated in place.
       await db.query(
@@ -89,6 +101,7 @@ export function createKpi({ db, config, log = { info() {}, warn() {}, error() {}
         sources: connectors.map((x) => ({ key: x.key, label: x.label, mode: x.mode, ...c.ds.sources[x.key] })),
         outage: o,
         outages: synthetic ? KPI_OUTAGES : null,
+        refresh: { available: jobs.length > 0, running: jobs.some((j) => j.running()) },
         manual_reviews: synthetic ? { can_enter: true, entry: c.ds.manualReviews[m.month] || null } : { can_enter: false, entry: null },
       };
     },
@@ -98,6 +111,15 @@ export function createKpi({ db, config, log = { info() {}, warn() {}, error() {}
       const c = await load(b.key, cleanOutage(outage));
       const m = pickMonth(month, c.today);
       return drill(c.ix, { kpi, month: m.month, mode: mode === 't12' ? 't12' : 'month', today: c.today });
+    },
+    // Daily read-only refresh of the live sources (worker tick), and "Refresh now".
+    async maybeRun() {
+      for (const j of jobs) await j.maybeRun();
+    },
+    refresh() {
+      if (!jobs.length) throw fail(409, 'Nothing to refresh here: this environment uses synthetic data');
+      for (const j of jobs) j.start();
+      return { running: true };
     },
     // Manual Google review entry: development and QA only.
     async saveManualReviews({ brand, month, entry, email }) {

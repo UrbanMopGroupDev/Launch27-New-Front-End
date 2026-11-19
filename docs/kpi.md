@@ -4,8 +4,10 @@
 Residential). It is read-only: it never writes to Launch27, QuickBooks, Kustomer, Google or
 Gmail, and it has no "edit data" controls.
 
-**Status: phase 1 (development and QA, synthetic data).** Production shows every tile as
-"No data" until the live connectors are built and signed off.
+**Status.** Development and QA run on synthetic data. Production reads Launch27 (churn,
+fulfilment, visit counts) and the Kustomer complaints the Complaint playbook already collects.
+QuickBooks, Syft and Google Business Profile are not connected yet, so OCR and Google reviews
+read "No data" in production.
 
 ## Where the code is
 
@@ -15,9 +17,10 @@ Gmail, and it has no "edit data" controls.
 | Every formula and exclusion rule | `server/src/kpi/calc.js` (pure; tests in `server/test/kpi.test.js`) |
 | One read-only connector per source | `server/src/kpi/connectors.js` |
 | Synthetic data for dev and QA | `server/src/kpi/synthetic.js` |
+| Live connectors (production) | `server/src/kpi/live.js` |
 | Service and API (`/api/kpi/*`) | `server/src/kpi/service.js`, routes at the end of `server/src/inbox/api.js` |
 | Page | `web/src/pages/KpiScorecard.tsx`, `web/src/kpi/api.ts` |
-| Tables | `server/migrations/0029_kpi.sql` (`kpi_refresh_log`, `kpi_manual_reviews`) |
+| Tables | `server/migrations/0029_kpi.sql` (`kpi_refresh_log`, `kpi_manual_reviews`), `server/migrations/0030_kpi_snapshots.sql` (`kpi_snapshots`) |
 
 ## Definitions
 
@@ -54,10 +57,24 @@ cancellation date, and the last cleaner is the one on the client's last complete
 
 ## Refresh schedule
 
-Phase 1: synthetic data is generated in memory, the same for everyone on a given day. Each
-load writes one row per source per day to `kpi_refresh_log` (updated in place, so repeats are
-harmless). Planned for production: daily for churn, fulfilment, complaints and reviews; OCR
-monthly once Syft arrives and QuickBooks closes.
+Dev and QA: synthetic data is generated in memory, the same for everyone on a given day.
+
+Production:
+
+- **Launch27**: once a day after 5 am Toronto (and at start-up if it has never run), using the
+  read-only sync login (`L27_SYNC_EMAIL` / `L27_SYNC_PASSWORD`). The first run and one run a week
+  read the whole history from January 2024; the others read bookings from 120 days back to 60
+  days ahead and merge them in. Only the login and GET requests are ever sent. The result is one
+  slimmed snapshot in `kpi_snapshots`; review comments and contact details are not copied.
+  "Refresh Launch27 now" under Sources starts a run by hand.
+- **Kustomer**: no extra calls. Complaints are read from `complaint_cases` (source `kustomer`,
+  Residential), which the Complaint playbook keeps up to date.
+- A failed refresh keeps the previous snapshot; the affected tiles turn "Stale" after 48 hours.
+- Every refresh writes one row per source per day to `kpi_refresh_log` (updated in place).
+- Only bookings at the Ottawa location count for UrbanMop Residential (`locations` in `KPI_BRANDS`).
+
+Not built yet: QuickBooks, Syft and Google connectors, the email alert when a refresh fails or
+a source is stale, and per-brand roles for office managers.
 
 ## Who sees it
 

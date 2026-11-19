@@ -471,3 +471,109 @@ describe('kpi service', () => {
     await db.close();
   });
 });
+
+describe('kpi live connectors (production path), run against the synthetic Launch27', async () => {
+  const { createMockLaunch27 } = await import('../src/mock/launch27.js');
+  const { createSyncBearer } = await import('../src/inbox/lookup.js');
+  const { createLaunch27Kpi, createKustomerKpi, createLiveKpiConnectors, normalizeBooking, localStamp } = await import('../src/kpi/live.js');
+  const { addDays: plusDays, localDate } = await import('../src/schedule/rules.js');
+  const quiet = { info() {}, warn() {}, error() {} };
+  const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+  const brand = KPI_BRANDS[0];
+  // Only the last three months, to keep the test quick.
+  const first = plusDays(localDate(Date.now()), -90).slice(0, 7);
+  const rules = { ...KPI_RULES, firstMonth: first };
+  const setup = async () => {
+    const calls = [];
+    const mock = createMockLaunch27({ password: 'demo' });
+    const fetchImpl = (url, init = {}) => {
+      calls.push({ method: init.method || 'GET', path: new URL(url).pathname });
+      return mock(url, init);
+    };
+    const db = await openDb({});
+    const l27 = createLaunch27Kpi({ db, config, fetchImpl, syncBearer: createSyncBearer({ config, fetchImpl }), brand, log: quiet, rules });
+    return { calls, db, l27, fetchImpl };
+  };
+
+  test('times become Toronto calendar strings', () => {
+    assert.equal(localStamp('2026-10-05T13:00:00Z'), '2026-10-05T09:00');
+    assert.equal(localStamp('2026-01-05T03:30:00Z'), '2026-01-04T22:30');
+    assert.equal(localStamp(null), null);
+  });
+  test('a Launch27 booking is normalized; who cancelled comes from the name on the cancellation', () => {
+    const base = { id: 7, user: { id: 3, first_name: 'Amelia', last_name: 'Roy' }, service_date: '2026-10-05T13:00:00Z', created_at: '2026-09-01T15:00:00Z', frequency: { name: 'Biweekly - 10% off' }, teams: [{ id: 1, title: ' Rosa M. ' }], location: { name: 'Ottawa' }, active: true, completed: true };
+    const done = normalizeBooking(base, { teams: [{ id: 1, time_tracking: { checkin_at: '2026-10-05T13:40:00Z' } }] }, { feedback: { rating: 0, rated_at: '2026-10-06T14:00:00Z', comment: 'private text' } });
+    assert.deepEqual([done.customer, done.date, done.start, done.created_at, done.completed, done.cleaner, done.checkin_at, done.rating, done.rated_at, done.cancellation], ['Amelia Roy', '2026-10-05', '2026-10-05T09:00', '2026-09-01T11:00', true, 'Rosa M.', '2026-10-05T09:40', 0, '2026-10-06', null]);
+    assert.equal(done.rating_comment, null); // review text is not copied out of Launch27
+    const byClient = normalizeBooking({ ...base, active: false, completed: false, cancellation: { date: '2026-10-03T18:00:00Z', reason: 'Moving', cancelled_by: { name: 'amelia  roy' } } });
+    assert.deepEqual([byClient.completed, byClient.cancellation.by, byClient.cancellation.at, byClient.cancellation.reason], [false, 'customer', '2026-10-03T14:00', 'Moving']);
+    assert.equal(normalizeBooking({ ...base, active: false, cancellation: { date: '2026-10-03T18:00:00Z', reason: 'Cleaner sick', cancelled_by: { name: 'Kimmy' } } }).cancellation.by, 'staff');
+  });
+  test('refresh only logs in and reads; it is idempotent; the brand keeps only its own location', async () => {
+    const { calls, db, l27 } = await setup();
+    assert.equal((await l27.pull()).refreshed_at, null);
+    const one = await l27.job.start();
+    assert.ok(one.bookings > 100 && one.full);
+    const got = await l27.pull();
+    assert.ok(got.refreshed_at);
+    assert.ok(got.bookings.every((b) => b.location === 'Ottawa' && b.date && b.start && b.frequency !== undefined));
+    assert.ok(got.bookings.some((b) => b.completed && b.checkin_at));
+    const two = await l27.job.start({ full: true });
+    assert.equal(two.bookings, one.bookings);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM kpi_snapshots')).rows[0].n, 1);
+    assert.deepEqual((await db.query("SELECT status FROM kpi_refresh_log WHERE source = 'launch27'")).rows, [{ status: 'ok' }]);
+    // Read-only: one kind of POST (the login), everything else GET.
+    assert.deepEqual([...new Set(calls.filter((c) => c.method !== 'GET').map((c) => `${c.method} ${c.path}`))], ['POST /latest/login']);
+    assert.ok(calls.filter((c) => c.method === 'GET').every((c) => c.path.startsWith('/v1/staff/bookings')));
+    await db.close();
+  });
+  test('a failed refresh keeps the previous snapshot and is logged', async () => {
+    const { db, fetchImpl } = await setup();
+    let broken = false;
+    const flaky = (url, init) => (broken && !String(url).includes('/login') ? Promise.resolve(new Response('{}', { status: 503 })) : fetchImpl(url, init));
+    const l27 = createLaunch27Kpi({ db, config, fetchImpl: flaky, syncBearer: createSyncBearer({ config, fetchImpl: flaky }), brand, log: quiet, rules });
+    const ok = await l27.job.start();
+    const before = (await l27.pull()).refreshed_at;
+    broken = true;
+    assert.equal(await l27.job.start({ full: true }), null);
+    const after = await l27.pull();
+    assert.equal(after.refreshed_at, before);
+    assert.equal(after.bookings.length, ok.bookings);
+    assert.equal((await db.query("SELECT status FROM kpi_refresh_log WHERE source = 'launch27'")).rows[0].status, 'failed');
+    await db.close();
+  });
+  test('Kustomer complaints come from the complaint tables; unread means not connected', async () => {
+    const db = await openDb({});
+    const k = createKustomerKpi({ db, brand });
+    assert.equal((await k.pull()).refreshed_at, null);
+    await db.query("INSERT INTO complaint_sync_state (source, last_ok_at) VALUES ('kustomer', now())");
+    await db.query(`INSERT INTO complaint_cases (brand, source, source_id, customer_name, customer_email, l27_customer_id, l27_booking_id, opened_at, channel, category) VALUES
+      ('residential','kustomer','a','Amelia Roy','a@example.com',3,7,'2026-10-06T15:00:00Z','email','Quality'),
+      ('residential','kustomer','b','No Match','b@example.com',NULL,NULL,'2026-10-07T02:00:00Z','voice','Late'),
+      ('commercial','kustomer','c','Other Brand','c@example.com',9,NULL,'2026-10-07T15:00:00Z','email','Quality'),
+      ('residential','launch27_rating','d','A Rating','d@example.com',4,8,'2026-10-07T15:00:00Z','review','Quality')`);
+    const got = await k.pull();
+    assert.ok(got.refreshed_at);
+    assert.deepEqual(got.complaints.map((c) => [c.customer, c.customer_id, c.booking_id, c.date]), [['Amelia Roy', 3, 7, '2026-10-06'], ['No Match', 'email:b@example.com', null, '2026-10-06']]);
+    await db.close();
+  });
+  test('scorecard on live connectors: Launch27 KPIs have numbers, unconnected sources say No data', async () => {
+    const { db, fetchImpl } = await setup();
+    const connectors = createLiveKpiConnectors({ db, config, fetchImpl, syncBearer: createSyncBearer({ config, fetchImpl }), brand, log: quiet });
+    const kpi = createKpi({ db, config: { ...config, production: true }, log: quiet, connectors });
+    const before = await kpi.scorecard();
+    assert.ok(before.tiles.filter((t) => t.kpi !== 'billing').every((t) => t.state === 'no_data' && t.value === null));
+    assert.deepEqual(before.refresh, { available: true, running: false });
+    kpi.refresh();
+    await connectors[0].job.start();
+    const c = await kpi.scorecard();
+    const tile = (k) => c.tiles.find((t) => t.kpi === k);
+    assert.equal(c.synthetic, false);
+    assert.deepEqual([tile('churn').state, tile('fulfilment').state], ['ok', 'ok']);
+    assert.ok(tile('fulfilment').value > 50);
+    for (const k of ['ocr', 'complaints', 'reviews']) assert.deepEqual([tile(k).state, tile(k).value], ['no_data', null], k);
+    const rows = await kpi.drill({ kpi: 'fulfilment' });
+    assert.ok(rows.tabs[0].rows.length > 0);
+    await db.close();
+  });
+});

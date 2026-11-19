@@ -248,6 +248,8 @@ function TrendCard({ tile, points, reference }: { tile: Tile; points: TrendPoint
 
 // ---------- sources, outage preview and manual review entry ----------
 function SourcesCard({ s, outage, setOutage }: { s: Scorecard; outage: string | null; setOutage: (o: string | null) => void }) {
+  const queryClient = useQueryClient();
+  const refresh = useMutation({ mutationFn: kpiApi.refresh, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['kpi'] }) });
   return (
     <details className="card sc-sources" open={!!outage}>
       <summary>Sources and data freshness</summary>
@@ -255,11 +257,17 @@ function SourcesCard({ s, outage, setOutage }: { s: Scorecard; outage: string | 
         {s.sources.map((x) => (
           <div key={x.key}>
             <b>{x.label}</b>
-            <span className="small muted">{x.refreshed_at ? `Refreshed ${when(x.refreshed_at)}` : 'Not connected'}{x.mode === 'synthetic' ? ' · synthetic' : ''}</span>
+            <span className="small muted">{x.refreshed_at ? `Refreshed ${when(x.refreshed_at)}` : x.note ? x.note.charAt(0).toUpperCase() + x.note.slice(1) : 'Not connected'}{x.mode === 'synthetic' ? ' · synthetic' : ''}</span>
           </div>
         ))}
       </div>
       <p className="small muted">Read-only: this page never changes anything in Launch27, QuickBooks, Kustomer or Google.</p>
+      {s.refresh.available && (
+        <p className="small">
+          {s.refresh.running || refresh.isSuccess ? <span className="muted">Reading Launch27 now. This takes a few minutes; reload the page afterwards.</span> : <button className="link" disabled={refresh.isPending} onClick={() => refresh.mutate()}>Refresh Launch27 now</button>}
+          {refresh.isError && <span className="warn"> {(refresh.error as Error).message}</span>}
+        </p>
+      )}
       {s.outages && (
         <div className="sc-dev">
           <span className="sc-dev-tag">{s.env === 'staging' ? 'QA' : 'Dev'} only</span>

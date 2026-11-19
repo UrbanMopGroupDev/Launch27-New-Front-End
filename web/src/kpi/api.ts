@@ -45,6 +45,7 @@ export interface Scorecard {
   sources: { key: string; label: string; mode: string; refreshed_at: string | null; note: string | null }[];
   outage: string | null;
   outages: Record<string, string> | null;
+  refresh: { available: boolean; running: boolean };
   manual_reviews: { can_enter: boolean; entry: ManualReviews | null };
 }
 export interface ManualReviews { new_reviews: number; avg_rating: number; alltime_avg: number; alltime_count: number }
@@ -74,6 +75,7 @@ const qs = (q: Query, extra: Record<string, string> = {}) => {
 export const kpiApi = {
   scorecard: (q: Query) => call<Scorecard>('GET', `/scorecard?${qs(q)}`),
   drill: (q: Query, kpi: string) => call<Drill>('GET', `/drill?${qs(q, { kpi })}`),
+  refresh: () => call<{ running: boolean }>('POST', '/refresh'),
   saveReviews: (brand: string, month: string, entry: ManualReviews) => call<unknown>('PUT', `/reviews/${month}`, { brand, ...entry }),
   clearReviews: (brand: string, month: string) => call<unknown>('DELETE', `/reviews/${month}?brand=${brand}`),
 };

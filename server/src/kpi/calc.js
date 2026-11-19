@@ -212,7 +212,8 @@ export function fulfilmentRange(ix, from, to, today, rules = KPI_RULES) {
       }
       const isLate = kind === 'done' && late != null && late > rules.lateMinutes;
       const cutoff = ms(b.start) - rules.snapshotHours * 3_600_000;
-      const onBooks = ms(b.created_at) <= cutoff && (!b.cancellation || ms(b.cancellation.at) > cutoff);
+      // No creation time from the source: assume it was on the books.
+      const onBooks = (!b.created_at || ms(b.created_at) <= cutoff) && (!b.cancellation || ms(b.cancellation.at) > cutoff);
       rows.push({ booking_id: b.id, customer: b.customer, date: b.date, start: b.start.slice(11, 16), cleaner: b.cleaner || '', frequency: b.frequency, result: label, kind, late: isLate, group: FULFILMENT_GROUPS[kind], minutes_late: late, cancel_reason: b.cancellation?.reason || '', cancelled_by: b.cancellation ? (b.cancellation.by === 'staff' ? 'Staff' : 'Client') : '', on_books_48h: onBooks, issue: kind !== 'done' || isLate, counted: true });
     }
   }
