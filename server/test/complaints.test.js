@@ -9,7 +9,7 @@ import { outcomeAt, journeyAt, recleanCost } from '../src/complaints/journey.js'
 import { normalizeSettings, canApprove, rungForRefund, budgetStatus, DEFAULT_SETTINGS } from '../src/complaints/settings.js';
 import { buildPlaybook } from '../src/complaints/playbook.js';
 import { mapStatus, toCase, discover, createKustomerClient, findListing } from '../src/complaints/sources/kustomer.js';
-import { createComplaints } from '../src/complaints/service.js';
+import { createComplaints, buildReviewStats } from '../src/complaints/service.js';
 import { createReports } from '../src/reports/service.js';
 import { createSchedule } from '../src/schedule/service.js';
 import { createMockLaunch27 } from '../src/mock/launch27.js';
@@ -593,6 +593,71 @@ describe('complaints: automatic updates', () => {
     // Turned off in settings: nothing more is planned.
     await complaints.saveSettings({ auto: { enabled: false } });
     assert.equal(await complaints.maybeRun(), false);
+    await db.close();
+  });
+});
+
+describe('complaints: checking the taxonomy by hand', () => {
+  test('accuracy is measured against what the engine said, and thin samples are flagged', () => {
+    const rows = [
+      ...Array.from({ length: 18 }, () => ({ verdict: 'correct', was_category: 'quality_missed', was_classified_by: 'claude', source: 'kustomer' })),
+      { verdict: 'wrong_category', was_category: 'quality_missed', now_category: 'quality_rushed', was_classified_by: 'claude', source: 'kustomer' },
+      { verdict: 'not_complaint', was_category: 'quality_missed', was_classified_by: 'rules', source: 'gmail' },
+      { verdict: 'not_complaint', was_category: 'other', was_classified_by: 'rules', source: 'gmail' },
+    ];
+    const s = buildReviewStats(rows, [{ category: 'quality_missed', n: 40 }, { category: 'punctuality', n: 7 }]);
+    assert.equal(s.total.checked, 21);
+    const missed = s.by_category.find((c) => c.key === 'quality_missed');
+    assert.equal(missed.accuracy, 0.9);
+    assert.equal(missed.enough, true);
+    assert.equal(missed.waiting, 40);
+    assert.equal(s.by_category.find((c) => c.key === 'other').enough, false, 'one check is not a result');
+    assert.equal(s.by_category.find((c) => c.key === 'punctuality').checked, 0, 'unchecked categories still listed');
+    assert.equal(s.by_source.find((c) => c.key === 'gmail').not_complaint, 2);
+    assert.deepEqual(s.confusions, [{ from: 'quality_missed', to: 'quality_rushed', n: 1 }]);
+    assert.equal(s.waiting, 47);
+  });
+
+  test('a batch, the three verdicts, and what each does to the playbook', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await schedule.sync();
+    await reports.sync();
+    const to = (await reports.visitsSnapshot()).to;
+    const from = new Date(Date.parse(to) - 182 * 86_400_000).toISOString().slice(0, 10);
+    const complaints = createComplaints({ db, config, reports, fetchImpl, log: quiet });
+    await complaints.run({ from, to });
+    const before = (await complaints.listCases({ from, to })).length;
+    const queue = await complaints.reviewQueue({ per: 2 });
+    assert.ok(queue.length >= 3, 'needs three cases to check');
+    const perCat = {};
+    for (const c of queue) perCat[c.category] = (perCat[c.category] || 0) + 1;
+    assert.ok(Object.values(perCat).every((n) => n <= 2), 'at most the asked number per category');
+    assert.ok(queue.every((c) => !('raw' in c) && !('source_id' in c)));
+    assert.ok(queue.every((c) => c.text), 'the rating comment is shown to the reviewer');
+    const [a, b, c] = queue;
+    const other = a.category === 'punctuality' ? 'communication' : 'punctuality';
+    await complaints.reviewCase(a.id, { verdict: 'correct' }, null);
+    await complaints.reviewCase(b.id, { verdict: 'wrong_category', category: other === b.category ? 'scope_booking' : other }, null);
+    await complaints.reviewCase(c.id, { verdict: 'not_complaint' }, null);
+    const stats = await complaints.reviewStats();
+    assert.equal(stats.total.checked, 3);
+    assert.equal(stats.total.correct, 1);
+    assert.equal(stats.total.not_complaint, 1);
+    assert.equal(stats.by_category.find((g) => g.key === b.category).wrong_category >= 1, true, 'counted against the category the engine chose');
+    assert.equal((await complaints.getCase(b.id)).classified_by, 'human');
+    assert.equal((await complaints.listCases({ from, to })).length, before - 1, 'not-a-complaint leaves the case list');
+    assert.equal((await complaints.playbook({ from, to })).totals.cases, before - 1);
+    const again = await complaints.reviewQueue({ per: 100 });
+    assert.ok(![a.id, b.id, c.id].some((id) => again.some((x) => x.id === id)), 'checked cases are not shown again');
+    // A later run must not bring the excluded case back or undo the person's category.
+    await complaints.run({ from, to });
+    assert.equal((await complaints.listCases({ from, to })).length, before - 1);
+    assert.equal((await complaints.getCase(b.id)).classified_by, 'human');
+    await assert.rejects(complaints.reviewCase(999999, { verdict: 'correct' }, null), /Not found/);
     await db.close();
   });
 });

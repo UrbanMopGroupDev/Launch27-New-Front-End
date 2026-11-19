@@ -140,6 +140,39 @@ export interface Clients {
   clients_with_complaints: number;
 }
 
+export type Verdict = 'correct' | 'wrong_category' | 'not_complaint';
+export interface ReviewItem {
+  id: number;
+  source: string;
+  opened_at: string;
+  service_date: string | null;
+  customer_name: string | null;
+  category: string;
+  tone: string | null;
+  severity: number | null;
+  hard_route: string | null;
+  summary: string | null;
+  source_status: string | null;
+  classified_by: string;
+  areas_cited: string[];
+  rungs: string | null;
+  title: string | null;
+  text: string | null;
+  resolution_text: string | null;
+  rating: number | null;
+  original_url: string | null;
+}
+export interface ReviewTally { key: string; checked: number; correct: number; wrong_category: number; not_complaint: number; accuracy: number | null; enough: boolean }
+export interface ReviewStats {
+  total: Omit<ReviewTally, 'key'>;
+  by_category: (ReviewTally & { waiting: number })[];
+  by_source: ReviewTally[];
+  by_classifier: ReviewTally[];
+  confusions: { from: string; to: string; n: number }[];
+  min_checks: number;
+  waiting: number;
+}
+
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api/complaints${path}`, { method, credentials: 'same-origin', headers: body ? { 'content-type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined });
   if (res.status === 401) window.dispatchEvent(new Event('l27:logged-out'));
@@ -150,8 +183,8 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   return res.json();
 }
 
-const qs = (w?: { from?: string; to?: string; category?: string }) => {
-  const p = new URLSearchParams(Object.entries(w || {}).filter(([, v]) => v) as [string, string][]).toString();
+const qs = (w?: Record<string, string | number | undefined>) => {
+  const p = new URLSearchParams(Object.entries(w || {}).filter(([, v]) => v) .map(([k, v]) => [k, String(v)])).toString();
   return p ? `?${p}` : '';
 };
 
@@ -163,6 +196,8 @@ export const complaintsApi = {
   case: (id: number) => call<CaseDetail>('GET', `/cases/${id}`),
   reclassify: (id: number, patch: { category?: string; hard_route?: string | null }) => call<CaseDetail>('PATCH', `/cases/${id}`, patch),
   run: (w?: { from?: string; to?: string }) => call<{ started: boolean }>('POST', '/run', w || {}),
+  review: (w?: { category?: string; source?: string; per?: number }) => call<{ queue: ReviewItem[]; stats: ReviewStats }>('GET', `/review${qs(w)}`),
+  submitReview: (id: number, body: { verdict: Verdict; category?: string }) => call<{ ok: boolean; stats: ReviewStats }>('POST', `/cases/${id}/review`, body),
   settings: () => call<{ settings: Settings; rungs: Rung[]; presets: Record<string, { label: string }>; categories: string[]; hard_routes: Record<string, string> }>('GET', '/settings'),
   saveSettings: (s: Settings) => call<{ settings: Settings }>('PUT', '/settings', s),
 };
