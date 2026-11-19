@@ -14,6 +14,7 @@ import { tick } from './inbox/service.js';
 import { createSegments } from './segments/service.js';
 import { createSchedule } from './schedule/service.js';
 import { createReports } from './reports/service.js';
+import { createKpi } from './kpi/service.js';
 import { createWriteLog } from './writes.js';
 import { createCommercial } from './commercial/service.js';
 import { createWorkforce } from './commercial/workforce.js';
@@ -57,6 +58,7 @@ const writes = createWriteLog({ db, log });
 const segments = createSegments({ db, config, fetchImpl, log });
 const schedule = createSchedule({ db, config, fetchImpl, log, writes, dataTag: () => (qaStore?.summary()?.created_at ? `qa:${qaStore.summary().created_at}:v8` : SAMPLE_VERSION) });
 const reports = createReports({ db, config, fetchImpl, schedule, log });
+const kpi = createKpi({ db, config, log, fetchImpl, syncBearer: createSyncBearer({ config, fetchImpl }) });
 const commercial = createCommercial({ reports, schedule });
 const commercialPlan = createWorkforce({ db, schedule });
 const placement = createPlacement({ db, config, fetchImpl, schedule, writes, log });
@@ -161,7 +163,7 @@ const kustomerMigration = createKustomerMigration({
   },
 });
 await kustomerMigration.recover();
-const app = createApp(config, { db, sessions, fetchImpl, log, jobs, connectors, qa: { store: qaStore, sender: qaSender }, segments, schedule, reports, writes, commercial, placement, commercialPlan, complaints, smsProviders, kustomerMigration });
+const app = createApp(config, { db, sessions, fetchImpl, log, jobs, connectors, qa: { store: qaStore, sender: qaSender }, segments, schedule, reports, writes, commercial, placement, commercialPlan, complaints, smsProviders, kustomerMigration, kpi });
 if (config.sampleData && config.l27Mode === 'mock') {
   await loadSampleInbox(db, { fetchImpl, baseUrl: config.l27BaseUrl, log: (level, msg, fields) => log[level](msg, fields) }).catch((err) => log.error('sample inbox failed', { error: err.message }));
 }
@@ -185,6 +187,7 @@ const worker = setInterval(async () => {
     await segments.maybeRun();
     await schedule.maybeRun();
     await reports.maybeRun();
+    await kpi.maybeRun();
     complaints.maybeRun().catch((err) => log.error('complaints automatic update failed', { error: err.message }));
     await reports.raiseDigest().catch((err) => log.error('monthly raise check failed', { error: err.message }));
     await placement.purge();

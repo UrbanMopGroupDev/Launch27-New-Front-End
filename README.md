@@ -37,6 +37,7 @@ real messages; only production touches the real Launch27.
 | [docs/sms.md](docs/sms.md) | SMS through RingCentral: setup, matching, webhook and recovery, troubleshooting |
 | [docs/kustomer-migration.md](docs/kustomer-migration.md) | Kustomer history: encrypted export, dry-run matching report, the (not enabled) import |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Failed deploys, health checks, sign-in problems |
+| [docs/kpi.md](docs/kpi.md) | KPI scorecard: metric definitions, sources, refresh schedule, how to add a brand |
 | [docs/placement.md](docs/placement.md) | The placement API the Sales Hub books through: endpoints, setup, limits |
 
 ## Setup
