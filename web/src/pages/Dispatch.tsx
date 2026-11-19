@@ -1,8 +1,9 @@
 import { DragEvent, useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { l27, l27All, l27Write } from '../api';
 import { useBrand } from '../brands/useBrand';
+import { CustomerTags } from '../components/CustomerTags';
 import { useActiveTeams, useCanWrite, useLocations } from '../hooks';
 import { fmtMoney, todayISO } from '../format';
 import {
@@ -19,6 +20,7 @@ import {
   type DispatchTeam,
 } from '../lib/dispatch';
 import { buildRoutes, fmtKm, fmtMin, type CleanerRoute } from '../lib/routes';
+import { DROP_REASONS, reportsApi } from '../reports/api';
 
 // Dispatch board: one row per cleaner, the day's bookings as blocks on a timeline.
 //   GET  /v1/staff/bookings?from=D&to=D                 (refreshes every minute)
@@ -67,16 +69,37 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T) => Promise<R
 
 type TeamPayload = { id: number; hours: number; share: number };
 type Pending = { booking: DispatchBooking; toTeam: DispatchTeam; fromTeamId: number | null };
+// Taking a cleaner off a visit: dispatch picks why first (feeds cleaner reliability).
+type DropAsk = { booking: DispatchBooking; teamId: number; verb: string; run: () => Promise<boolean> };
 
 export function DispatchPage() {
   const canWrite = useCanWrite();
   const queryClient = useQueryClient();
-  const [date, setDate] = useState(todayISO());
-  const [locationId, setLocationId] = useState<number | 'all' | null>(null);
+  // The day, location and open booking live in the address (?date=…&loc=…&open=…), so coming
+  // back from a booking (or reloading, or sharing the link) lands on the same view, not on today.
+  // Each day change is its own history entry, so the browser's Back button steps back through
+  // the days you looked at; opening a booking or switching location just updates the current one.
+  const [params, setParams] = useSearchParams();
+  const setUrl = (patch: Record<string, string | null>, push = false) => {
+    const next = new URLSearchParams(params);
+    for (const [k, v] of Object.entries(patch)) if (v) next.set(k, v); else next.delete(k);
+    if (next.toString() === params.toString()) return;
+    setParams(next, { replace: !push });
+  };
+  const today = todayISO();
+  const dateParam = params.get('date') || '';
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(dateParam) && !Number.isNaN(new Date(`${dateParam}T12:00:00`).getTime()) ? dateParam : today;
+  const setDate = (d: string) => setUrl({ date: d && d !== today ? d : null, open: null, team: null }, true);
+  const locParam = params.get('loc');
+  const locationId: number | 'all' | null = locParam === 'all' ? 'all' : locParam && Number.isInteger(Number(locParam)) ? Number(locParam) : null;
+  const setLocationId = (l: number | 'all' | null) => setUrl({ loc: l === null ? null : String(l) });
+  const openKey = params.get('open');
+  const selected = useMemo(() => (openKey ? { key: openKey, teamId: params.get('team') ? Number(params.get('team')) : null } : null), [openKey, params]);
+  const setSelected = (sel: { key: string; teamId: number | null } | null) => setUrl({ open: sel?.key ?? null, team: sel?.teamId != null ? String(sel.teamId) : null });
   const [search, setSearch] = useState('');
   const [showAll, setShowAll] = useState(false);
-  const [selected, setSelected] = useState<{ key: string; teamId: number | null } | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
+  const [dropAsk, setDropAsk] = useState<DropAsk | null>(null);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<{ ok: boolean; text: string } | null>(null);
   const dragRef = useRef<{ booking: DispatchBooking; fromTeamId: number | null } | null>(null);
@@ -101,6 +124,7 @@ export function DispatchPage() {
   useEffect(() => {
     if (locationId !== null && locationId !== 'all' && !brandLocations.some((l) => l.id === locationId)) setLocationId(null);
     else if (locationId === null && brandLocations.length) setLocationId(brand.view === 'both' ? (brandLocations.find((l) => l.default) || brandLocations[0]).id : brandLocations.length > 1 ? 'all' : brandLocations[0].id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- setLocationId only writes the address
   }, [brandLocations, locationId, brand.view]);
 
   const bookingsQ = useQuery({
@@ -114,10 +138,19 @@ export function DispatchPage() {
     [teamsQ.data, locationId, brand],
   );
   const availQ = useQuery({
-    // The date range makes Launch27 include one-day changes (a day off, a short day).
+    // Weekly hours from a plain request; one-day changes (a day off, a short day) from a dated one.
+    // Asked separately so a refused dated request never makes a cleaner read as off.
     queryKey: ['availability', date, teams.map((t) => t.id).join(',')],
     queryFn: async () => {
-      const rows = await mapLimit(teams, 8, (t) => l27<AvailabilityRow[]>(`/v1/staff/teams/${t.id}/availability`, { from: date, to: date }).catch(() => [] as AvailabilityRow[]));
+      const rows = await mapLimit(teams, 8, async (t) => {
+        const path = `/v1/staff/teams/${t.id}/availability`;
+        const [weekly, dated] = await Promise.all([
+          l27<AvailabilityRow[]>(path).catch(() => [] as AvailabilityRow[]),
+          l27<AvailabilityRow[]>(path, { from: date, to: date }).catch(() => [] as AvailabilityRow[]),
+        ]);
+        const list = (x: unknown) => (Array.isArray(x) ? (x as AvailabilityRow[]) : []);
+        return [...list(weekly).filter((r) => !r.date), ...list(dated).filter((r) => r.date && String(r.date).slice(0, 10) === date)];
+      });
       return new Map(teams.map((t, i) => [t.id, rows[i]]));
     },
     enabled: teams.length > 0,
@@ -173,7 +206,7 @@ export function DispatchPage() {
     };
   }, [board, rows, bookings]);
 
-  const isToday = date === todayISO();
+  const isToday = date === today;
   const nowMin = (() => {
     const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(new Date(now));
     return (Number(parts.find((p) => p.type === 'hour')?.value) % 24) * 60 + Number(parts.find((p) => p.type === 'minute')?.value);
@@ -189,18 +222,34 @@ export function DispatchPage() {
     return b.duration ? Math.round((b.duration / 60 / n) * 100) / 100 : 0;
   };
 
-  async function saveTeams(b: DispatchBooking, next: TeamPayload[], message: string) {
+  async function saveTeams(b: DispatchBooking, next: TeamPayload[], message: string): Promise<boolean> {
     setBusy(true);
     try {
       if (!b.id) throw new Error('Projected visits can only be assigned on their series in Launch27.');
       await l27Write('POST', '/v1/staff/bookings/assign/teams', { booking_ids: [b.id], teams: next });
       setToast({ ok: true, text: message });
       await queryClient.invalidateQueries({ queryKey: ['dispatch', date] });
+      return true;
     } catch (err) {
       setToast({ ok: false, text: `Couldn't save: ${(err as Error).message}` });
+      return false;
     } finally {
       setBusy(false);
       setPending(null);
+    }
+  }
+
+  // Run the change, then record why the cleaner came off the visit.
+  async function dropWithReason(reason: string) {
+    const ask = dropAsk;
+    setDropAsk(null);
+    if (!ask) return;
+    const ok = await ask.run();
+    if (!ok || !ask.booking.id) return;
+    try {
+      await reportsApi.recordDrop({ cleaner_id: ask.teamId, visit_key: String(ask.booking.id), booking_id: ask.booking.id, customer: ask.booking.user?.name || null, visit_at: ask.booking.service_date, reason });
+    } catch (err) {
+      setToast({ ok: false, text: `Saved in Launch27, but the reason wasn't recorded: ${(err as Error).message}` });
     }
   }
 
@@ -214,14 +263,19 @@ export function DispatchPage() {
       next = current.map((t) => (t.id === from ? { id: to.id, hours: t.hours || perCleanerHours(b, current.length), share: t.share || to.share || 0 } : t));
     }
     const verb = mode === 'add' ? 'added to' : 'assigned to';
-    return saveTeams(b, next, `${cleanName(to.title)} ${verb} ${b.user?.name || `booking #${b.id}`} at ${fmtClock(localStart(b))}`);
+    const run = () => saveTeams(b, next, `${cleanName(to.title)} ${verb} ${b.user?.name || `booking #${b.id}`} at ${fmtClock(localStart(b))}`);
+    const from = mode === 'replace' && current.length ? (fromTeamId ?? current[0]?.id) : null;
+    if (from == null) return run();
+    setPending(null);
+    setDropAsk({ booking: b, teamId: from, verb: `Move to ${cleanName(to.title)}`, run });
   };
   const unassign = (b: DispatchBooking, teamId: number) =>
-    saveTeams(
-      b,
-      teamPayload(b).filter((t) => t.id !== teamId),
-      `${cleanName(b.teams?.find((t) => t.id === teamId)?.title)} removed from ${b.user?.name || `booking #${b.id}`}`,
-    );
+    setDropAsk({
+      booking: b,
+      teamId,
+      verb: 'Remove',
+      run: () => saveTeams(b, teamPayload(b).filter((t) => t.id !== teamId), `${cleanName(b.teams?.find((t) => t.id === teamId)?.title)} removed from ${b.user?.name || `booking #${b.id}`}`),
+    });
 
   // ---- Drag and drop (desktop) ----
   const onDragStart = (e: DragEvent, block: Block) => {
@@ -256,7 +310,7 @@ export function DispatchPage() {
               ›
             </button>
             {!isToday && (
-              <button className="secondary" onClick={() => setDate(todayISO())}>
+              <button className="secondary" onClick={() => setDate(today)}>
                 Today
               </button>
             )}
@@ -455,6 +509,23 @@ export function DispatchPage() {
         </div>
       )}
 
+      {dropAsk && (
+        <div className="modal-backdrop" onClick={() => !busy && setDropAsk(null)}>
+          <div className="card modal" onClick={(e) => e.stopPropagation()}>
+            <h2>Why is {cleanName(dropAsk.booking.teams?.find((t) => t.id === dropAsk.teamId)?.title)} coming off {dropAsk.booking.user?.name}'s {fmtClock(localStart(dropAsk.booking))} visit?</h2>
+            <p className="muted small">One tap saves the change. Only the "Cleaner –" reasons count against the cleaner's reliability.</p>
+            <div className="drop-reasons">
+              {DROP_REASONS.map(([code, label, cleaner]) => (
+                <button key={code} className={cleaner ? 'chip-btn cleaner' : 'chip-btn'} disabled={busy} onClick={() => dropWithReason(code)}>{label}</button>
+              ))}
+            </div>
+            <div className="actions end">
+              <button className="secondary" disabled={busy} onClick={() => setDropAsk(null)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {toast && <div className={`toast ${toast.ok ? 'ok' : 'bad'}`}>{toast.text}</div>}
     </div>
   );
@@ -546,7 +617,7 @@ function BookingDrawer({
           </a>
         )}
         {b.id && (
-          <Link to={`/bookings/${b.id}`} className="button secondary-link">
+          <Link to={`/bookings/${b.id}`} state={{ from: 'dispatch' }} className="button secondary-link">
             Open booking
           </Link>
         )}
@@ -558,6 +629,7 @@ function BookingDrawer({
         </p>
       )}
       <p className="small">{b.address?.full_address}</p>
+      <CustomerTags customerId={b.user?.id} fallback={b.user?.tags_info} />
       {(b.staff_notes || b.customer_notes) && (
         <div className="drawer-notes small">
           {b.staff_notes && (

@@ -50,21 +50,41 @@ export function createL27Client({ baseUrl, fetchImpl = fetch }) {
     // Find the Launch27 cleaner or customer behind an email or phone. Cleaners win:
     // a cleaner who once booked a clean is still a cleaner when they text the ops line.
     async identify(bearer, kind, value) {
-      if (!bearer) return null;
+      return (await this.match(bearer, kind, value)).contact;
+    },
+    /**
+     * Like identify, and also says when several Launch27 customers share the address or number
+     * (ambiguous: their ids) so the inbox can ask an agent instead of guessing.
+     */
+    async match(bearer, kind, value) {
+      const none = { contact: null, ambiguous: null };
+      if (!bearer) return none;
       const norm = kind === 'email' ? normalizeEmail : normalizePhone;
       const target = norm(value);
-      if (!target) return null;
+      if (!target) return none;
       try {
         const team = (await teams(bearer)).find((t) => norm(kind === 'email' ? t.email : t.phone) === target);
-        if (team) return teamToContact(team);
+        if (team) return { contact: teamToContact(team), ambiguous: null };
         const query = kind === 'email' ? target : target.slice(-10);
         const found = await get(bearer, '/v1/staff/customers', { query, limit: 10 });
         const exact = (found || []).filter((c) => norm(kind === 'email' ? c.email : c.phone) === target);
-        if (exact.length === 1) return customerToContact(exact[0]);
+        if (exact.length === 1) return { contact: customerToContact(exact[0]), ambiguous: null };
+        if (exact.length > 1) return { contact: null, ambiguous: exact.map((c) => Number(c.id)) };
       } catch {
         // Launch27 being slow or down never blocks a message from landing.
       }
-      return null;
+      return none;
+    },
+    teams,
+    /** Every Launch27 customer (active and inactive), for building an identity directory. */
+    async allCustomers(bearer, { pageSize = 100, max = 200_000 } = {}) {
+      const list = [];
+      for (let offset = 0; offset < max; offset += pageSize) {
+        const page = await get(bearer, '/v1/staff/customers', { limit: pageSize, offset });
+        list.push(...page);
+        if (page.length < pageSize) break;
+      }
+      return list;
     },
     async customer(bearer, id) {
       const [c, phones] = await Promise.all([get(bearer, `/v1/staff/customers/${id}`), get(bearer, `/v1/staff/customers/${id}/phones`).catch(() => [])]);

@@ -5,6 +5,7 @@ import { inbox, type Channel, type Complaint, type ConversationDetail, type Disp
 import { CHANNEL_LABEL, ROLE_LABEL, ago, displayIdentity, drafts, fillTemplate, firstName, slaText, useInboxMe, useMeta } from './util';
 import { fmtDateTime, fmtTime } from '../format';
 import { Icon } from '../components/Icon';
+import { useActiveTeams } from '../hooks';
 
 export interface ComposerHandle {
   insert: (text: string) => void;
@@ -61,6 +62,7 @@ export function ConversationView({ id, composerRef, assist }: { id: number; comp
 
       <div className="conv-toolbar">
         <span className="small">
+          <CleanerField detail={d} onSave={(cleaner) => act.mutate(() => inbox.patch(id, cleaner))} /> ·{' '}
           {d.queue?.name || 'No queue'} · {d.owner ? <>Owner: <b>{d.owner.name || d.owner.email}</b>{d.owner.presence !== 'available' && <span className="muted"> ({d.owner.presence})</span>}</> : <span className="warn">Unassigned</span>}
         </span>
         <div className="actions">
@@ -127,6 +129,27 @@ function dayHeading(iso: string) {
   return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric' });
 }
 
+function deliveryLabel(state: string | null) {
+  switch (state) {
+    case 'not_connected':
+      return 'not sent: channel not connected';
+    case 'sandbox':
+      return 'sandbox: not sent to customer';
+    case 'sending':
+      return 'sending…';
+    case 'queued':
+      return 'accepted, waiting for the carrier';
+    case 'delivered':
+      return 'delivered';
+    case 'failed':
+      return 'not sent';
+    case 'unknown':
+      return 'status unknown';
+    default:
+      return state || '';
+  }
+}
+
 function renderMessage(m: Message) {
         if (m.kind === 'event') {
           return (
@@ -159,7 +182,8 @@ function renderMessage(m: Message) {
             {m.channel === 'email' && <EmailExtras m={m} />}
             <div className="tl-meta">
               {m.channel && <Icon name={m.channel} size={12} />} {m.channel ? CHANNEL_LABEL[m.channel] : ''} · {m.direction === 'out' ? m.author_name || 'Agent' : displayIdentity(m.from_addr)} · {fmtTime(m.created_at)}
-              {m.direction === 'out' && <span className={notSent ? 'delivery bad' : 'delivery'}> · {m.delivery_state === 'not_connected' ? 'not sent: channel not connected' : m.delivery_state === 'sandbox' ? 'sandbox: not sent to customer' : m.delivery_state}</span>}
+              {m.direction === 'out' && <span className={notSent ? 'delivery bad' : 'delivery'}> · {deliveryLabel(m.delivery_state)}</span>}
+              {m.direction === 'out' && m.delivery_state === 'failed' && m.channel === 'sms' && m.meta?.note && <div className="error small">{String(m.meta.note)}</div>}
             </div>
           </div>
         );
@@ -200,6 +224,7 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
   const [subject, setSubject] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const sendKey = useRef<string | null>(null);
   const area = useRef<HTMLTextAreaElement>(null);
 
   useImperativeHandle(ref, () => ({
@@ -222,6 +247,8 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
   const sender = from || (channel === c.channel ? c.our_identity : fromOptions?.[0]) || '';
   const connected = meta.data?.connected_channels.includes(channel);
   const sandboxed = meta.data?.channels?.[channel === 'email' ? 'email' : 'sms']?.state === 'sandbox';
+  // Email is read-only on this platform: nothing can be sent. Locked until the server says otherwise.
+  const emailLocked = mode === 'reply' && channel === 'email' && meta.data?.channels?.email?.read_only !== false;
   // A new email (or a conversation started without one) needs a subject line.
   const needsSubject = channel === 'email' && (channel !== c.channel || !c.subject);
 
@@ -243,7 +270,13 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
     setError(null);
     try {
       if (mode === 'note') await inbox.note(c.id, text);
-      else await inbox.reply(c.id, { body: text, channel, to: target, from: sender, subject: channel === 'email' && subject ? subject : undefined });
+      else {
+        // One key per message: if this request is repeated (double click, retry after a network
+        // error), the server returns the first one instead of texting the customer twice.
+        sendKey.current ||= crypto.randomUUID();
+        await inbox.reply(c.id, { body: text, channel, to: target, from: sender, subject: channel === 'email' && subject ? subject : undefined, idempotency_key: sendKey.current });
+        sendKey.current = null;
+      }
       setText('');
       drafts.set(key, '');
       onSent();
@@ -281,16 +314,20 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
           </div>
         )}
       </div>
-      {mode === 'reply' && needsSubject && <input className="full" placeholder="Subject" aria-label="Email subject" value={subject} onChange={(e) => setSubject(e.target.value)} />}
+      {emailLocked && <div className="notice small" role="status">Email is read-only: emails can't be sent from this platform. Reply by text, or add an internal note.</div>}
+      {mode === 'reply' && needsSubject && !emailLocked && <input className="full" placeholder="Subject" aria-label="Email subject" value={subject} onChange={(e) => setSubject(e.target.value)} />}
       <div className="composer-box">
         <textarea
           ref={area}
           rows={4}
           value={text}
           placeholder={mode === 'note' ? 'Only your team sees this. @name to notify someone.' : 'Write a reply…'}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            sendKey.current = null; // edited: a new message
+            setText(e.target.value);
+          }}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && text.trim() && !busy && !optedOut) send();
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && text.trim() && !busy && !optedOut && !emailLocked) send();
           }}
         />
         {!!canned.length && (
@@ -308,11 +345,11 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
       <div className="composer-foot">
         <span className="muted small">
           {mode === 'reply' && !connected && `${CHANNEL_LABEL[channel]} isn't connected yet: replies are saved, not sent.`}
-          {mode === 'reply' && connected && sandboxed && 'Sandbox: replies are recorded here, not sent to the customer.'}
+          {mode === 'reply' && connected && sandboxed && !emailLocked && 'Sandbox: replies are recorded here, not sent to the customer.'}
           {mode === 'reply' && channel === 'sms' && text && <span className="mono"> {text.length} chars · {segments} text{segments === 1 ? '' : 's'}</span>}
           {!text && <span> Type <span className="kbd">/</span> for saved replies · <span className="kbd">Ctrl</span>+<span className="kbd">Enter</span> to send</span>}
         </span>
-        <button disabled={busy || !text.trim() || !!optedOut || (mode === 'reply' && needsSubject && !subject.trim())} title={mode === 'reply' && needsSubject && !subject.trim() ? 'Add a subject first' : undefined} className={mode === 'note' ? 'note-btn' : ''} onClick={send}>
+        <button disabled={busy || !text.trim() || !!optedOut || emailLocked || (mode === 'reply' && needsSubject && !subject.trim())} title={emailLocked ? 'Email is read-only' : mode === 'reply' && needsSubject && !subject.trim() ? 'Add a subject first' : undefined} className={mode === 'note' ? 'note-btn' : ''} onClick={send}>
           {mode !== 'note' && <Icon name="send" />}
           {busy ? 'Saving…' : mode === 'note' ? 'Add note' : 'Send'}
         </button>
@@ -407,13 +444,40 @@ function AssignPanel({ detail, onCancel, onAssign, onMove }: { detail: Conversat
   );
 }
 
+// Which cleaner this conversation is about. Defaults from the linked booking; feeds the
+// complaints count on Cleaner reports when the conversation is a complaint.
+const stripCodes = (t: string) => t.replace(/^\s*(on\s*hold\s*)?(\s*\([^)]*\))*\s*/i, '').trim() || t;
+function CleanerField({ detail, onSave }: { detail: ConversationDetail; onSave: (c: { cleaner_id: number | null; cleaner_name: string | null }) => void }) {
+  const c = detail.conversation;
+  const [editing, setEditing] = useState(false);
+  const teams = useActiveTeams();
+  const suggested = !c.cleaner_id ? detail.cleaner_from_booking : null;
+  if (editing) {
+    const list = (teams.data || []).map((t) => ({ id: t.id, name: stripCodes(t.title) })).sort((a, b) => a.name.localeCompare(b.name));
+    return (
+      <label className="conv-cleaner">Cleaner{' '}
+        <select autoFocus value={c.cleaner_id ?? ''} onBlur={() => setEditing(false)} onChange={(e) => { const t = list.find((x) => x.id === Number(e.target.value)); onSave({ cleaner_id: t ? t.id : null, cleaner_name: t ? t.name : null }); setEditing(false); }}>
+          <option value="">None</option>
+          {list.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+        </select>
+      </label>
+    );
+  }
+  return (
+    <span className="conv-cleaner">
+      Cleaner: {c.cleaner_id ? <b>{c.cleaner_name || `#${c.cleaner_id}`}</b> : suggested ? <><span className="muted">{suggested.name} (from booking)</span> <button className="link small" onClick={() => onSave({ cleaner_id: suggested.id, cleaner_name: suggested.name })}>Use</button></> : <span className="muted">none</span>}
+      {' '}<button className="link small" onClick={() => setEditing(true)}>{c.cleaner_id ? 'Change' : 'Set'}</button>
+    </span>
+  );
+}
+
 function ComplaintPanel({ initial, bookingId, onCancel, onSave }: { initial: Complaint | null; bookingId: number | null; onCancel: () => void; onSave: (c: Complaint | null) => void }) {
   const [c, setC] = useState<Complaint>(initial || { booking_id: bookingId, status: 'open', outcome: 'pending' });
   return (
     <div className="inline-panel">
       <div className="grid-3">
         <label>Booking #<input value={c.booking_id ?? ''} onChange={(e) => setC({ ...c, booking_id: e.target.value ? Number(e.target.value) : null })} /></label>
-        <label>Cleaner<input value={c.cleaner || ''} onChange={(e) => setC({ ...c, cleaner: e.target.value })} /></label>
+        <label>Cleaner<input value={c.cleaner || ''} placeholder="Set with Cleaner above" onChange={(e) => setC({ ...c, cleaner: e.target.value })} /></label>
         <label>Outcome<select value={c.outcome} onChange={(e) => setC({ ...c, outcome: e.target.value as Complaint['outcome'] })}>{['pending', 'return clean', 'credit', 'refund', 'none'].map((o) => <option key={o}>{o}</option>)}</select></label>
       </div>
       <label>What went wrong<textarea rows={2} value={c.issue || ''} onChange={(e) => setC({ ...c, issue: e.target.value })} /></label>

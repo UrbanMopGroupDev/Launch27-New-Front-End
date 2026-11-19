@@ -17,7 +17,7 @@ Gmail, and it has no "edit data" controls.
 | Synthetic data for dev and QA | `server/src/kpi/synthetic.js` |
 | Service and API (`/api/kpi/*`) | `server/src/kpi/service.js`, routes at the end of `server/src/inbox/api.js` |
 | Page | `web/src/pages/KpiScorecard.tsx`, `web/src/kpi/api.ts` |
-| Tables | `server/migrations/0018_kpi.sql` (`kpi_refresh_log`, `kpi_manual_reviews`) |
+| Tables | `server/migrations/0029_kpi.sql` (`kpi_refresh_log`, `kpi_manual_reviews`) |
 
 ## Definitions
 
@@ -29,7 +29,7 @@ and shows no number. A month with no data is a gap in the trend, never a zero.
 | --- | --- | --- |
 | Operational Cost Ratio | Operational delivery cost ÷ revenue. Included: cleaner wages (contractor + employee), payroll taxes / EI / CPP / workers' comp on cleaners, supplies, field vehicle costs, ops/office staff, ops software, recruitment ads. Excluded: office rent, general business insurance. Syft's figure is shown beside it, flagged when they differ by more than 1.0 percentage point. Provisional until the 10th of the following month | QuickBooks Online (source of truth), Syft report |
 | Recurring client churn | Permanent churn events in the calendar month ÷ active recurring clients at the start of the month. Bands: ≤7% Excellent, 7–10% Healthy, 10–12% Elevated, over 12% High | Launch27 |
-| Service fulfilment | Bookings completed as scheduled ÷ bookings scheduled, client-caused cancellations removed. Monthly and by week | Launch27 |
+| Service fulfilment | Bookings completed ÷ bookings scheduled. A completed visit is fulfilled even when we arrived late (late arrivals over 30 minutes are counted separately). Anything not completed is not fulfilled, split into ours, client-related and unclear. Monthly and by week | Launch27 |
 | Complaint rate | Complaints ÷ completed visits × 100. Complaint = Kustomer complaint object or Launch27 bottom rating, the same visit counted once. "Saved" = still booking 60+ days later | Kustomer, Launch27 |
 | Google reviews | New reviews, average rating (month and all time), reviews per 100 completed visits | Google Business Profile, Launch27 |
 | Billing cash conversion | Not built. Placeholder tile | — |
@@ -39,7 +39,10 @@ Churn rules, in the order they are applied to each cancellation in the month:
 1. Test entry (listed names, or the word "test" in the name or reason): out.
 2. Institutional client (carefor, owcs, bruyere, homemaking, mft, metis, digirealty, spark lifecare, corretto): out.
 3. Not recurring (frequency has no weekly / biweekly / triweekly / monthly / prepaid, or is a one-time): out.
-4. Reason is a LuxoClean transfer, temporary (travel, hold/pause, renovation, Airbnb, postpartum) or an admin error: out.
+4. Reason is a LuxoClean transfer or an admin error: out.
+   Temporary reasons (travel, hold/pause, renovation, Airbnb, postpartum): out if the client is back
+   on a recurring plan within 90 days (shown as back within 30, 60 or 90); counted as churn in the
+   cancellation month once 90 days pass with no return; pending, and not counted, until then.
 5. The client has a later active recurring booking ("came back"): out.
 6. A second event for the same client in the month: out.
 

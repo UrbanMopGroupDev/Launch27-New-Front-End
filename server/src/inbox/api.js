@@ -3,11 +3,13 @@
 // keeps enforcing their permissions.
 import { canSeeUtilization } from '../config.js';
 import { canSeeKpi } from '../kpi/service.js';
+import { registerComplaintRoutes } from '../complaints/api.js';
+import { registerKustomerRoutes } from '../kustomer-migration/api.js';
 import express from 'express';
 import { json as toJson } from '../db/index.js';
 import { lintRules, route } from './routing.js';
 import { DISPOSITIONS, OUR_IDENTITIES, UM } from './seed.js';
-import { connectedChannels, sendableIdentities } from './channels.js';
+import { EMAIL_READ_ONLY_MESSAGE, EMAIL_SENDING_ENABLED, connectedChannels, sendableIdentities } from './channels.js';
 import { normalizeEmail, normalizeIdentity, normalizePhone, kindForChannel } from './normalize.js';
 import * as svc from './service.js';
 import { CHANNELS, canEditSettings, getSettings, normalizeCapacity, validateSettings } from './workforce.js';
@@ -27,7 +29,7 @@ export function diffRules(before, after) {
 }
 const many = async (q, sql, p) => (await q.query(sql, p)).rows;
 
-export function createInboxRouter({ db, sessions, cookieName, config, l27, connectors = {}, log = (lvl, msg, f) => console.error(msg, f), qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, kpi = null }) {
+export function createInboxRouter({ db, sessions, cookieName, config, l27, connectors = {}, log = (lvl, msg, f) => console.error(msg, f), qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, complaints = null, smsProviders = {}, kustomerMigration = null, kpi = null }) {
   const r = express.Router();
   r.use(express.json({ limit: '1mb' }));
 
@@ -45,6 +47,12 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       if (!session) return res.status(401).json({ error: 'Not logged in' });
       const email = session.email.toLowerCase();
       let user = await one(db, 'UPDATE users SET last_seen_at = now() WHERE email = $1 RETURNING *', [email]);
+      // ADMIN_EMAILS is authoritative: someone added to it after their first sign-in is
+      // promoted on their next request. (Never demotes: other admins are set in Support settings.)
+      if (user && user.role !== 'admin' && roleFor(email, false) === 'admin') {
+        user = await one(db, "UPDATE users SET role = 'admin' WHERE id = $1 RETURNING *", [user.id]);
+        await svc.audit(db, null, 'user.promoted', 'user', user.id, { role: 'admin', by: 'ADMIN_EMAILS' });
+      }
       if (!user) {
         const isFirst = !(await one(db, 'SELECT 1 FROM users LIMIT 1'));
         user = await one(db, "INSERT INTO users (email, name, role, status_id, status_since) VALUES ($1,$2,$3,(SELECT id FROM agent_statuses WHERE kind = 'offline' ORDER BY position LIMIT 1), now()) ON CONFLICT (email) DO UPDATE SET last_seen_at = now() RETURNING *", [email, email.split('@')[0].replace(/[._]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()), roleFor(email, isFirst)]);
@@ -161,10 +169,36 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     const email = connectors.email;
     const accounts = email ? await many(db, "SELECT address, provider, last_poll_at, last_ok_at, last_error, ingested_count FROM channel_accounts WHERE channel = 'email' ORDER BY address") : [];
     return {
-      email: !email ? { state: 'not_connected', provider: null, accounts: [] } : { state: email.sandbox ? 'sandbox' : 'live', provider: email.name, send_from: email.identities || OUR_IDENTITIES.email, accounts },
-      sms: !connectors.sms ? { state: 'not_connected', provider: null } : { state: connectors.sms.sandbox ? 'sandbox' : 'live', provider: connectors.sms.name },
+      // state: how mail is read (live Gmail, sandbox, or not connected). read_only: sending is off.
+      email: !email ? { state: 'not_connected', provider: null, accounts: [], read_only: !EMAIL_SENDING_ENABLED } : { state: email.sandbox ? 'sandbox' : 'live', provider: email.name, send_from: email.identities || OUR_IDENTITIES.email, accounts, read_only: !EMAIL_SENDING_ENABLED },
+      sms: !connectors.sms ? { state: 'not_connected', provider: null, providers: [] } : { state: connectors.sms.sandbox ? 'sandbox' : 'live', provider: connectors.sms.name, providers: await Promise.all(Object.values(smsProviders).map(smsDetail)) },
     };
   }
+
+  // Each SMS provider: connection, numbers and the queue each number's texts go to (from the
+  // routing rules, so the screen always matches what really happens).
+  async function smsDetail(provider) {
+    const st = await provider.status();
+    const rules = await many(db, 'SELECT * FROM routing_rules');
+    const queues = new Map((await many(db, 'SELECT slug, name FROM queues')).map((q) => [q.slug, q.name]));
+    const numbers = [...new Set([...(st.health?.sms_numbers || []), ...st.configured_numbers])];
+    return {
+      ...st,
+      numbers: numbers.map((n) => {
+        const slug = route(rules, { channel: 'sms', to: n, from: '+10000000000', subject: '', body: '', roles: [] }).action.queue || 'fallback';
+        return { number: n, can_send: (st.health?.sms_numbers || []).includes(n), queue: queues.get(slug) || slug };
+      }),
+    };
+  }
+  // Admins: check, disconnect or reconnect one provider (credentials stay in Railway).
+  r.post('/admin/sms/:provider/:action', needRole('admin'), wrap(async (req, res) => {
+    const provider = Object.hasOwn(smsProviders, req.params.provider) ? smsProviders[req.params.provider] : null;
+    const actions = { check: 'check', disconnect: 'disconnect', connect: 'connect' };
+    if (!provider || !Object.hasOwn(actions, req.params.action)) throw new svc.InboxError(404, 'Unknown SMS provider or action');
+    await provider[actions[req.params.action]]();
+    await svc.audit(db, req.user.id, `sms.${req.params.action}`, 'channel', `sms:${req.params.provider}`, {});
+    res.json(await channelStatus());
+  }));
 
   r.get('/channels', wrap(async (req, res) => res.json(await channelStatus())));
 
@@ -176,7 +210,7 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       dispositions: DISPOSITIONS,
       canned: await many(db, 'SELECT * FROM canned_responses ORDER BY shortcut'),
       // Only addresses the email connector can really send from (all of ours when sandboxed).
-      identities: { ...OUR_IDENTITIES, email: sendableIdentities(connectors, 'email') || OUR_IDENTITIES.email },
+      identities: { ...OUR_IDENTITIES, email: sendableIdentities(connectors, 'email') || OUR_IDENTITIES.email, sms: sendableIdentities(connectors, 'sms')?.length ? sendableIdentities(connectors, 'sms') : OUR_IDENTITIES.sms },
       connected_channels: connectedChannels(connectors),
       channels: await channelStatus(),
       portal: { name: config.portalName || 'UrbanMop', links: config.portalLinks || [] },
@@ -265,7 +299,8 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       ? await many(db, 'SELECT DISTINCT c.* FROM contacts c JOIN contact_identities i ON i.contact_id = c.id WHERE i.value = $1', [conv.their_identity])
       : [];
     await db.query("UPDATE notifications SET read_at = now() WHERE user_id = $1 AND conversation_id = $2 AND read_at IS NULL", [req.user.id, conv.id]);
-    res.json({ conversation: conv, messages, contact: contact && { ...contact, identities }, others, queue, owner, sla_policy: policy, candidates });
+    const cleaner_from_booking = !conv.cleaner_id && conv.l27_booking_id ? await cleanerForBooking(conv.l27_booking_id) : null;
+    res.json({ conversation: conv, messages, contact: contact && { ...contact, identities }, others, queue, owner, sla_policy: policy, candidates, cleaner_from_booking });
   }));
 
   r.post('/conversations/:id/messages', wrap(async (req, res) => {
@@ -286,9 +321,32 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     res.status(201).json(await db.tx((q) => svc.addEvent(q, req.user, req.params.id, text, req.body?.meta || {})));
   }));
 
+  // The cleaner a booking was with (for the conversation's Cleaner field). Past visits come
+  // from the reports' copy, upcoming ones from the planner's.
+  async function cleanerForBooking(bookingId) {
+    if (!bookingId) return null;
+    const id = Number(bookingId);
+    try {
+      const snap = reports ? await reports.visitsSnapshot() : null;
+      const v = snap?.visits.find((x) => Number(x.id) === id);
+      if (v?.teams?.length) return { id: v.teams[0].id, name: v.teams[0].name };
+    } catch { /* reports not built yet */ }
+    try {
+      const c = schedule?.cleanerForBooking ? await schedule.cleanerForBooking(id) : null;
+      if (c) return c;
+    } catch { /* planner not running */ }
+    return null;
+  }
+
   r.patch('/conversations/:id', wrap(async (req, res) => {
-    await loadConversation(req, req.params.id);
-    res.json(await db.tx((q) => svc.updateConversation(q, req.user, req.params.id, req.body || {})));
+    const conv = await loadConversation(req, req.params.id);
+    const body = { ...(req.body || {}) };
+    // Default the Cleaner from the linked booking when a complaint is logged or a booking linked.
+    if (body.cleaner_id === undefined && !conv.cleaner_id && (body.complaint || body.l27_booking_id)) {
+      const c = await cleanerForBooking(body.l27_booking_id || body.complaint?.booking_id || conv.l27_booking_id);
+      if (c) Object.assign(body, { cleaner_id: c.id, cleaner_name: c.name });
+    }
+    res.json(await db.tx((q) => svc.updateConversation(q, req.user, req.params.id, body)));
   }));
 
   r.post('/conversations/:id/claim', wrap(async (req, res) => {
@@ -306,6 +364,7 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
   r.post('/conversations', wrap(async (req, res) => {
     const { contact_id, channel = 'sms', to, from, subject, body, l27_booking_id } = req.body || {};
     if (!['email', 'sms'].includes(channel)) throw new svc.InboxError(400, 'Start conversations by email or text');
+    if (channel === 'email' && !EMAIL_SENDING_ENABLED) throw new svc.InboxError(403, EMAIL_READ_ONLY_MESSAGE);
     const out = await db.tx(async (q) => {
       const contact = await one(q, 'SELECT * FROM contacts WHERE id = $1', [contact_id]);
       if (!contact) throw new svc.InboxError(404, 'Contact not found');
@@ -406,6 +465,8 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     const updated = await db.tx(async (q) => {
       const row = await one(q, `UPDATE contacts SET ${sets.join(', ')}, updated_at = now() WHERE id = $1 RETURNING *`, params);
       if (!row) throw new svc.InboxError(404, 'Contact not found');
+      // Linked to Launch27: their conversations leave "Who is this?".
+      if (row.l27_customer_id || row.l27_team_id) await q.query('UPDATE conversations SET needs_match = false, updated_at = now() WHERE contact_id = $1 AND needs_match', [row.id]);
       await svc.audit(q, req.user.id, 'contact.updated', 'contact', req.params.id, req.body);
       return row;
     });
@@ -1064,8 +1125,22 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     r.get('/schedule/gap', sched(async (req, res) => res.json(await schedule.gapOptions(req.query.cleaner, String(req.query.date), Number(req.query.start), Number(req.query.end)))));
     r.get('/schedule/unassigned', sched(async (req, res) => res.json(await schedule.unassigned())));
     r.get('/schedule/continuity', sched(async (req, res) => res.json(await schedule.continuity({ locations: brandLocs(req) }))));
-    r.get('/schedule/changes', sched(async (req, res) => res.json(await schedule.changes())));
+    r.get('/schedule/changes', sched(async (req, res) => {
+      const out = await schedule.changes();
+      // Cleaner taken off a visit: which drops still need a reason code.
+      if (reports && Array.isArray(out?.items)) {
+        const ids = out.items.filter((c) => c.kind === 'cleaner_changed').map((c) => c.id);
+        const drops = await reports.dropsForChanges(ids).catch(() => new Map());
+        for (const c of out.items) if (drops.has(c.id)) c.drops = drops.get(c.id);
+      }
+      res.json(out);
+    }));
     r.post('/schedule/changes/:id/resolve', sched(async (req, res) => {
+      // A cleaner taken off a visit needs a reason before the card is closed.
+      if (reports) {
+        const drops = (await reports.dropsForChanges([Number(req.params.id)])).get(Number(req.params.id)) || [];
+        if (drops.some((d) => !d.reason)) return res.status(422).json({ error: 'Pick why the cleaner came off this visit first' });
+      }
       await schedule.resolveChange(Number(req.params.id), req.body?.resolution, req.user.id);
       res.status(204).end();
     }));
@@ -1098,22 +1173,57 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     });
     const period = (req) => (['4w', '13w', '12m'].includes(req.query.period) ? req.query.period : '13w');
     const admin = (req) => req.user.role === 'admin';
-    r.get('/reports/status', rep(async (req, res) => res.json(await reports.status())));
+    // Opening the reports keeps them fresh: a build from before today is rebuilt in the background
+    // with this person's own (read-only) Launch27 login. The page polls this while it runs.
+    r.get('/reports/status', rep(async (req, res) => {
+      await reports.maybeRun({ bearer: req.bearer }).catch((err) => log.warn?.('reports build on view failed', { error: err.message }));
+      res.json(await reports.status());
+    }));
     const repLocs = (req) => (req.query.locations ? String(req.query.locations).split(',').map(Number).filter((n) => Number.isInteger(n) && n >= 0) : null);
     r.get('/reports/scheduling', rep(async (req, res) => res.json(await reports.scheduling(period(req), { locations: repLocs(req) }))));
     r.get('/reports/cleaners', rep(async (req, res) => res.json(await reports.cleaners(period(req), { admin: admin(req), locations: repLocs(req) }))));
     r.get('/reports/cleaners/:id', rep(async (req, res) => res.json(await reports.cleaner(req.params.id, period(req), { admin: admin(req), locations: repLocs(req) }))));
+    // Cleaner reports 2.0 (Leslie's report above stays as he built it).
+    r.get('/reports/cleaners2', rep(async (req, res) => res.json(await reports.cleaners2(period(req), { admin: admin(req), locations: repLocs(req) }))));
+    r.get('/reports/cleaners2/:id', rep(async (req, res) => res.json(await reports.cleaner2(req.params.id, period(req), { admin: admin(req), locations: repLocs(req) }))));
     // Utilization: everyone outside production unless UTILIZATION_EMAILS narrows it; 404 otherwise.
     // ?from=YYYY-MM-DD&to=YYYY-MM-DD (clamped to today … the end of the planner's 8 weeks).
     r.get('/reports/utilization', rep(async (req, res) => {
       if (!canSeeUtilization(config, req.user.email)) return res.status(404).json({ error: 'Not found' });
       res.json(await reports.utilization({ from: req.query.from ? String(req.query.from) : null, to: req.query.to ? String(req.query.to) : null, locations: repLocs(req) }));
     }));
+    // Raise readiness: drops with a reason (Dispatch, Changes card) and Google reviews.
+    r.post('/reports/drops', rep(async (req, res) => {
+      const out = await reports.recordDrop(req.body || {}, req.user.id);
+      await svc.audit(db, req.user.id, 'cleaner.drop', 'cleaner', req.body?.cleaner_id, { visit_key: req.body?.visit_key, reason: req.body?.reason });
+      res.json(out);
+    }));
+    r.post('/reports/changes/:id/reason', rep(async (req, res) => {
+      const out = await reports.codeChange(req.params.id, req.body?.reason, req.user.id);
+      await svc.audit(db, req.user.id, 'cleaner.drop', 'schedule_change', req.params.id, { reason: req.body?.reason });
+      res.json(out);
+    }));
+    r.post('/reports/cleaners/:id/reviews', rep(async (req, res) => {
+      const out = await reports.addReview(req.params.id, req.body || {}, req.user.id);
+      await svc.audit(db, req.user.id, 'cleaner.google_review', 'cleaner', req.params.id, { reviewer: req.body?.reviewer });
+      res.json(out);
+    }));
+    r.patch('/reports/reviews/:id', needRole('admin'), rep(async (req, res) => {
+      await reports.updateReview(req.params.id, req.body || {});
+      res.status(204).end();
+    }));
+    r.delete('/reports/reviews/:id', needRole('admin'), rep(async (req, res) => {
+      await reports.deleteReview(req.params.id);
+      res.status(204).end();
+    }));
     r.post('/reports/refresh', needRole('admin'), rep(async (req, res) => {
       reports.start({ bearer: req.bearer });
       res.status(202).json({ running: true });
     }));
   }
+
+  if (complaints) registerComplaintRoutes(r, { complaints, needRole, wrap });
+  if (kustomerMigration) registerKustomerRoutes(r, { migration: kustomerMigration, needRole, wrap });
 
   // ---------- KPI scorecard (read-only; docs/kpi.md) ----------
   if (kpi) {

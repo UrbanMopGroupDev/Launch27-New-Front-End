@@ -5,13 +5,16 @@
 //   - a service account with domain-wide delegation: one key reads and sends for every
 //     @urbanmop.ca mailbox listed in GMAIL_MAILBOXES (recommended);
 //   - an OAuth refresh token for a single mailbox (its send-as aliases can still be listed).
-// Scopes: gmail.readonly (read new mail) and gmail.send (send). We never delete, label or
+// Scope: gmail.readonly only, because email is read-only for now (see GMAIL_SCOPES). We never delete, label or
 // mark mail as read, so the team can keep using Gmail alongside the inbox.
 import { createSign } from 'node:crypto';
 import { normalizeEmail } from '../normalize.js';
 import { buildMessage, toBase64Url } from './mime.js';
 
-export const GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.send'];
+// Email is read-only (channels.js EMAIL_SENDING_ENABLED): only the read permission is requested,
+// so Google itself refuses any attempt to send. Sending later also needs GMAIL_SEND_SCOPE here.
+export const GMAIL_SEND_SCOPE = 'https://www.googleapis.com/auth/gmail.send';
+export const GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.readonly'];
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const API = 'https://gmail.googleapis.com/gmail/v1/users';
 const TIMEOUT_MS = 20_000;
@@ -118,6 +121,11 @@ export function createGmailClient({ auth, fetchImpl = fetch, now = () => Date.no
     async list(account, q, max = 100) {
       const page = await call(account, 'GET', '/messages', { query: { q, maxResults: max, labelIds: 'INBOX' } });
       return (page.messages || []).map((m) => m.id);
+    },
+    /** Read-only search across all mail (archived included), for the complaint history miner. */
+    async search(account, q, { max = 100, pageToken } = {}) {
+      const page = await call(account, 'GET', '/messages', { query: { q, maxResults: max, pageToken } });
+      return { ids: (page.messages || []).map((m) => m.id), next: page.nextPageToken || null };
     },
     message: (account, id) => call(account, 'GET', `/messages/${encodeURIComponent(id)}`, { query: { format: 'full' } }),
     headers: (account, id, names) => call(account, 'GET', `/messages/${encodeURIComponent(id)}`, { query: { format: 'metadata', metadataHeaders: names } }),

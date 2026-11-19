@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import { BrandSwitcher } from '../brands/ui';
 import { useBrand } from '../brands/useBrand';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
@@ -10,13 +9,13 @@ import { Icon } from './Icon';
 import { SupportStatus } from '../inbox/SupportStatus';
 import { CommandBar } from '../inbox/CommandBar';
 import { RingCentralPhone } from '../inbox/RingCentralPhone';
-import { useCounts } from '../inbox/util';
+import { useCounts, useInboxMe } from '../inbox/util';
 import { PortalSwitcher } from './PortalSwitcher';
 
 // Sidebar sections. Add a line here for each page rebuilt from docs/API.md.
 // `icon` is a name from components/Icon.tsx.
 // `feature`: shown only to logins the server enables it for (/auth/me features).
-const NAV: { section: string; items: { to: string; label: string; icon: string; feature?: 'utilization' | 'kpi' }[] }[] = [
+const NAV: { section: string; items: { to: string; label: string; icon: string; feature?: 'utilization' | 'kpi'; lead?: true }[] }[] = [
   {
     section: 'Support',
     items: [
@@ -24,6 +23,7 @@ const NAV: { section: string; items: { to: string; label: string; icon: string; 
       { to: '/supervisor', label: 'Supervisor', icon: 'headset' },
       { to: '/calls', label: 'Calls', icon: 'voice' },
       { to: '/contacts', label: 'Contacts', icon: 'user' },
+      { to: '/complaints', label: 'Complaint playbook', icon: 'alert', lead: true },
       { to: '/inbox-simulator', label: 'Channel simulator', icon: 'flask' },
       { to: '/inbox-settings', label: 'Support settings', icon: 'sliders' },
     ],
@@ -64,6 +64,7 @@ const NAV: { section: string; items: { to: string; label: string; icon: string; 
       { to: '/reports/scheduling', label: 'Scheduling insights', icon: 'route' },
       { to: '/reports/utilization', label: 'Utilization', icon: 'trend', feature: 'utilization' },
       { to: '/reports/cleaners', label: 'Cleaner reports', icon: 'users' },
+      { to: '/reports/cleaners-2', label: 'Cleaner reports 2.0', icon: 'users' },
       { to: '/feedback', label: 'Customer feedback', icon: 'star' },
     ],
   },
@@ -98,6 +99,8 @@ export function Layout({ email }: { email: string }) {
   const queryClient = useQueryClient();
   const canWrite = useCanWrite();
   const me = useMe();
+  const inboxMe = useInboxMe();
+  const isLead = inboxMe.data?.role === 'admin' || inboxMe.data?.role === 'supervisor';
   // Phones: the sidebar becomes a slide-out drawer behind a top bar.
   const [menuOpen, setMenuOpen] = useState(false);
   // Desktop: the sidebar can shrink to an icon rail.
@@ -105,7 +108,7 @@ export function Layout({ email }: { email: string }) {
   const [closed, setClosed] = useState<Record<string, boolean>>(() => loadPref('closed', { Developer: true }));
   const location = useLocation();
   useEffect(() => setMenuOpen(false), [location.pathname]);
-  // The Commercial section belongs to the Commercial brand: hidden while viewing Residential.
+  // The Commercial section is hidden here: Commercial is run from the Luxoclean + Commercial portal.
   const { view: brandView } = useBrand();
   const current = NAV.flatMap((g) => g.items).filter((i) => location.pathname === i.to || location.pathname.startsWith(`${i.to}/`)).sort((a, b) => b.to.length - a.to.length)[0];
   const counts = useCounts();
@@ -160,13 +163,11 @@ export function Layout({ email }: { email: string }) {
           </button>
         </div>
 
-        <BrandSwitcher />
-
         <nav>
           {NAV.filter((group) => !(group.section === 'Commercial' && brandView === 'residential')).map((group) => {
             // Rail: every item shows. Expanded: closed sections hide their items, except the current page.
             const open = rail || !closed[group.section];
-            const allowed = group.items.filter((i) => !i.feature || me.data?.features?.[i.feature]);
+            const allowed = group.items.filter((i) => (!i.feature || me.data?.features?.[i.feature]) && (!i.lead || isLead));
             const items = open ? allowed : allowed.filter((i) => i === current);
             return (
               <div key={group.section} className="nav-group">

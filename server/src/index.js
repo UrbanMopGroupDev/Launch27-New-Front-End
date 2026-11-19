@@ -19,11 +19,19 @@ import { createWriteLog } from './writes.js';
 import { createCommercial } from './commercial/service.js';
 import { createWorkforce } from './commercial/workforce.js';
 import { createPlacement } from './placement/service.js';
-import { sandboxEmail } from './inbox/channels.js';
+import { sandboxEmail, sandboxSms } from './inbox/channels.js';
 import { createGmailClient, createGmailConnector } from './inbox/email/gmail.js';
+import { createRingCentralClient } from './inbox/sms/ringcentral.js';
+import { createRingCentralChannel } from './inbox/sms/ringcentral-channel.js';
+import { createTwilioClient } from './inbox/sms/twilio.js';
+import { createTwilioChannel } from './inbox/sms/twilio-channel.js';
+import { createSmsRouter } from './inbox/sms/core.js';
 import { createEmailSync } from './inbox/email/sync.js';
 import { createL27Client, createSyncBearer } from './inbox/lookup.js';
 import { OUR_IDENTITIES } from './inbox/seed.js';
+import { createComplaints } from './complaints/service.js';
+import { createKustomerMigration } from './kustomer-migration/service.js';
+import { createClassifier } from './complaints/classify.js';
 
 const config = loadConfig();
 const log = createLogger({ level: config.logLevel, base: { env: config.appEnv, version: config.version } });
@@ -70,9 +78,11 @@ if (await schedule.dataChanged()) onQaChange('data changed since last start');
 // nothing sent and no real mailbox read. SMS isn't connected yet.
 const connectors = {};
 let emailSync = null;
+let gmailForComplaints = null;
 if (config.gmail) {
   const client = createGmailClient({ auth: config.gmail.auth });
   connectors.email = createGmailConnector({ client, mailboxes: config.gmail.mailboxes, fromName: config.gmail.fromName });
+  gmailForComplaints = { client, accounts: config.gmail.mailboxes.accounts };
   const l27Client = createL27Client({ baseUrl: config.l27BaseUrl, fetchImpl });
   const syncBearer = createSyncBearer({ config, fetchImpl });
   emailSync = createEmailSync({
@@ -88,7 +98,72 @@ if (config.gmail) {
 } else if (!config.production) {
   connectors.email = sandboxEmail();
 }
-const app = createApp(config, { db, sessions, fetchImpl, log, jobs, connectors, qa: { store: qaStore, sender: qaSender }, segments, schedule, reports, writes, commercial, placement, commercialPlan, kpi });
+// SMS: RingCentral and/or Twilio (docs/sms.md). Each business number belongs to one provider;
+// replies go out through the provider that owns the conversation's number. Sends outside
+// production are always sandbox records (guardConnectors in app.js). Dev and QA without
+// credentials get the sandbox SMS channel.
+const smsProviders = {};
+if (config.ringcentralSms || config.twilioSms) {
+  const smsL27 = createL27Client({ baseUrl: config.l27BaseUrl, fetchImpl });
+  const smsBearer = createSyncBearer({ config, fetchImpl });
+  const identify = async (phone) => smsL27.match(await smsBearer(), 'phone', phone);
+  if (config.ringcentralSms) {
+    smsProviders.ringcentral = createRingCentralChannel({
+      db,
+      client: createRingCentralClient(config.ringcentralSms),
+      smsConfig: { numbers: config.ringcentralSms.numbers.length ? config.ringcentralSms.numbers : config.twilioSms ? [] : OUR_IDENTITIES.sms, webhookUrl: config.ringcentralSms.webhookUrl, webhookToken: config.ringcentralSms.webhookToken },
+      identify,
+      log,
+    });
+    log.info('sms connected (RingCentral)', { server: config.ringcentralSms.server.replace(/^https:\/\//, ''), webhook: !!config.ringcentralSms.webhookUrl });
+  }
+  if (config.twilioSms) {
+    smsProviders.twilio = createTwilioChannel({
+      db,
+      client: createTwilioClient(config.twilioSms),
+      smsConfig: { numbers: config.twilioSms.numbers, webhookBaseUrl: config.twilioSms.webhookBaseUrl, authToken: config.twilioSms.authToken },
+      identify,
+      log,
+    });
+    log.info('sms connected (Twilio)', { numbers: config.twilioSms.numbers.length, webhook: !!config.twilioSms.webhookBaseUrl });
+  }
+  connectors.sms = createSmsRouter(Object.values(smsProviders).map((p) => ({ name: p.provider, connector: p.connector, numbers: p.numbers })));
+  for (const p of Object.values(smsProviders)) p.start().catch((err) => log.error('sms start failed', { provider: p.provider, error: err.message }));
+} else if (!config.production) {
+  connectors.sms = sandboxSms();
+}
+// Complaint Resolution Engine (Phase 1: history miner + playbook). Read-only on every source.
+const complaints = createComplaints({
+  db,
+  config,
+  reports,
+  fetchImpl,
+  gmail: gmailForComplaints,
+  classifier: createClassifier({ apiKey: config.anthropicApiKey, log }),
+  l27: createL27Client({ baseUrl: config.l27BaseUrl, fetchImpl }),
+  syncBearer: createSyncBearer({ config, fetchImpl }),
+  log,
+});
+await complaints.markInterrupted().then((n) => n && log.warn('complaints: marked runs cut off by the restart as interrupted', { runs: n })).catch(() => {});
+// Kustomer historical migration: export (read-only) and dry run only; the import isn't enabled.
+// Production reads Kustomer with KUSTOMER_API_KEY; dev and QA read a synthetic Kustomer.
+const migrationL27 = createL27Client({ baseUrl: config.l27BaseUrl, fetchImpl });
+const migrationBearer = createSyncBearer({ config, fetchImpl });
+const kustomerMigration = createKustomerMigration({
+  db,
+  config,
+  fetchImpl,
+  log,
+  ourDomains: [...new Set(OUR_IDENTITIES.email.map((e) => e.split('@')[1]))],
+  async l27Directory() {
+    const bearer = await migrationBearer();
+    if (!bearer) throw new Error('No Launch27 login for matching customers: set L27_SYNC_EMAIL and L27_SYNC_PASSWORD');
+    const [customers, teams] = await Promise.all([migrationL27.allCustomers(bearer), migrationL27.teams(bearer)]);
+    return { customers, teams };
+  },
+});
+await kustomerMigration.recover();
+const app = createApp(config, { db, sessions, fetchImpl, log, jobs, connectors, qa: { store: qaStore, sender: qaSender }, segments, schedule, reports, writes, commercial, placement, commercialPlan, complaints, smsProviders, kustomerMigration, kpi });
 if (config.sampleData && config.l27Mode === 'mock') {
   await loadSampleInbox(db, { fetchImpl, baseUrl: config.l27BaseUrl, log: (level, msg, fields) => log[level](msg, fields) }).catch((err) => log.error('sample inbox failed', { error: err.message }));
 }
@@ -107,10 +182,13 @@ const worker = setInterval(async () => {
   try {
     await db.tx((q) => tick(q));
     emailSync?.maybeRun()?.catch((err) => log.error('email sync failed', { error: err.message }));
+    for (const p of Object.values(smsProviders)) await p.tick();
     await sessions.purgeExpired();
     await segments.maybeRun();
     await schedule.maybeRun();
     await reports.maybeRun();
+    complaints.maybeRun().catch((err) => log.error('complaints automatic update failed', { error: err.message }));
+    await reports.raiseDigest().catch((err) => log.error('monthly raise check failed', { error: err.message }));
     await placement.purge();
     if (jobs.consecutiveFailures) log.info('worker recovered', { after: jobs.consecutiveFailures });
     jobs.consecutiveFailures = 0;
