@@ -20,6 +20,9 @@ export function KpiScorecardPage() {
   const [mode, setMode] = useState<Mode>('month');
   const [outage, setOutage] = useState<string | null>(null);
   const [drill, setDrill] = useState<string | null>(null);
+  // Summary for a quick read; Detailed opens every tile's breakdown. Remembered per browser.
+  const [view, setView] = useState<'summary' | 'detailed'>(() => { try { return localStorage.getItem('kpi:view') === 'detailed' ? 'detailed' : 'summary'; } catch { return 'summary'; } });
+  const pickView = (v: 'summary' | 'detailed') => { setView(v); try { localStorage.setItem('kpi:view', v); } catch { /* storage unavailable */ } };
   const query: Query = { brand, month, mode, outage };
   const q = useQuery({ queryKey: ['kpi', 'scorecard', brand, month, mode, outage], queryFn: () => kpiApi.scorecard(query), retry: false, placeholderData: (p) => p });
   const s = q.data;
@@ -40,6 +43,10 @@ export function KpiScorecardPage() {
                 ))}
               </div>
             )}
+            <div className="seg-period" role="group" aria-label="Level of detail">
+              <button className={view === 'summary' ? 'active' : ''} aria-pressed={view === 'summary'} onClick={() => pickView('summary')}>Summary</button>
+              <button className={view === 'detailed' ? 'active' : ''} aria-pressed={view === 'detailed'} onClick={() => pickView('detailed')}>Detailed</button>
+            </div>
             <div className="seg-period" role="group" aria-label="Period">
               <button className={mode === 'month' ? 'active' : ''} aria-pressed={mode === 'month'} onClick={() => setMode('month')}>Month</button>
               <button className={mode === 't12' ? 'active' : ''} aria-pressed={mode === 't12'} onClick={() => setMode('t12')}>Trailing 12</button>
@@ -64,7 +71,7 @@ export function KpiScorecardPage() {
       {s && (
         <>
           <section className="sc-tiles" aria-label="KPIs">
-            {s.tiles.map((t) => <TileCard key={t.kpi} tile={t} onDrill={setDrill} />)}
+            {s.tiles.map((t) => <TileCard key={t.kpi} tile={t} detailed={view === 'detailed'} onDrill={setDrill} />)}
           </section>
           <section aria-label="12-month trends">
             <h2 className="sc-section">12-month trend <span className="muted small">to {longMonth(s.month)}</span></h2>
@@ -81,9 +88,13 @@ export function KpiScorecardPage() {
 }
 
 // ---------- tile ----------
-function TileCard({ tile: t, onDrill }: { tile: Tile; onDrill: (kpi: string) => void }) {
+// Summary (the default): the number, its status, the change, Target and Last 12 months.
+// "Details" (or the page's Detailed view) adds the breakdown; "View rows" goes to the bookings.
+function TileCard({ tile: t, detailed, onDrill }: { tile: Tile; detailed: boolean; onDrill: (kpi: string) => void }) {
   const [info, setInfo] = useState(false);
+  const [open, setOpen] = useState(false);
   const live = t.state === 'ok';
+  const more = detailed || open;
   return (
     <article className={`card sc-tile sc-${t.state}${t.status ? ` sc-tone-${t.status.tone}` : ''}`}>
       <header className="sc-tile-head">
@@ -110,33 +121,41 @@ function TileCard({ tile: t, onDrill }: { tile: Tile; onDrill: (kpi: string) => 
               </>
             ) : <span className="muted">No earlier period to compare</span>}
           </div>
-          {t.badges.map((b) => <p key={b.text} className={`sc-badge sc-status-${b.tone}`}>{TONE_ICON[b.tone]} {b.text}</p>)}
-          <dl className="sc-details">
-            {t.details.map((d) => (
-              <div key={d.label}>
-                <dt>{d.label}</dt>
-                <dd>{d.drill ? <button className="link" onClick={() => onDrill(d.drill!)}>{d.value} · view</button> : d.value}</dd>
-              </div>
-            ))}
+          <dl className="sc-refs">
+            <div><dt>Target</dt><dd>{t.target || <span className="muted">Not set</span>}</dd></div>
+            <div><dt>Last 12 months</dt><dd>{t.last12 || <span className="muted">—</span>}</dd></div>
           </dl>
-          {t.breakdown && t.breakdown.length > 0 && (
-            <div className="sc-breakdown">
-              <span className="small muted">Not fulfilled, by reason</span>
-              {t.breakdown.map((m) => (
-                <div key={m.kind + m.label} className="sc-miss">
-                  <span>{m.label} <i className="muted">· {m.kind === 'company' ? 'ours' : m.kind === 'client' ? 'client' : 'unclear'}</i></span>
-                  <span className="sc-miss-bar"><span style={{ width: `${(m.n / Math.max(...t.breakdown!.map((x) => x.n))) * 100}%` }} /></span>
-                  <span className="sc-num">{m.n}</span>
+          {t.badges.map((b) => <p key={b.text} className={`sc-badge sc-status-${b.tone}`}>{TONE_ICON[b.tone]} {b.text}</p>)}
+          {more && (
+            <div className="sc-more">
+              <dl className="sc-details">
+                {t.details.map((d) => (
+                  <div key={d.label}>
+                    <dt>{d.label}</dt>
+                    <dd>{d.drill ? <button className="link" onClick={() => onDrill(d.drill!)}>{d.value} · view</button> : d.value}</dd>
+                  </div>
+                ))}
+              </dl>
+              {t.breakdown && t.breakdown.length > 0 && (
+                <div className="sc-breakdown">
+                  <span className="small muted">Not fulfilled, by reason</span>
+                  {t.breakdown.map((m) => (
+                    <div key={m.kind + m.label} className="sc-miss">
+                      <span>{m.label} <i className="muted">· {m.kind === 'company' ? 'ours' : m.kind === 'client' ? 'client' : 'unclear'}</i></span>
+                      <span className="sc-miss-bar"><span style={{ width: `${(m.n / Math.max(...t.breakdown!.map((x) => x.n))) * 100}%` }} /></span>
+                      <span className="sc-num">{m.n}</span>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-          )}
-          {t.weeks && (
-            <div className="sc-weeks">
-              <span className="small muted">By week</span>
-              <div>
-                {t.weeks.map((w) => <span key={w.from} title={`${w.from} to ${w.to}: ${w.num} of ${w.den}`}><b>{w.value == null ? '—' : `${w.value.toFixed(0)}%`}</b><i>{w.from.slice(8)}–{w.to.slice(8)}</i></span>)}
-              </div>
+              )}
+              {t.weeks && (
+                <div className="sc-weeks">
+                  <span className="small muted">By week</span>
+                  <div>
+                    {t.weeks.map((w) => <span key={w.from} title={`${w.from} to ${w.to}: ${w.num} of ${w.den}`}><b>{w.value == null ? '—' : `${w.value.toFixed(0)}%`}</b><i>{w.from.slice(8)}–{w.to.slice(8)}</i></span>)}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </>
@@ -149,7 +168,12 @@ function TileCard({ tile: t, onDrill }: { tile: Tile; onDrill: (kpi: string) => 
       {t.state !== 'disabled' && (
         <footer className="sc-foot">
           <span className="small muted">{t.period} · {t.sources.map((x) => x.label).join(' + ')} · refreshed {when(t.refreshed_at)}</span>
-          {live && <button className="link" onClick={() => onDrill(t.kpi)}>View rows</button>}
+          {live && (
+            <span className="sc-foot-actions">
+              {!detailed && <button className="link" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? 'Hide details' : 'Details'}</button>}
+              <button className="link" onClick={() => onDrill(t.kpi)}>View rows</button>
+            </span>
+          )}
         </footer>
       )}
     </article>
@@ -225,8 +249,8 @@ function TrendCard({ tile, points, reference }: { tile: Tile; points: TrendPoint
 // ---------- sources, outage preview and manual review entry ----------
 function SourcesCard({ s, outage, setOutage }: { s: Scorecard; outage: string | null; setOutage: (o: string | null) => void }) {
   return (
-    <section className="card sc-sources" aria-label="Sources">
-      <h2>Sources</h2>
+    <details className="card sc-sources" open={!!outage}>
+      <summary>Sources and data freshness</summary>
       <div className="sc-source-list">
         {s.sources.map((x) => (
           <div key={x.key}>
@@ -249,7 +273,7 @@ function SourcesCard({ s, outage, setOutage }: { s: Scorecard; outage: string | 
           {s.manual_reviews.can_enter && <ManualReviewsForm key={`${s.brand.key}${s.month}`} s={s} />}
         </div>
       )}
-    </section>
+    </details>
   );
 }
 

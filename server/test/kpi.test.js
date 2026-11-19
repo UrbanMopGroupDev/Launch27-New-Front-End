@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { indexDataset, isRecurring, isTest, isInstitutional, reasonCategory, churnBand, isOverCancel, cancellationCause, churnMonth, fulfilmentMonth, complaintsMonth, reviewsMonth, ocrMonth, scorecard, drill, lastClosedMonth, sourceState, ocrStatus } from '../src/kpi/calc.js';
+import { indexDataset, isRecurring, isTest, isInstitutional, reasonCategory, churnBand, isOverCancel, cancellationCause, churnMonth, fulfilmentMonth, complaintsMonth, reviewsMonth, ocrMonth, scorecard, drill, lastClosedMonth, sourceState, ocrStatus, fulfilmentStatus } from '../src/kpi/calc.js';
 import { KPI_BRANDS, KPI_RULES } from '../src/kpi/config.js';
 import { buildSyntheticDataset } from '../src/kpi/synthetic.js';
 import { createKpi, canSeeKpi } from '../src/kpi/service.js';
@@ -214,6 +214,9 @@ describe('service fulfilment', () => {
     const r = fulfilmentMonth(ix([b(1, 'Done', '2026-10-05'), b(2, 'Last Minute', '2026-10-05', { cancellation: { at: '2026-10-04T20:00', reason: 'Sick', by: 'customer' } })]), '2026-10', TODAY);
     assert.deepEqual([r.num, r.den, r.client, r.company], [1, 2, 1, 0]);
   });
+  test('status against the 98.5% target: on track, within 5% below, beyond', () => {
+    assert.deepEqual([99, 98.5, 98.4, 93.6, 93.5].map((v) => fulfilmentStatus(v).label), ['On track', 'On track', 'Warning', 'Warning', 'Off track']);
+  });
   test('late threshold is configurable', () => {
     assert.equal(fulfilmentMonth(ix(rows()), '2026-10', TODAY, { ...KPI_RULES, lateMinutes: 45 }).late, 0);
     assert.equal(fulfilmentMonth(ix(rows()), '2026-10', TODAY, { ...KPI_RULES, lateMinutes: 20 }).late, 2);
@@ -339,6 +342,10 @@ describe('scorecard', () => {
       assert.ok(t.sources.length && t.refreshed_at && t.formula.length > 40, t.kpi);
       assert.equal(c.trends[t.kpi].length, 12);
     }
+    // The same two reference lines, in the same words, on every tile.
+    assert.deepEqual(c.tiles.map((t) => t.target), ['63–68%', 'under 6.8%', '98.5% or higher', null, null, null]);
+    for (const t of c.tiles.filter((y) => y.kpi !== 'billing')) assert.ok(t.last12, t.kpi);
+    assert.ok(!c.tiles.some((t) => t.details.some((d) => /north star|baseline|^target$/i.test(d.label))));
     assert.deepEqual([tile(c, 'billing').state, tile(c, 'billing').note, tile(c, 'billing').value], ['disabled', 'Coming later', null]);
   });
   test('month-over-month change is in percentage points and says which way is better', () => {

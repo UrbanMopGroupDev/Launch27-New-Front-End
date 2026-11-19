@@ -46,11 +46,12 @@ export const KPI_RULES = {
     { max: 12, label: 'Elevated', tone: 'warning' },
     { max: Infinity, label: 'High', tone: 'critical' },
   ],
-  churnNorthStar: 6.8, // where we want to get to; the tile also shows the 12-month baseline
+  churnTarget: 6.8, // %; the tile also shows the last 12 months beside it
   // Admin over-cancellation: a staff cancellation whose reason contains one of these.
   overCancelWords: ['vacation', 'travel', 'away', 'reschedule', 'on hold', 'pause', 'no show', 'cleaner cancel', 'preferred cleaner', 'last minute'],
 
   // ----- Fulfilment -----
+  fulfilmentTarget: 98.5, // %, the threshold in the GM governance sheet
   lateMinutes: 30, // late arrival = check-in this many minutes after the scheduled start
   snapshotHours: 48, // "on the books" snapshot taken this long before the visit
   // Cancellation reason -> who caused it. Company patterns are checked first.

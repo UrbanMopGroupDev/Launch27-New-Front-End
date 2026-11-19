@@ -21,14 +21,17 @@ Gmail, and it has no "edit data" controls.
 
 ## Definitions
 
-Every tile shows its value, period, source, last refresh and an "i" button with the formula.
+Every tile shows its value, status, change, **Target** and **Last 12 months** (the same two lines, in
+the same words, on every tile), plus period, source, last refresh and an "i" button with the formula.
+The page opens on **Summary**; **Detailed** (or a tile's "Details") adds the breakdowns, and "View rows"
+goes down to the individual bookings and clients.
 If a source is missing or has not refreshed in 48 hours, the tile says "No data" or "Stale"
 and shows no number. A month with no data is a gap in the trend, never a zero.
 
 | KPI | Formula | Sources |
 | --- | --- | --- |
 | Operational Cost Ratio | Operational delivery cost ÷ revenue. Included: cleaner wages (contractor + employee), payroll taxes / EI / CPP / workers' comp on cleaners, supplies, field vehicle costs, ops/office staff, ops software, recruitment ads. Excluded: office rent, general business insurance. Syft's figure is shown beside it, flagged when they differ by more than 1.0 percentage point. Provisional until the 10th of the following month. Status against the 63–68% target: On track at or under 68%, Warning within 5% above, Off track beyond | QuickBooks Online (source of truth), Syft report |
-| Recurring client churn | Permanent churn events in the calendar month ÷ active recurring clients at the start of the month. Bands: ≤7% Excellent, 7–10% Healthy, 10–12% Elevated, over 12% High. North Star under 6.8%; the tile also shows the last-12-months baseline | Launch27 |
+| Recurring client churn | Permanent churn events in the calendar month ÷ active recurring clients at the start of the month. Bands: ≤7% Excellent, 7–10% Healthy, 10–12% Elevated, over 12% High. Target under 6.8% | Launch27 |
 | Service fulfilment | Bookings completed ÷ bookings on the books 48 hours before the visit (the ones we could have fulfilled); the same ratio over all scheduled bookings is shown beside it. A completed visit is fulfilled even when we arrived late (late arrivals over 30 minutes are counted separately). Anything not completed is not fulfilled, split into ours, client-related and unclear. Monthly and by week | Launch27 |
 | Complaint rate | Complaints ÷ completed visits × 100. Complaint = Kustomer complaint object or Launch27 bottom rating, the same visit counted once. "Saved" = still booking 60+ days later | Kustomer, Launch27 |
 | Google reviews | New reviews, average rating (month and all time), reviews per 100 completed visits | Google Business Profile, Launch27 |

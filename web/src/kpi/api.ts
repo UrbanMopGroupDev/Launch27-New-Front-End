@@ -22,6 +22,8 @@ export interface Tile {
   weeks?: { from: string; to: string; value: number | null; num: number; den: number }[];
   sources: { key: string; label: string; refreshed_at: string | null; state: 'ok' | 'stale' | 'missing' }[];
   refreshed_at: string | null;
+  target: string | null;
+  last12: string | null;
   note?: string;
 }
 export interface Reference { line?: number; band?: [number, number]; label: string }
