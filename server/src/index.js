@@ -29,6 +29,7 @@ import { createEmailSync } from './inbox/email/sync.js';
 import { createL27Client, createSyncBearer } from './inbox/lookup.js';
 import { OUR_IDENTITIES } from './inbox/seed.js';
 import { createComplaints } from './complaints/service.js';
+import { createKustomerMigration } from './kustomer-migration/service.js';
 import { createClassifier } from './complaints/classify.js';
 
 const config = loadConfig();
@@ -142,7 +143,25 @@ const complaints = createComplaints({
   log,
 });
 await complaints.markInterrupted().then((n) => n && log.warn('complaints: marked runs cut off by the restart as interrupted', { runs: n })).catch(() => {});
-const app = createApp(config, { db, sessions, fetchImpl, log, jobs, connectors, qa: { store: qaStore, sender: qaSender }, segments, schedule, reports, writes, commercial, placement, commercialPlan, complaints, smsProviders });
+// Kustomer historical migration: export (read-only) and dry run only; the import isn't enabled.
+// Production reads Kustomer with KUSTOMER_API_KEY; dev and QA read a synthetic Kustomer.
+const migrationL27 = createL27Client({ baseUrl: config.l27BaseUrl, fetchImpl });
+const migrationBearer = createSyncBearer({ config, fetchImpl });
+const kustomerMigration = createKustomerMigration({
+  db,
+  config,
+  fetchImpl,
+  log,
+  ourDomains: [...new Set(OUR_IDENTITIES.email.map((e) => e.split('@')[1]))],
+  async l27Directory() {
+    const bearer = await migrationBearer();
+    if (!bearer) throw new Error('No Launch27 login for matching customers: set L27_SYNC_EMAIL and L27_SYNC_PASSWORD');
+    const [customers, teams] = await Promise.all([migrationL27.allCustomers(bearer), migrationL27.teams(bearer)]);
+    return { customers, teams };
+  },
+});
+await kustomerMigration.recover();
+const app = createApp(config, { db, sessions, fetchImpl, log, jobs, connectors, qa: { store: qaStore, sender: qaSender }, segments, schedule, reports, writes, commercial, placement, commercialPlan, complaints, smsProviders, kustomerMigration });
 if (config.sampleData && config.l27Mode === 'mock') {
   await loadSampleInbox(db, { fetchImpl, baseUrl: config.l27BaseUrl, log: (level, msg, fields) => log[level](msg, fields) }).catch((err) => log.error('sample inbox failed', { error: err.message }));
 }
