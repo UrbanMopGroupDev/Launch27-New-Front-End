@@ -3,6 +3,7 @@
 // keeps enforcing their permissions.
 import { canSeeUtilization } from '../config.js';
 import { registerComplaintRoutes } from '../complaints/api.js';
+import { registerKustomerRoutes } from '../kustomer-migration/api.js';
 import express from 'express';
 import { json as toJson } from '../db/index.js';
 import { lintRules, route } from './routing.js';
@@ -27,7 +28,7 @@ export function diffRules(before, after) {
 }
 const many = async (q, sql, p) => (await q.query(sql, p)).rows;
 
-export function createInboxRouter({ db, sessions, cookieName, config, l27, connectors = {}, log = (lvl, msg, f) => console.error(msg, f), qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, complaints = null, smsProviders = {} }) {
+export function createInboxRouter({ db, sessions, cookieName, config, l27, connectors = {}, log = (lvl, msg, f) => console.error(msg, f), qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, complaints = null, smsProviders = {}, kustomerMigration = null }) {
   const r = express.Router();
   r.use(express.json({ limit: '1mb' }));
 
@@ -1221,6 +1222,7 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
   }
 
   if (complaints) registerComplaintRoutes(r, { complaints, needRole, wrap });
+  if (kustomerMigration) registerKustomerRoutes(r, { migration: kustomerMigration, needRole, wrap });
 
   return r;
 }

@@ -75,6 +75,17 @@ export function createL27Client({ baseUrl, fetchImpl = fetch }) {
       }
       return none;
     },
+    teams,
+    /** Every Launch27 customer (active and inactive), for building an identity directory. */
+    async allCustomers(bearer, { pageSize = 100, max = 200_000 } = {}) {
+      const list = [];
+      for (let offset = 0; offset < max; offset += pageSize) {
+        const page = await get(bearer, '/v1/staff/customers', { limit: pageSize, offset });
+        list.push(...page);
+        if (page.length < pageSize) break;
+      }
+      return list;
+    },
     async customer(bearer, id) {
       const [c, phones] = await Promise.all([get(bearer, `/v1/staff/customers/${id}`), get(bearer, `/v1/staff/customers/${id}/phones`).catch(() => [])]);
       return customerToContact(c, phones || []);

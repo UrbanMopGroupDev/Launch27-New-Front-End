@@ -273,6 +273,10 @@ export function loadConfig(env = process.env) {
     // production only, so dev and QA never pull real complaint text. All read-only.
     kustomerApiKey: isProd ? env.KUSTOMER_API_KEY || null : null,
     kustomerComplaintKlass: env.KUSTOMER_COMPLAINT_KLASS || null,
+    // Kustomer migration (docs/kustomer-migration.md): exported records are encrypted with this.
+    // Production must set its own; dev and QA (synthetic Kustomer only) use a fixed test key.
+    kustomerExportKey: isProd ? env.KUSTOMER_EXPORT_KEY || null : env.KUSTOMER_EXPORT_KEY || 'dev-and-qa-only-kustomer-export-key-synthetic-data',
+    kustomerExportRpm: Math.min(1000, Math.max(10, Number(env.KUSTOMER_EXPORT_RPM) || 300)),
     slackBotToken: isProd ? env.SLACK_BOT_TOKEN || null : null,
     slackChannels: parseSlackChannels(env.COMPLAINT_SLACK_CHANNELS),
     // Claude classification of redacted complaint text. Optional; rules-only without it.
