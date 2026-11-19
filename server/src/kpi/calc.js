@@ -216,15 +216,20 @@ export function fulfilmentRange(ix, from, to, today, rules = KPI_RULES) {
       rows.push({ booking_id: b.id, customer: b.customer, date: b.date, start: b.start.slice(11, 16), cleaner: b.cleaner || '', frequency: b.frequency, result: label, kind, late: isLate, group: FULFILMENT_GROUPS[kind], minutes_late: late, cancel_reason: b.cancellation?.reason || '', cancelled_by: b.cancellation ? (b.cancellation.by === 'staff' ? 'Staff' : 'Client') : '', on_books_48h: onBooks, issue: kind !== 'done' || isLate, counted: true });
     }
   }
-  const count = (k) => rows.filter((r) => r.kind === k).length;
-  const num = count('done');
-  const den = rows.length;
+  // Headline: of the bookings on the books 48 hours ahead (the ones we could have fulfilled),
+  // how many we completed. "All scheduled" also counts bookings cancelled earlier than that.
+  const split = (list) => {
+    const count = (k) => list.filter((r) => r.kind === k).length;
+    const done = count('done');
+    return { num: done, den: list.length, value: list.length ? (done / list.length) * 100 : null, company: count('company'), client: count('client'), unclassified: count('unclassified') };
+  };
+  const snapRows = rows.filter((r) => r.on_books_48h);
+  const snap = split(snapRows);
   const reasons = new Map();
-  for (const r of rows) if (r.kind !== 'done') reasons.set(`${r.kind}|${r.result}`, (reasons.get(`${r.kind}|${r.result}`) || 0) + 1);
+  for (const r of snapRows) if (r.kind !== 'done') reasons.set(`${r.kind}|${r.result}`, (reasons.get(`${r.kind}|${r.result}`) || 0) + 1);
   const order = { company: 0, client: 1, unclassified: 2 };
   const misses = [...reasons].map(([k, n]) => ({ kind: k.split('|')[0], group: FULFILMENT_GROUPS[k.split('|')[0]], label: k.split('|')[1], n })).sort((a, b) => order[a.kind] - order[b.kind] || b.n - a.n);
-  const snap = rows.filter((r) => r.on_books_48h);
-  return { from, to, state: den ? 'ok' : 'no_data', value: den ? (num / den) * 100 : null, num, den, misses, company: count('company'), client: count('client'), unclassified: count('unclassified'), late: rows.filter((r) => r.late).length, snapshot: { on_books: snap.length, completed: snap.filter((r) => r.kind === 'done').length, added_late: rows.filter((r) => !r.on_books_48h && r.kind === 'done').length }, rows };
+  return { from, to, state: snap.den ? 'ok' : 'no_data', ...snap, misses, late: rows.filter((r) => r.late).length, all: split(rows), added_late: rows.filter((r) => !r.on_books_48h && r.kind === 'done').length, rows };
 }
 export function fulfilmentMonth(ix, month, today, rules = KPI_RULES) {
   const r = fulfilmentRange(ix, monthStart(month), monthEnd(month), today, rules);
@@ -299,11 +304,19 @@ export function reviewsMonth(ix, month, rules = KPI_RULES) {
   return { month, state: 'ok', manual: false, value: rows.length, num: rows.length, avg: rows.length ? sum / rows.length : null, rating_sum: sum, alltime_avg: allCount ? allSum / allCount : null, alltime_count: allCount, visits, per100: visits ? (rows.length / visits) * 100 : null, rows };
 }
 
+/** OCR against its target range (lower is better): on track, within 5% of missing it, or more than 5% off. */
+export function ocrStatus(pct, rules = KPI_RULES) {
+  const max = rules.ocrTarget[1];
+  if (pct <= max) return { label: 'On track', tone: 'good' };
+  if (pct <= max * (1 + rules.ragTolerance)) return { label: 'Warning', tone: 'warning' };
+  return { label: 'Off track', tone: 'critical' };
+}
+
 // ---------- scorecard ----------
 const FORMULAS = (rules) => ({
-  ocr: `Operational delivery cost ÷ revenue for the month, from QuickBooks Online.\nIncluded: ${Object.values(rules.ocrIncluded).join('; ')}.\nExcluded: ${Object.values(rules.ocrExcluded).join('; ')}.\nSyft's reported figure is shown beside it; ⚠ when the two differ by more than ${rules.ocrFlagPp.toFixed(1)} percentage points. Provisional until the ${rules.closeDay}th of the following month, then Final. Change is in percentage points.`,
-  churn: `Permanent churn events in the calendar month ÷ active recurring clients at the start of the month.\nRecurring: frequency contains weekly, biweekly, triweekly, monthly or prepaid (not one-time).\nLeft out of both sides: institutional clients and test entries.\nNot counted as churn: transfers to LuxoClean, admin errors, and clients with a later active recurring booking.\nTemporary cancellations (travel, hold/pause, renovation, Airbnb, postpartum): not churn if the client is back on a recurring plan within ${rules.temporaryReturnDays} days; counted as churn in the cancellation month once ${rules.temporaryReturnDays} days pass with no return; not counted while still inside the window, so recent months can rise. One event per client per month, dated by the cancellation date.\nBands: ≤7% Excellent · 7–10% Healthy · 10–12% Elevated · over 12% High. Target ${rules.churnTarget}, stretch ${rules.churnStretch}.\nThe CS dashboard uses a 30-day trailing window, so expect a 1–3 event difference.`,
-  fulfilment: `Bookings completed ÷ bookings scheduled for the period.\nIf we arrived and did the clean, it is fulfilled, even when late: arrivals more than ${rules.lateMinutes} minutes after the scheduled start (Launch27 check-in) are counted separately as late.\nAnything not completed is not fulfilled, whoever caused it. The breakdown splits it into ours (cleaner no-show, cleaner cancelled, unable to staff, we rescheduled, no check-in), client-related (the client cancelled, or staff entered a client reason) and unclear (a staff cancellation with no recognizable reason).`,
+  ocr: `Operational delivery cost ÷ revenue for the month, from QuickBooks Online.\nIncluded: ${Object.values(rules.ocrIncluded).join('; ')}.\nExcluded: ${Object.values(rules.ocrExcluded).join('; ')}.\nSyft's reported figure is shown beside it; ⚠ when the two differ by more than ${rules.ocrFlagPp.toFixed(1)} percentage points. Provisional until the ${rules.closeDay}th of the following month, then Final. Change is in percentage points.\nStatus against the ${rules.ocrTarget[0]}–${rules.ocrTarget[1]}% target (lower is better): On track at or under ${rules.ocrTarget[1]}%, Warning within 5% above it, Off track beyond that.`,
+  churn: `Permanent churn events in the calendar month ÷ active recurring clients at the start of the month.\nRecurring: frequency contains weekly, biweekly, triweekly, monthly or prepaid (not one-time).\nLeft out of both sides: institutional clients and test entries.\nNot counted as churn: transfers to LuxoClean, admin errors, and clients with a later active recurring booking.\nTemporary cancellations (travel, hold/pause, renovation, Airbnb, postpartum): not churn if the client is back on a recurring plan within ${rules.temporaryReturnDays} days; counted as churn in the cancellation month once ${rules.temporaryReturnDays} days pass with no return; not counted while still inside the window, so recent months can rise. One event per client per month, dated by the cancellation date.\nBands: ≤7% Excellent · 7–10% Healthy · 10–12% Elevated · over 12% High. North Star: under ${rules.churnNorthStar}%. The baseline is the last 12 months pooled (events ÷ the sum of monthly bases).\nThe CS dashboard uses a 30-day trailing window, so expect a 1–3 event difference.`,
+  fulfilment: `Bookings completed ÷ bookings that were on the books ${rules.snapshotHours} hours before the visit: the ones we could have fulfilled.\nThe all-scheduled figure is the same ratio over every booking for the period, including those cancelled earlier than ${rules.snapshotHours} hours ahead. Bookings made inside ${rules.snapshotHours} hours are listed separately.\nIf we arrived and did the clean, it is fulfilled, even when late: arrivals more than ${rules.lateMinutes} minutes after the scheduled start (Launch27 check-in) are counted separately as late.\nAnything not completed is not fulfilled, whoever caused it. The breakdown splits it into ours (cleaner no-show, cleaner cancelled, unable to staff, we rescheduled, no check-in), client-related (the client cancelled, or staff entered a client reason) and unclear (a staff cancellation with no recognizable reason).`,
   complaints: `Complaints ÷ completed visits × 100.\nA complaint is a Kustomer complaint object or a Launch27 bottom ("bad") rating. The same visit, or the same client within ${rules.dedupeDays} days, counts once.\nSaved: the client still has a booking ${rules.savedDays}+ days after the complaint; shown once ${rules.savedDays} days have passed.`,
   reviews: 'New Google reviews in the month, with the average rating for the month and all time, and reviews per 100 completed visits (Launch27).',
   billing: 'Not built yet.',
@@ -359,9 +372,16 @@ export function scorecard(ix, { brand, month, mode = 'month', now, today, rules 
     if (cur.missing) tile.badges.push({ tone: 'warning', text: `${cur.missing} of ${months.length} months have no data` });
     tile.details.push({ label: kpi === 'ocr' ? 'Cost ÷ revenue' : kpi === 'churn' ? 'Events ÷ clients' : kpi === 'fulfilment' ? 'Completed ÷ scheduled' : kpi === 'complaints' ? 'Complaints ÷ visits' : 'New reviews', value: kpi === 'ocr' ? `$${Math.round(cur.num).toLocaleString('en-CA')} ÷ $${Math.round(cur.den).toLocaleString('en-CA')}` : kpi === 'reviews' ? String(cur.num) : `${cur.num.toLocaleString('en-CA')} ÷ ${cur.den.toLocaleString('en-CA')}` });
     const one = span === 1 ? cur : null;
+    // Baseline: the same measure pooled over the 12 months ending at the selected month.
+    const base12 = (kpi === 'ocr' || kpi === 'churn') && span === 1 ? measure(ix, kpi, monthsBetween(addMonths(month, -11), month).filter((m) => m >= rules.firstMonth), today, rules) : null;
+    const baseline = base12?.state === 'ok' ? base12.value : null;
     if (kpi === 'ocr') {
+      tile.status = ocrStatus(cur.value, rules);
+      tile.details.push({ label: 'Target', value: `${rules.ocrTarget[0]}–${rules.ocrTarget[1]}%` });
+      if (baseline) tile.details.push({ label: 'Last 12 months', value: `${baseline.toFixed(1)}%` });
       if (one) {
-        tile.status = { label: one.status, tone: one.status === 'Final' ? 'neutral' : 'warning' };
+        if (one.status === 'Provisional') tile.badges.push({ tone: 'warning', text: `Provisional until the ${rules.closeDay}th of ${monthLabel(addMonths(month, 1))}` });
+        tile.details.push({ label: 'Books', value: one.status });
         tile.details.push({ label: 'Syft reported', value: one.syft == null ? 'Not received yet' : `${one.syft.toFixed(1)}%` });
         if (one.flagged) tile.badges.push({ tone: 'warning', text: `QBO and Syft differ by ${Math.abs(one.diff).toFixed(1)} pp` });
         else if (one.diff != null) tile.details.push({ label: 'QBO vs Syft', value: `${one.diff >= 0 ? '+' : '−'}${Math.abs(one.diff).toFixed(1)} pp` });
@@ -373,7 +393,8 @@ export function scorecard(ix, { brand, month, mode = 'month', now, today, rules 
     if (kpi === 'churn') {
       const band = churnBand(cur.value, rules);
       tile.status = { label: band.label, tone: band.tone };
-      tile.details.push({ label: 'Target', value: `${rules.churnTarget} · stretch ${rules.churnStretch}` });
+      tile.details.push({ label: 'North Star', value: `under ${rules.churnNorthStar}%` });
+      if (baseline) tile.details.push({ label: 'Last 12 months (baseline)', value: `${baseline.toFixed(1)}% a month` });
       const flags = cur.parts.reduce((t, p) => t + p.over_cancel.length, 0);
       const pending = cur.parts.reduce((t, p) => t + p.pending, 0);
       if (pending) tile.details.push({ label: `Temporary, inside ${rules.temporaryReturnDays}-day window`, value: `${pending} (not counted yet)` });
@@ -384,13 +405,17 @@ export function scorecard(ix, { brand, month, mode = 'month', now, today, rules 
       for (const p of cur.parts) for (const m of p.misses || []) misses.set(`${m.kind}|${m.label}`, { ...m, n: (misses.get(`${m.kind}|${m.label}`)?.n || 0) + m.n });
       tile.breakdown = [...misses.values()];
       const sum = (k) => cur.parts.reduce((t, p) => t + (p[k] || 0), 0);
-      tile.details.push({ label: 'Not fulfilled', value: `${sum('company')} ours · ${sum('client')} client · ${sum('unclassified')} unclear` });
+      const all = (k) => cur.parts.reduce((t, p) => t + (p.all?.[k] || 0), 0);
+      const share = (n) => `${n} · ${((n / cur.den) * 100).toFixed(1)}%`;
+      tile.details[0] = { label: `Completed ÷ on the books ${rules.snapshotHours} h ahead`, value: `${cur.num.toLocaleString('en-CA')} ÷ ${cur.den.toLocaleString('en-CA')}` };
+      tile.details.push({ label: 'Not fulfilled: ours (controllable)', value: share(sum('company')) });
+      tile.details.push({ label: 'Not fulfilled: client-related', value: share(sum('client')) });
+      tile.details.push({ label: 'Not fulfilled: unclear reason', value: share(sum('unclassified')) });
+      tile.details.push({ label: 'All scheduled (incl. cancelled earlier)', value: all('den') ? `${((all('num') / all('den')) * 100).toFixed(1)}% · ${all('num').toLocaleString('en-CA')} ÷ ${all('den').toLocaleString('en-CA')}` : '—' });
+      tile.details.push({ label: `Booked inside ${rules.snapshotHours} h and completed`, value: String(sum('added_late')) });
       tile.details.push({ label: `Completed but late (over ${rules.lateMinutes} min)`, value: String(sum('late')) });
       if (sum('unclassified')) tile.badges.push({ tone: 'warning', text: `${sum('unclassified')} staff cancellation${sum('unclassified') === 1 ? '' : 's'} with no clear reason` });
-      if (one) {
-        tile.details.push({ label: `On the books ${rules.snapshotHours} h ahead`, value: `${one.snapshot.on_books} · ${one.snapshot.completed} completed · ${one.snapshot.added_late} added later` });
-        tile.weeks = one.weeks;
-      }
+      if (one) tile.weeks = one.weeks;
     }
     if (kpi === 'complaints') {
       if (one) tile.details.push({ label: `Saved (${rules.savedDays}-day)`, value: one.saved.measurable ? `${Math.round(one.saved.pct)}% (${one.saved.saved} of ${one.saved.total})` : one.saved.total ? `Measurable from ${one.saved.measurable_on}` : 'No complaints' });
@@ -424,7 +449,8 @@ export function scorecard(ix, { brand, month, mode = 'month', now, today, rules 
       return { month: m, value: r.state === 'ok' ? round(r.value, tile.kpi === 'complaints' ? 2 : 1) : null, num: r.num, den: r.den ?? null, tone: tile.kpi === 'churn' && r.band ? r.band.tone : null, flag: tile.kpi === 'ocr' ? (r.flagged ? 'QBO and Syft differ' : r.status === 'Provisional' ? 'Provisional' : null) : null };
     });
   }
-  return { brand: { key: brand.key, name: brand.name, detail: brand.detail }, month, mode, period, tiles, trends };
+  const references = { churn: { line: rules.churnNorthStar, label: `North Star ${rules.churnNorthStar}%` }, ocr: { band: rules.ocrTarget, label: `target ${rules.ocrTarget[0]}–${rules.ocrTarget[1]}%` } };
+  return { brand: { key: brand.key, name: brand.name, detail: brand.detail }, month, mode, period, tiles, trends, references };
 }
 
 // ---------- drill-down ----------
@@ -449,7 +475,7 @@ export function drill(ix, { kpi, month, mode = 'month', today, rules = KPI_RULES
     return { title: `${KPI_LABELS.churn} · ${period}`, tabs: [{ key: 'events', label: 'Cancellations', columns: eventCols, rows: all((p) => p.events) }, { key: 'base', label: 'Recurring base', columns: [col('month', 'Month'), col('customer', 'Client'), col('frequency', 'Frequency'), col('first_visit', 'First visit in month'), col('outcome', 'Result')], rows: all((p) => p.base.map((b) => ({ ...b, month: p.month, counted: true, outcome: b.churned ? 'Churned this month' : 'Active' }))) }, flags] };
   }
   if (kpi === 'fulfilment') {
-    return { title: `${KPI_LABELS.fulfilment} · ${period}`, tabs: [{ key: 'bookings', label: 'Bookings', columns: [col('date', 'Date'), col('start', 'Start'), col('customer', 'Client'), col('result', 'Result'), col('group', 'Whose'), col('cleaner', 'Cleaner'), col('minutes_late', 'Min late', 'num'), col('cancel_reason', 'Cancellation reason'), col('cancelled_by', 'Cancelled by')], rows: all((p) => p.rows.map((r) => ({ ...r, outcome: r.result }))), defaultFilter: 'issues' }] };
+    return { title: `${KPI_LABELS.fulfilment} · ${period}`, tabs: [{ key: 'bookings', label: 'Bookings', columns: [col('date', 'Date'), col('start', 'Start'), col('customer', 'Client'), col('result', 'Result'), col('group', 'Whose'), col('cleaner', 'Cleaner'), col('minutes_late', 'Min late', 'num'), col('cancel_reason', 'Cancellation reason'), col('cancelled_by', 'Cancelled by'), col('books_label', 'On books 48 h ahead')], rows: all((p) => p.rows.map((r) => ({ ...r, outcome: r.result, books_label: r.on_books_48h ? 'Yes' : 'No' }))), defaultFilter: 'issues' }] };
   }
   if (kpi === 'complaints') {
     return { title: `${KPI_LABELS.complaints} · ${period}`, tabs: [{ key: 'complaints', label: 'Complaints', columns: [col('date', 'Date'), col('customer', 'Client'), col('source', 'Source'), col('detail', 'Detail'), col('booking_id', 'Booking'), col('saved_label', `Saved (${rules.savedDays}-day)`), col('outcome', 'Result')], rows: all((p) => p.rows.map((r) => ({ ...r, source: r.sources.join(' + '), saved_label: !r.counted ? '' : r.saved == null ? 'Too recent' : r.saved ? 'Yes' : 'No' }))) }] };

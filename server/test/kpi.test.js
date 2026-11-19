@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { indexDataset, isRecurring, isTest, isInstitutional, reasonCategory, churnBand, isOverCancel, cancellationCause, churnMonth, fulfilmentMonth, complaintsMonth, reviewsMonth, ocrMonth, scorecard, drill, lastClosedMonth, sourceState } from '../src/kpi/calc.js';
+import { indexDataset, isRecurring, isTest, isInstitutional, reasonCategory, churnBand, isOverCancel, cancellationCause, churnMonth, fulfilmentMonth, complaintsMonth, reviewsMonth, ocrMonth, scorecard, drill, lastClosedMonth, sourceState, ocrStatus } from '../src/kpi/calc.js';
 import { KPI_BRANDS, KPI_RULES } from '../src/kpi/config.js';
 import { buildSyntheticDataset } from '../src/kpi/synthetic.js';
 import { createKpi, canSeeKpi } from '../src/kpi/service.js';
@@ -195,29 +195,34 @@ describe('service fulfilment', () => {
     b(8, 'Simon Test', '2026-10-07'),
     b(9, 'Booked Late', '2026-10-08', { created_at: '2026-10-07T15:00' }),
   ];
-  test('completed ÷ scheduled: late is still fulfilled; anything not completed is not, whoever caused it', () => {
+  test('headline: completed ÷ on the books 48 hours ahead; late is still fulfilled', () => {
     const r = fulfilmentMonth(ix(rows()), '2026-10', TODAY);
-    // fulfilled: On Time, Exactly 30, Late 31, Booked Late. not: No Check-in, Cleaner Sick, Client Cancelled, Vague.
-    assert.equal(r.num, 4);
-    assert.equal(r.den, 8);
-    assert.equal(r.value, 50);
-    assert.deepEqual([r.company, r.client, r.unclassified, r.late], [2, 1, 1, 1]);
-    assert.deepEqual(r.misses.map((m) => [m.kind, m.label, m.n]), [['company', 'Not completed (no check-in)', 1], ['company', 'Cleaner cancelled', 1], ['client', 'Client cancelled', 1], ['unclassified', 'Unclassified staff cancellation', 1]]);
+    // On the books 48 h ahead: On Time, Exactly 30, Late 31 (completed); No Check-in, Cleaner Sick (ours); Vague (unclear).
+    // Not in it: the client who cancelled a week ahead, and the booking made the day before.
+    assert.deepEqual([r.num, r.den, r.value], [3, 6, 50]);
+    assert.deepEqual([r.company, r.client, r.unclassified, r.late, r.added_late], [2, 0, 1, 1, 1]);
+    assert.deepEqual(r.misses.map((m) => [m.kind, m.label, m.n]), [['company', 'Not completed (no check-in)', 1], ['company', 'Cleaner cancelled', 1], ['unclassified', 'Unclassified staff cancellation', 1]]);
     assert.ok(!r.rows.some((x) => x.customer === 'Simon Test'));
     assert.equal(r.rows.find((x) => x.customer === 'Late 31').result, 'Completed, arrived late (over 30 min)');
     assert.equal(r.rows.find((x) => x.customer === 'Exactly 30').late, false);
+  });
+  test('all scheduled: anything not completed is not fulfilled, whoever caused it', () => {
+    const r = fulfilmentMonth(ix(rows()), '2026-10', TODAY).all;
+    assert.deepEqual([r.num, r.den, r.value, r.company, r.client, r.unclassified], [4, 8, 50, 2, 1, 1]);
+  });
+  test('a client cancelling inside 48 hours is not fulfilled, and is client-related', () => {
+    const r = fulfilmentMonth(ix([b(1, 'Done', '2026-10-05'), b(2, 'Last Minute', '2026-10-05', { cancellation: { at: '2026-10-04T20:00', reason: 'Sick', by: 'customer' } })]), '2026-10', TODAY);
+    assert.deepEqual([r.num, r.den, r.client, r.company], [1, 2, 1, 0]);
   });
   test('late threshold is configurable', () => {
     assert.equal(fulfilmentMonth(ix(rows()), '2026-10', TODAY, { ...KPI_RULES, lateMinutes: 45 }).late, 0);
     assert.equal(fulfilmentMonth(ix(rows()), '2026-10', TODAY, { ...KPI_RULES, lateMinutes: 20 }).late, 2);
   });
-  test('48-hour snapshot and weekly split', () => {
+  test('weekly split', () => {
     const r = fulfilmentMonth(ix(rows()), '2026-10', TODAY);
-    // On the books 48 h ahead: all but the client who cancelled a week early and the late booking.
-    assert.deepEqual([r.snapshot.on_books, r.snapshot.completed, r.snapshot.added_late], [6, 3, 1]);
     assert.equal(r.weeks[0].from, '2026-10-01');
     assert.equal(r.weeks[0].to, '2026-10-04');
-    assert.equal(r.weeks[1].den, 8);
+    assert.equal(r.weeks[1].den, 6);
     assert.equal(r.weeks.at(-1).to, '2026-10-31');
   });
   test('visits that have not happened yet are not counted', () => {
@@ -304,6 +309,9 @@ describe('OCR', () => {
     assert.equal(ocrMonth(data([{ month: '2026-10', ocr_pct: 57 }]), '2026-10', TODAY).flagged, false);
     assert.equal(ocrMonth(data([{ month: '2026-10', ocr_pct: 59.1 }]), '2026-10', TODAY).flagged, true);
     assert.equal(ocrMonth(data([{ month: '2026-10', ocr_pct: 56.9 }]), '2026-10', TODAY).flagged, true);
+  });
+  test('status against the 63–68% target: on track, within 5% above, beyond', () => {
+    assert.deepEqual([60, 68, 68.1, 71.4, 71.5].map((v) => ocrStatus(v).label), ['On track', 'On track', 'Warning', 'Warning', 'Off track']);
   });
   test('Provisional until the 10th of the following month, then Final', () => {
     assert.equal(ocrMonth(data([]), '2026-10', '2026-11-09').status, 'Provisional');
@@ -395,8 +403,9 @@ describe('scorecard', () => {
     assert.equal(d.tabs[0].rows.filter((r) => r.counted).length, oct.num);
     assert.equal(d.tabs[1].rows.length, oct.den);
     const f = drill(data, { kpi: 'fulfilment', month: '2026-10', today: TODAY });
-    assert.equal(f.tabs[0].rows.filter((r) => r.kind === 'done').length, fulfilmentMonth(data, '2026-10', TODAY).num);
-    assert.equal(f.tabs[0].rows.length, fulfilmentMonth(data, '2026-10', TODAY).den);
+    assert.equal(f.tabs[0].rows.filter((r) => r.kind === 'done' && r.on_books_48h).length, fulfilmentMonth(data, '2026-10', TODAY).num);
+    assert.equal(f.tabs[0].rows.filter((r) => r.on_books_48h).length, fulfilmentMonth(data, '2026-10', TODAY).den);
+    assert.equal(f.tabs[0].rows.length, fulfilmentMonth(data, '2026-10', TODAY).all.den);
   });
   test('the dataset is the same every time it is built for the same day', () => {
     assert.deepEqual(card().tiles.map((t) => t.value), card().tiles.map((t) => t.value));

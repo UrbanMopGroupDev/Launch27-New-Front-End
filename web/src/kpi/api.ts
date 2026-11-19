@@ -24,6 +24,7 @@ export interface Tile {
   refreshed_at: string | null;
   note?: string;
 }
+export interface Reference { line?: number; band?: [number, number]; label: string }
 export interface TrendPoint { month: string; value: number | null; num: number; den: number | null; tone: Tone | null; flag: string | null }
 export interface Scorecard {
   brand: { key: string; name: string; detail: string };
@@ -36,6 +37,7 @@ export interface Scorecard {
   synthetic: boolean;
   tiles: Tile[];
   trends: Partial<Record<Kpi, TrendPoint[]>>;
+  references: Partial<Record<Kpi, Reference>>;
   months: { value: string; label: string }[];
   default_month: string;
   sources: { key: string; label: string; mode: string; refreshed_at: string | null; note: string | null }[];

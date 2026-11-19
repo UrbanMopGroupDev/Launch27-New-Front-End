@@ -46,8 +46,7 @@ export const KPI_RULES = {
     { max: 12, label: 'Elevated', tone: 'warning' },
     { max: Infinity, label: 'High', tone: 'critical' },
   ],
-  churnTarget: '9–10%',
-  churnStretch: '5%',
+  churnNorthStar: 6.8, // where we want to get to; the tile also shows the 12-month baseline
   // Admin over-cancellation: a staff cancellation whose reason contains one of these.
   overCancelWords: ['vacation', 'travel', 'away', 'reschedule', 'on hold', 'pause', 'no show', 'cleaner cancel', 'preferred cleaner', 'last minute'],
 
@@ -80,6 +79,8 @@ export const KPI_RULES = {
     recruitment_ads: 'Recruitment ads',
   },
   ocrExcluded: { office_rent: 'Office rent', general_insurance: 'General business insurance' },
+  ocrTarget: [63, 68], // target range, %; lower is better
+  ragTolerance: 0.05, // within 5% of missing the target = Warning; beyond = Off track
   ocrFlagPp: 1.0, // flag when QBO and Syft differ by more than this many percentage points
   closeDay: 10, // a month is Provisional until this day of the following month
 

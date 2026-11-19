@@ -3,7 +3,7 @@
 // A tile with a missing or stale source shows "No data" or "Stale", never a number.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { kpiApi, type Drill, type DrillRow, type Kpi, type ManualReviews, type Mode, type Query, type Scorecard, type Tile, type Tone, type TrendPoint } from '../kpi/api';
+import { kpiApi, type Drill, type DrillRow, type Kpi, type ManualReviews, type Mode, type Query, type Reference, type Scorecard, type Tile, type Tone, type TrendPoint } from '../kpi/api';
 
 const fmtValue = (t: { unit: Tile['unit'] }, v: number) => (t.unit === 'pct' ? `${v.toFixed(1)}%` : t.unit === 'per100' ? v.toFixed(2) : v.toLocaleString('en-CA'));
 const signed = (v: number, digits: number) => `${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v).toFixed(digits)}`;
@@ -69,7 +69,7 @@ export function KpiScorecardPage() {
           <section aria-label="12-month trends">
             <h2 className="sc-section">12-month trend <span className="muted small">to {longMonth(s.month)}</span></h2>
             <div className="sc-trends">
-              {s.tiles.filter((t) => t.state !== 'disabled').map((t) => <TrendCard key={t.kpi} tile={t} points={s.trends[t.kpi] || null} />)}
+              {s.tiles.filter((t) => t.state !== 'disabled').map((t) => <TrendCard key={t.kpi} tile={t} points={s.trends[t.kpi] || null} reference={s.references[t.kpi] || null} />)}
             </div>
           </section>
           <SourcesCard s={s} outage={outage} setOutage={setOutage} />
@@ -158,7 +158,7 @@ function TileCard({ tile: t, onDrill }: { tile: Tile; onDrill: (kpi: string) => 
 
 // ---------- 12-month trend: one small line chart per KPI (single series, shared style) ----------
 const W = 340, H = 132, L = 38, R = 14, T = 12, B = 22;
-function TrendCard({ tile, points }: { tile: Tile; points: TrendPoint[] | null }) {
+function TrendCard({ tile, points, reference }: { tile: Tile; points: TrendPoint[] | null; reference: Reference | null }) {
   const [hover, setHover] = useState<number | null>(null);
   const ref = useRef<SVGSVGElement>(null);
   const vals = (points || []).map((p) => p.value).filter((v): v is number => v != null);
@@ -170,8 +170,10 @@ function TrendCard({ tile, points }: { tile: Tile; points: TrendPoint[] | null }
       </div>
     );
   }
-  const band = tile.kpi === 'churn' ? [9, 10] : null;
-  let lo = Math.min(...vals, ...(band || [])), hi = Math.max(...vals, ...(band || []));
+  const band = reference?.band || null;
+  const refLine = reference?.line ?? null;
+  const refs = [...(band || []), ...(refLine != null ? [refLine] : [])];
+  let lo = Math.min(...vals, ...refs), hi = Math.max(...vals, ...refs);
   const padY = (hi - lo || 1) * 0.15;
   lo = Math.max(0, lo - padY);
   hi += padY;
@@ -200,6 +202,7 @@ function TrendCard({ tile, points }: { tile: Tile; points: TrendPoint[] | null }
       <div className="sc-chart">
         <svg ref={ref} viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`${tile.label}, ${longMonth(points[0].month)} to ${longMonth(points[last].month)}: ${points.map((p) => (p.value == null ? 'no data' : fmt(p.value))).join(', ')}`} onMouseMove={move} onMouseLeave={() => setHover(null)} onTouchStart={move} onTouchMove={move}>
           {band && <rect x={L} y={y(band[1])} width={W - L - R} height={y(band[0]) - y(band[1])} className="sc-band" />}
+          {refLine != null && <line x1={L} x2={W - R} y1={y(refLine)} y2={y(refLine)} className="sc-ref" />}
           {[lo, hi].map((v) => <g key={v}><line x1={L} x2={W - R} y1={y(v)} y2={y(v)} className="sc-grid" /><text x={L - 6} y={y(v) + 3} textAnchor="end" className="sc-axis">{axis(v)}</text></g>)}
           {[0, Math.floor(last / 2), last].map((i) => <text key={i} x={x(i)} y={H - 6} textAnchor={i === 0 ? 'start' : i === last ? 'end' : 'middle'} className="sc-axis">{shortMonth(points[i].month)}{i !== Math.floor(last / 2) ? ` ’${points[i].month.slice(2, 4)}` : ''}</text>)}
           {segs.map((sg) => <polyline key={sg} points={sg} className="sc-line" />)}
@@ -214,7 +217,7 @@ function TrendCard({ tile, points }: { tile: Tile; points: TrendPoint[] | null }
           </div>
         )}
       </div>
-      <p className="small muted sc-trend-foot">Latest: <b>{points[last].value == null ? 'no data' : fmt(points[last].value!)}</b> · range {fmt(Math.min(...vals))} to {fmt(Math.max(...vals))}{points.some((p) => p.flag) ? ' · hollow dots are flagged months' : ''}{band ? ' · shaded band is the 9–10% target' : ''}</p>
+      <p className="small muted sc-trend-foot">Latest: <b>{points[last].value == null ? 'no data' : fmt(points[last].value!)}</b> · range {fmt(Math.min(...vals))} to {fmt(Math.max(...vals))}{points.some((p) => p.flag) ? ' · hollow dots are flagged months' : ''}{band ? ` · shaded band: ${reference!.label}` : ''}{refLine != null ? ` · dashed line: ${reference!.label}` : ''}</p>
     </div>
   );
 }
