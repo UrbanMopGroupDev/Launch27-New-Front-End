@@ -1,15 +1,17 @@
-// Support settings → Kustomer migration (admins). Export Kustomer's history (read-only),
-// then preview which historical conversations would land on which customer's Story.
-// Nothing here imports anything into the live inbox: the import isn't enabled.
+// Support settings → Kustomer migration (everyone on the team). Export Kustomer's history
+// (read-only), preview which historical conversations would land on which customer's Story,
+// then import that plan into the inbox as closed, historical conversations (batches, progress,
+// stop/resume, rollback). Nothing is ever sent to a customer.
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { inbox, type KustomerExport, type KustomerMatchKind, type KustomerTest, type KustomerScope } from './api';
+import { inbox, type KustomerImport, type KustomerExport, type KustomerMatchKind, type KustomerTest, type KustomerScope } from './api';
 import { ago } from './util';
 
 const n = (v: number | null | undefined) => (v ?? 0).toLocaleString('en-CA');
 const day = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleDateString('en-CA', { timeZone: 'America/Toronto', year: 'numeric', month: 'short', day: 'numeric' }) : '—');
 const STATUS: Record<KustomerExport['status'], string> = { queued: 'Starting', running: 'Exporting', paused: 'Paused', cancelled: 'Cancelled', completed: 'Finished', failed: 'Stopped by an error' };
+const IMPORT_STATUS: Record<KustomerImport['status'], string> = { running: 'Importing', stopped: 'Stopped', completed: 'Finished', failed: 'Stopped by an error', rolled_back: 'Rolled back' };
 const MATCH: Record<KustomerMatchKind, { label: string; cls: string; help: string }> = {
   confident: { label: 'Confident', cls: 'wl-done', help: 'One Launch27 customer, by email or an identity agents already linked' },
   review: { label: 'Review', cls: 'wl-refused', help: 'Matched by phone number only: confirm before importing' },
@@ -22,7 +24,7 @@ const MATCH: Record<KustomerMatchKind, { label: string; cls: string; help: strin
 
 export function KustomerMigrationPanel() {
   const qc = useQueryClient();
-  const o = useQuery({ queryKey: ['inbox', 'kustomer'], queryFn: inbox.kustomer, refetchInterval: (q) => (q.state.data?.export && ['queued', 'running'].includes(q.state.data.export.status)) || q.state.data?.dry_run?.status === 'running' ? 2000 : 30_000 });
+  const o = useQuery({ queryKey: ['inbox', 'kustomer'], queryFn: inbox.kustomer, refetchInterval: (q) => (q.state.data?.export && ['queued', 'running'].includes(q.state.data.export.status)) || q.state.data?.dry_run?.status === 'running' || q.state.data?.imports?.some((x) => x.status === 'running') ? 2000 : 30_000 });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [test, setTest] = useState<KustomerTest | null>(null);
@@ -57,7 +59,7 @@ export function KustomerMigrationPanel() {
       <section className="channel-block">
         <p className="small">
           Copies Kustomer's customers, conversations, messages, internal notes and attachment details into encrypted storage here (Kustomer is only read), then previews which historical conversations would be attached to which customer's Story.{' '}
-          <b>Nothing is imported into the inbox, nothing is sent, and no customer or conversation changes.</b>
+          <b>Exports and dry runs change nothing here.</b> Step 4 imports the dry run's plan into the inbox as closed, historical conversations: nothing is sent, assigned or notified, and existing conversations are never changed. An import can be rolled back.
           {d.source === 'synthetic' && <b> This environment reads a synthetic Kustomer made from its test data, never the real one.</b>}
         </p>
         {!d.available && <p className="error small">Not available here: {d.setup_problem}</p>}
@@ -128,7 +130,6 @@ export function KustomerMigrationPanel() {
         <div className="backfill-actions">
           <button type="button" disabled={busy || !d.available || open || run?.status === 'running' || !d.stored.customer} onClick={() => act(inbox.kustomerDryRun)}>{run ? 'Run the dry run again' : 'Run the dry run'}</button>
           {r && <a className="button secondary-link" href="/api/admin/kustomer/report.csv">Download report (CSV, no names or addresses)</a>}
-          <button type="button" className="secondary" disabled title="Importing Kustomer history has not been approved">Import (not enabled)</button>
         </div>
         {run?.status === 'running' && <p className="muted small">Matching… (started {ago(run.created_at)})</p>}
         {run?.status === 'failed' && <p className="error small">{run.last_error}</p>}
@@ -153,14 +154,77 @@ export function KustomerMigrationPanel() {
         )}
       </section>
 
+      <Imports imports={d.imports} enabled={d.import_enabled} canStart={!!r && !busy && d.available && !open} busy={busy} act={act} newConversations={r?.new_conversations ?? 0} dryRunId={run?.id ?? null} />
+
       <section className="channel-block">
         <h3>Exported data</h3>
-        <p className="muted small">The copy is encrypted and visible only to admins. Delete it when the migration is finished (Kustomer itself is untouched).</p>
+        <p className="muted small">The copy is encrypted and visible only to the team, signed in. Delete it when the migration is finished (Kustomer itself is untouched).</p>
         <div className="backfill-actions">
-          <button type="button" className="secondary" disabled={busy || open || !d.stored.customer} onClick={() => window.confirm('Delete every exported Kustomer record and dry run here? Kustomer itself is not changed.') && act(inbox.kustomerPurge)}>Delete exported data</button>
+          <button type="button" className="secondary" disabled={busy || open || !d.stored.customer || d.imports.some((x) => x.status === 'running')} onClick={() => window.confirm('Delete every exported Kustomer record and dry run here? Kustomer itself is not changed.') && act(inbox.kustomerPurge)}>Delete exported data</button>
         </div>
       </section>
     </div>
+  );
+}
+
+function Imports({ imports, enabled, canStart, busy, act, newConversations, dryRunId }: { imports: KustomerImport[]; enabled: boolean; canStart: boolean; busy: boolean; act: <T>(fn: () => Promise<T>) => Promise<void>; newConversations: number; dryRunId: number | null }) {
+  const running = imports.some((x) => x.status === 'running');
+  return (
+    <section className="channel-block">
+      <h3>4. Import into the inbox</h3>
+      <p className="small">
+        Imports the latest dry run's plan in batches of 50: each conversation goes onto its matched customer's Story as a closed conversation with its original dates, messages and internal notes. Conversations without a confident match are imported without a customer. Messages already in the inbox are skipped, and anything imported before is never imported twice.
+      </p>
+      {!enabled && <p className="error small">Importing is switched off in this version.</p>}
+      <div className="backfill-actions">
+        <button
+          type="button"
+          disabled={!enabled || !canStart || running || !newConversations}
+          onClick={() => window.confirm(`Import ${n(newConversations)} historical conversations from dry run #${dryRunId} into the inbox? Nothing is sent to customers, and the import can be rolled back.`) && act(inbox.kustomerImport)}
+        >
+          Import {n(newConversations)} conversations
+        </button>
+        {!dryRunId && <span className="muted small">Run the dry run first.</span>}
+      </div>
+      {imports.map((x) => {
+        const pct = x.planned ? Math.min(100, Math.round((x.processed / x.planned) * 100)) : 100;
+        return (
+          <div className="backfill-job" key={x.id}>
+            <div className="backfill-job-head">
+              <b>Import #{x.id}</b>
+              <span className={`wl-pill ${x.status === 'completed' ? 'wl-done' : x.status === 'failed' ? 'wl-on' : x.status === 'rolled_back' ? 'wl-blocked' : 'wl-refused'}`}>{IMPORT_STATUS[x.status]}</span>
+              <span className="muted small">dry run #{x.dry_run_id} · {x.created_by_name ? `by ${x.created_by_name} · ` : ''}started {ago(x.created_at)}</span>
+              <span className="grow" />
+              {x.status === 'running' && <button type="button" className="secondary" disabled={busy} onClick={() => act(() => inbox.kustomerImportAction(x.id, 'stop'))}>Stop</button>}
+              {['stopped', 'failed'].includes(x.status) && <button type="button" disabled={busy || running} onClick={() => act(() => inbox.kustomerImportAction(x.id, 'resume'))}>Resume</button>}
+              {['stopped', 'failed', 'completed'].includes(x.status) && (
+                <button type="button" className="secondary" disabled={busy || running} onClick={() => window.confirm(`Roll back import #${x.id}? Its ${n(x.conversations)} imported conversations (and their messages and notes) are deleted from the inbox. Kustomer and the exported copy are not changed.`) && act(() => inbox.kustomerImportAction(x.id, 'rollback'))}>
+                  Roll back
+                </button>
+              )}
+            </div>
+            {x.status !== 'rolled_back' && (
+              <div className="km-progress" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label={`Import ${x.id} progress`}>
+                <div style={{ width: `${pct}%` }} />
+              </div>
+            )}
+            <p className="small">
+              {n(x.processed)} of {n(x.planned)} planned ({pct}%) · {n(x.batches)} batches · {n(x.conversations)} conversations, {n(x.messages)} messages and {n(x.notes)} notes imported · {n(x.skipped)} skipped
+            </p>
+            {x.last_error && <div className="error small">{x.last_error}</div>}
+            {x.reconcile && (
+              <p className={`small${x.reconcile.missing || x.reconcile.different ? ' error' : ''}`}>
+                Check against the plan: {n(x.reconcile.imported)} of {n(x.reconcile.planned)} conversations imported
+                {x.reconcile.missing ? ` · ${n(x.reconcile.missing)} missing (already imported earlier, or skipped)` : ''}
+                {x.reconcile.different ? ` · ${n(x.reconcile.different)} with fewer messages or notes than planned` : ''}
+                {!x.reconcile.missing && !x.reconcile.different ? ' · everything matches' : ''}
+              </p>
+            )}
+            {x.status === 'rolled_back' && <p className="muted small">Rolled back {ago(x.rolled_back_at!)}: {n(x.rolled_back_conversations)} conversations removed.</p>}
+          </div>
+        );
+      })}
+    </section>
   );
 }
 

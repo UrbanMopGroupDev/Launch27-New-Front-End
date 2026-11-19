@@ -52,7 +52,7 @@ const SECTIONS: { title: string; items: { id: Tab; label: string; desc: string }
       { id: 'writes', label: 'Launch27 changes', desc: 'Every change sent to Launch27 from this app' },
       { id: 'placement', label: 'Sales Hub API', desc: 'Quotes, holds and bookings from the Sales Hub' },
       { id: 'qa', label: 'QA data', desc: 'Copy of real data for QA (emails and phones masked)' },
-      { id: 'kustomer', label: 'Kustomer migration', desc: 'Export history and preview where it would go' },
+      { id: 'kustomer', label: 'Kustomer migration', desc: 'Export history, preview where it goes, and import it' },
     ],
   },
 ];
@@ -134,7 +134,7 @@ export function InboxSettingsPage() {
           {tab === 'writes' && (isAdmin ? <WritesLog /> : <div className="muted">Only admins can see the list of changes sent to Launch27.</div>)}
           {tab === 'placement' && (isAdmin ? <PlacementAudit /> : <div className="muted">Only admins can see the Sales Hub API log.</div>)}
           {tab === 'qa' && <QaCopySettings canEdit={isAdmin} />}
-          {tab === 'kustomer' && (isAdmin ? <KustomerMigrationPanel /> : <div className="muted">Only admins can see the Kustomer migration.</div>)}
+          {tab === 'kustomer' && <KustomerMigrationPanel />}
         </div>
       </div>
     </>

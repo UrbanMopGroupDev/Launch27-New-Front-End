@@ -263,6 +263,9 @@ export function createKustomerDryRun({ db, vault, l27Directory, ourDomains = [],
       return run;
     },
     wait: () => running || Promise.resolve(),
+    isActive: () => !!running,
+    /** For the import: which of these messages the live inbox already has. */
+    duplicates: async (messages) => (await liveIndex(messages)).duplicate,
     latest: async () => (await store.query('SELECT * FROM kustomer_dry_runs ORDER BY id DESC LIMIT 1')).rows[0] || null,
     async recover() {
       await store.query("UPDATE kustomer_dry_runs SET status = 'failed', last_error = 'Interrupted by a server restart. Run it again.', finished_at = now() WHERE status = 'running'");

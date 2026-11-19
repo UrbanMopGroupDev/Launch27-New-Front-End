@@ -1041,6 +1041,8 @@ label.bf-search input { width: auto; min-width: 0; }
 .backfill-kv th { width: 220px; font-weight: 500; color: var(--muted); }
 .backfill-job { display: grid; gap: 10px; margin-top: 8px; }
 .backfill-job-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.km-progress { height: 6px; border-radius: 3px; background: var(--border, #e3e3e3); overflow: hidden; margin: 6px 0; }
+.km-progress > div { height: 100%; background: var(--accent, #2f6fde); transition: width 0.4s; }
 .backfill-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; margin: 8px 0; }
 .backfill-stat { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--panel); }
 .backfill-stat.ok { border-color: #86efac; }
