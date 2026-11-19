@@ -527,6 +527,18 @@ describe('kpi live connectors (production path), run against the synthetic Launc
     assert.ok(calls.filter((c) => c.method === 'GET').every((c) => c.path.startsWith('/v1/staff/bookings')));
     await db.close();
   });
+  test('with no sync login, the daily job stays quiet and the signed-in login can refresh', async () => {
+    const { db, fetchImpl } = await setup();
+    const live = { ...config, l27Mode: 'live', l27SyncEmail: null, l27SyncPassword: null };
+    const l27 = createLaunch27Kpi({ db, config: live, fetchImpl, syncBearer: async () => null, brand, log: quiet, rules });
+    await l27.job.maybeRun();
+    assert.equal(l27.job.running(), false);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM kpi_refresh_log')).rows[0].n, 0);
+    const mine = await createSyncBearer({ config, fetchImpl })();
+    const done = await l27.job.start({ bearer: mine });
+    assert.ok(done.bookings > 100);
+    await db.close();
+  });
   test('a failed refresh keeps the previous snapshot and is logged', async () => {
     const { db, fetchImpl } = await setup();
     let broken = false;

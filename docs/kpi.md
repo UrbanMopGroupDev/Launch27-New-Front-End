@@ -66,7 +66,8 @@ Production:
   read the whole history from January 2024; the others read bookings from 120 days back to 60
   days ahead and merge them in. Only the login and GET requests are ever sent. The result is one
   slimmed snapshot in `kpi_snapshots`; review comments and contact details are not copied.
-  "Refresh Launch27 now" under Sources starts a run by hand.
+  "Refresh Launch27 now" under Sources starts a run by hand, using the signed-in person's own
+  Launch27 login. Without the sync login set, that button is the only way it refreshes.
 - **Kustomer**: no extra calls. Complaints are read from `complaint_cases` (source `kustomer`,
   Residential), which the Complaint playbook keeps up to date.
 - A failed refresh keeps the previous snapshot; the affected tiles turn "Stale" after 48 hours.

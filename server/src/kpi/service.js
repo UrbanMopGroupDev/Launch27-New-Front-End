@@ -116,9 +116,9 @@ export function createKpi({ db, config, log = { info() {}, warn() {}, error() {}
     async maybeRun() {
       for (const j of jobs) await j.maybeRun();
     },
-    refresh() {
+    refresh({ bearer = null } = {}) {
       if (!jobs.length) throw fail(409, 'Nothing to refresh here: this environment uses synthetic data');
-      for (const j of jobs) j.start();
+      for (const j of jobs) j.start({ bearer });
       return { running: true };
     },
     // Manual Google review entry: development and QA only.
