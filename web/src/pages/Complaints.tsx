@@ -6,7 +6,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useInboxMe } from '../inbox/util';
-import { complaintsApi, OUTCOME_LABEL, RUNG_NAME, SOURCE_LABEL, TONE_LABEL, whatWeDid, type CaseRow, type ClientRow, type Confidence, type OutcomeStats, type Playbook, type Settings, type Status } from '../complaints/api';
+import { complaintsApi, OUTCOME_LABEL, RUNG_NAME, SOURCE_LABEL, TONE_LABEL, whatWeDid, type CaseRow, type ClientRow, type ReviewItem, type ReviewTally, type Confidence, type OutcomeStats, type Playbook, type Settings, type Status } from '../complaints/api';
 import { Kpi } from '../reports/ui';
 import { money, pct } from '../reports/api';
 
@@ -45,7 +45,7 @@ const lastDays = (n: number, end: string): Period => ({ from: addDays(end, -(n -
 
 export function ComplaintsPage() {
   const me = useInboxMe();
-  const [tab, setTab] = useState<'playbook' | 'cases' | 'clients' | 'rules'>('playbook');
+  const [tab, setTab] = useState<'playbook' | 'cases' | 'clients' | 'check' | 'rules'>('playbook');
   const [chosen, setChosen] = useState<Period | null>(null);
   const status = useQuery({ queryKey: ['complaints', 'status'], queryFn: complaintsApi.status, refetchInterval: (q) => (q.state.data?.running ? 5000 : false), retry: false });
   const isAdmin = me.data?.role === 'admin';
@@ -71,15 +71,16 @@ export function ComplaintsPage() {
       </header>
       {status.data && period && <RunBar status={status.data} isAdmin={isAdmin} period={period} onPeriod={setChosen} />}
       <div className="tabs" role="tablist">
-        {(['playbook', 'cases', 'clients', 'rules'] as const).map((t) => (
+        {(['playbook', 'cases', 'clients', 'check', 'rules'] as const).map((t) => (
           <button key={t} role="tab" aria-selected={tab === t} className={`tab ${tab === t ? 'active' : ''}`} onClick={() => setTab(t)}>
-            {t === 'playbook' ? 'Playbook' : t === 'cases' ? 'Cases' : t === 'clients' ? 'Clients' : 'Rules & budget'}
+            {t === 'playbook' ? 'Playbook' : t === 'cases' ? 'Cases' : t === 'clients' ? 'Clients' : t === 'check' ? 'Check accuracy' : 'Rules & budget'}
           </button>
         ))}
       </div>
       {tab === 'playbook' && period && <PlaybookTab period={period} />}
       {tab === 'cases' && period && <CasesTab period={period} />}
       {tab === 'clients' && <ClientsTab />}
+      {tab === 'check' && <CheckTab />}
       {tab === 'rules' && <RulesTab canEdit={isAdmin} />}
     </div>
   );
@@ -536,6 +537,127 @@ function ClientsTab() {
         {c.review_mentions.length ? <ClientTable rows={c.review_mentions} head="Mentioned" extra={(r) => day((r as (typeof c.review_mentions)[number]).mentioned_on)} /> : <p className="muted">Nobody has mentioned a review in the periods mined.</p>}
       </section>
     </>
+  );
+}
+
+// Check accuracy: a person looks at a random sample per category and says whether the
+// engine's category was right. The answers fix the case and give a measured accuracy.
+function AccuracyRows({ rows, label }: { rows: (ReviewTally & { waiting?: number })[]; label: (k: string) => string }) {
+  return (
+    <>
+      {rows.map((r) => (
+        <tr key={r.key}>
+          <td>{label(r.key)}</td>
+          <td className="num">{r.checked}</td>
+          <td className="num">{r.accuracy == null ? '—' : pct(r.accuracy)}{r.checked > 0 && !r.enough && <span className="pill late" title="Too few checked to trust this number yet"> thin</span>}</td>
+          <td className="num">{r.wrong_category}</td>
+          <td className="num">{r.not_complaint}</td>
+          <td className="num muted">{r.waiting ?? ''}</td>
+        </tr>
+      ))}
+    </>
+  );
+}
+
+function CheckTab() {
+  const qc = useQueryClient();
+  const [category, setCategory] = useState('');
+  const [source, setSource] = useState('');
+  const [done, setDone] = useState<number[]>([]);
+  const q = useQuery({ queryKey: ['complaints', 'review', category, source], queryFn: () => complaintsApi.review({ category: category || undefined, source: source || undefined }), retry: false, refetchOnWindowFocus: false });
+  const send = useMutation({
+    mutationFn: (v: { id: number; verdict: 'correct' | 'wrong_category' | 'not_complaint'; category?: string }) => complaintsApi.submitReview(v.id, { verdict: v.verdict, category: v.category }),
+    onSuccess: (r, v) => {
+      setDone((d) => [...d, v.id]);
+      qc.setQueryData(['complaints', 'review', category, source], (old: typeof q.data) => (old ? { ...old, stats: r.stats } : old));
+      for (const k of ['playbook', 'cases', 'clients']) qc.invalidateQueries({ queryKey: ['complaints', k] });
+    },
+  });
+  if (q.isError) return <section className="card seg-empty"><p className="muted">{(q.error as Error).message}</p></section>;
+  if (!q.data) return <section className="card">Loading…</section>;
+  const { stats } = q.data;
+  const queue = q.data.queue.filter((c) => !done.includes(c.id));
+  const t = stats.total;
+  return (
+    <>
+      <section className="card">
+        <h2>How accurate is the sorting?</h2>
+        <div className="cmp-arms">
+          <div className="cmp-arm"><span className="small muted">Checked by a person</span><span className="cmp-arm-value">{t.checked}</span><span className="small muted">{stats.waiting} not checked yet</span></div>
+          <div className="cmp-arm"><span className="small muted">Category was right</span><span className="cmp-arm-value">{t.accuracy == null ? '—' : pct(t.accuracy)}</span><span className="small muted">{t.checked < stats.min_checks ? `Needs at least ${stats.min_checks} checks to mean anything` : `${t.correct} of ${t.checked}`}</span></div>
+          <div className="cmp-arm"><span className="small muted">Wrong category</span><span className="cmp-arm-value">{t.wrong_category}</span><span className="small muted">Fixed when you pick the right one</span></div>
+          <div className="cmp-arm"><span className="small muted">Not a complaint at all</span><span className="cmp-arm-value">{t.not_complaint}</span><span className="small muted">Taken out of the playbook</span></div>
+        </div>
+        <div className="table-wrap">
+          <table className="table">
+            <thead><tr><th>What the engine said</th><th className="num">Checked</th><th className="num">Right</th><th className="num">Wrong category</th><th className="num">Not a complaint</th><th className="num">Waiting</th></tr></thead>
+            <tbody>
+              <AccuracyRows rows={stats.by_category} label={catLabel} />
+              {stats.by_source.length > 0 && <tr><th colSpan={6}>By where it came from</th></tr>}
+              <AccuracyRows rows={stats.by_source} label={(k) => SOURCE_LABEL[k] || k} />
+              {stats.by_classifier.length > 0 && <tr><th colSpan={6}>By who sorted it</th></tr>}
+              <AccuracyRows rows={stats.by_classifier} label={(k) => (k === 'claude' ? 'Claude' : k === 'rules' ? 'Keyword rules' : k)} />
+            </tbody>
+          </table>
+        </div>
+        {stats.confusions.length > 0 && (
+          <>
+            <h3>Most common mix-ups</h3>
+            <ul>{stats.confusions.map((c) => <li key={`${c.from}>${c.to}`}>{catLabel(c.from)} → should be <b>{catLabel(c.to)}</b> ({c.n})</li>)}</ul>
+          </>
+        )}
+      </section>
+      <section className="card cmp-filter">
+        <label className="cmp-date">Category
+          <select value={category} onChange={(e) => { setCategory(e.target.value); setDone([]); }}>
+            <option value="">All (20 random from each)</option>
+            {Object.keys(CATEGORY_LABEL).map((k) => <option key={k} value={k}>{catLabel(k)}</option>)}
+          </select>
+        </label>
+        <label className="cmp-date">Source
+          <select value={source} onChange={(e) => { setSource(e.target.value); setDone([]); }}>
+            <option value="">All sources</option>
+            {['kustomer', 'gmail', 'launch27_rating', 'slack'].map((k) => <option key={k} value={k}>{SOURCE_LABEL[k]}</option>)}
+          </select>
+        </label>
+        <span className="muted small">{queue.length} to check in this batch</span>
+        <button className="link" onClick={() => { setDone([]); q.refetch(); }}>New batch</button>
+      </section>
+      {send.isError && <p className="cmp-note">{(send.error as Error).message}</p>}
+      {queue.length === 0 && <section className="card seg-empty"><p className="muted">Nothing left to check here. Pick another category or source, or get a new batch.</p></section>}
+      {queue.slice(0, 10).map((c) => <CheckCard key={c.id} c={c} busy={send.isPending} onVerdict={(verdict, cat) => send.mutate({ id: c.id, verdict, category: cat })} />)}
+      {queue.length > 10 && <p className="muted small">{queue.length - 10} more appear as you go.</p>}
+    </>
+  );
+}
+
+function CheckCard({ c, busy, onVerdict }: { c: ReviewItem; busy: boolean; onVerdict: (v: 'correct' | 'wrong_category' | 'not_complaint', category?: string) => void }) {
+  return (
+    <section className="card cmp-check">
+      <div className="cmp-runbar">
+        <h3><span className="pill">{catLabel(c.category)}</span> {c.customer_name || 'Unmatched client'} · {day(c.opened_at)}</h3>
+        <span className="muted small">{SOURCE_LABEL[c.source] || c.source} · sorted by {c.classified_by === 'claude' ? 'Claude' : 'keyword rules'}</span>
+      </div>
+      {c.text && <blockquote className="cmp-quote">{c.text}</blockquote>}
+      {c.summary ? <p>{c.text ? <span className="muted small">Engine's summary: </span> : null}{c.summary}</p> : !c.text && <p className="muted">No text stored for this case{c.original_url ? ': open the email to check it' : ''}.</p>}
+      <dl className="kv">
+        {c.title && (<><dt>Subject</dt><dd>{c.title}</dd></>)}
+        {c.source_status && (<><dt>Kustomer status</dt><dd>{c.source_status}</dd></>)}
+        {c.rating != null && (<><dt>Rating</dt><dd>Unhappy rating in Launch27</dd></>)}
+        <dt>Tone · severity</dt><dd>{c.tone ? TONE_LABEL[c.tone] : '—'} · {c.severity ?? '—'}/4{c.hard_route ? ` · hard route: ${c.hard_route.replace(/_/g, ' ')}` : ''}</dd>
+        {c.areas_cited?.length > 0 && (<><dt>Areas</dt><dd>{c.areas_cited.join(', ')}</dd></>)}
+        <dt>What we did</dt><dd>{whatWeDid(c.rungs)}{c.resolution_text ? ` · ${c.resolution_text}` : ''}</dd>
+      </dl>
+      <div className="cmp-check-actions">
+        <button disabled={busy} onClick={() => onVerdict('correct')}>Correct</button>
+        <select value="" disabled={busy} aria-label="Pick the right category" onChange={(e) => e.target.value && onVerdict('wrong_category', e.target.value)}>
+          <option value="">Wrong, it should be…</option>
+          {Object.keys(CATEGORY_LABEL).filter((k) => k !== c.category).map((k) => <option key={k} value={k}>{catLabel(k)}</option>)}
+        </select>
+        <button className="secondary" disabled={busy} onClick={() => onVerdict('not_complaint')}>Not a complaint</button>
+        {c.original_url && <a href={c.original_url} target="_blank" rel="noreferrer" className="small">Open the email</a>}
+      </div>
+    </section>
   );
 }
 

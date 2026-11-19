@@ -49,6 +49,19 @@ export function registerComplaintRoutes(r, { complaints, needRole, wrap, now = (
     await complaints.setCategory(Number(req.params.id), { category, hard_route }, req.user.id);
     res.json(await complaints.getCase(Number(req.params.id)));
   }));
+  r.get('/complaints/review', lead, h(async (req, res) => {
+    const category = CATEGORY_KEYS.includes(req.query.category) ? req.query.category : null;
+    const source = /^[a-z0-9_]{2,30}$/.test(req.query.source || '') ? req.query.source : null;
+    const [queue, stats] = await Promise.all([complaints.reviewQueue({ per: Number(req.query.per) || 20, category, source }), complaints.reviewStats()]);
+    res.json({ queue, stats });
+  }));
+  r.post('/complaints/cases/:id/review', lead, h(async (req, res) => {
+    const { verdict, category, note } = req.body || {};
+    if (!['correct', 'wrong_category', 'not_complaint'].includes(verdict)) return res.status(400).json({ error: 'Unknown verdict' });
+    if (verdict === 'wrong_category' && !CATEGORY_KEYS.includes(category)) return res.status(400).json({ error: 'Pick the right category' });
+    await complaints.reviewCase(Number(req.params.id), { verdict, category, note }, req.user.id);
+    res.json({ ok: true, stats: await complaints.reviewStats() });
+  }));
   r.get('/complaints/clients', lead, h(async (req, res) => res.json(await complaints.clients())));
   r.post('/complaints/run', admin, h(async (req, res) => {
     const w = { from: DAY.test(req.body?.from || '') ? req.body.from : null, to: DAY.test(req.body?.to || '') ? req.body.to : null };
