@@ -35,6 +35,7 @@ real messages; only production touches the real Launch27.
 | [docs/security.md](docs/security.md) | Secrets, sessions, least privilege, log redaction |
 | [docs/email.md](docs/email.md) | Email channel: Gmail setup, threading, sandbox in dev/QA, troubleshooting |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Failed deploys, health checks, sign-in problems |
+| [docs/kpi.md](docs/kpi.md) | KPI scorecard: metric definitions, sources, refresh schedule, how to add a brand |
 | [docs/placement.md](docs/placement.md) | The placement API the Sales Hub books through: endpoints, setup, limits |
 
 ## Setup

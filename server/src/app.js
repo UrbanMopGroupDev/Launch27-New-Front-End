@@ -9,6 +9,7 @@ import { createLogger, requestLogger } from './log.js';
 import { migrationStatus } from './db/migrate.js';
 import { createPlacementRouter } from './placement/api.js';
 import { canSeeUtilization } from './config.js';
+import { canSeeKpi } from './kpi/service.js';
 
 const COOKIE = 'l27_session';
 const UPSTREAM_TIMEOUT_MS = 30_000;
@@ -17,7 +18,7 @@ const FORWARD_HEADERS = ['accept', 'content-type'];
 
 export function createApp(
   config,
-  { fetchImpl = fetch, sessions = new SessionStore({ secret: config.sessionSecret }), db = null, connectors = {}, log = createLogger({ level: 'warn' }), jobs = null, qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null } = {},
+  { fetchImpl = fetch, sessions = new SessionStore({ secret: config.sessionSecret }), db = null, connectors = {}, log = createLogger({ level: 'warn' }), jobs = null, qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, kpi = null } = {},
 ) {
   const app = express();
   // Behind Railway's (or any) HTTPS proxy: trust X-Forwarded-* so secure cookies work.
@@ -107,7 +108,7 @@ export function createApp(
   app.get('/auth/me', (req, res) => {
     const session = sessions.get(req.signedCookies[COOKIE]);
     if (!session) return res.status(401).json({ error: 'Not logged in' });
-    const features = { utilization: canSeeUtilization(config, session.email) };
+    const features = { utilization: canSeeUtilization(config, session.email), kpi: !!kpi && canSeeKpi(config, session.email) };
     res.json({ email: session.email, allowWrites: config.allowWrites, env: config.appEnv, l27Mode: config.l27Mode, notificationsMode: config.notificationsMode, features });
   });
 
@@ -203,7 +204,7 @@ export function createApp(
   // The support workspace (conversations, contacts, routing). Needs a database.
   if (db) {
     const l27 = createL27Client({ baseUrl: config.l27BaseUrl, fetchImpl });
-    app.use('/api', createInboxRouter({ db, sessions, cookieName: COOKIE, config, l27, connectors: guardConnectors(connectors, config.notificationsMode), log, qa, segments, schedule, reports, writes, commercial, placement, commercialPlan }));
+    app.use('/api', createInboxRouter({ db, sessions, cookieName: COOKIE, config, l27, connectors: guardConnectors(connectors, config.notificationsMode), log, qa, segments, schedule, reports, writes, commercial, placement, commercialPlan, kpi }));
   }
 
   // Last-resort error handler: log it (without personal data), answer generically.
