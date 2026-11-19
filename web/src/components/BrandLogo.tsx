@@ -6,10 +6,15 @@ import { useState } from 'react';
 export function BrandLogo({ name, sub }: { name: string; sub?: string }) {
   const [failed, setFailed] = useState(false);
   const isUrbanMop = /urban\s*mop/i.test(name);
+  const rest = isUrbanMop ? name.replace(/^\s*urban\s*mop\s*/i, '').trim() : '';
   return (
     <div className="brand-logo">
       {isUrbanMop && !failed ? (
-        <img src="/brand/logo.png" alt={name} className="brand-logo-img" onError={() => setFailed(true)} />
+        <>
+          <img src="/brand/logo.png" alt={name} className="brand-logo-img" onError={() => setFailed(true)} />
+          {/* "UrbanMop Residential": the logo says UrbanMop, the rest goes beside it. */}
+          {rest && <div className="brand-text"><div className="brand-name">{rest}</div></div>}
+        </>
       ) : (
         <>
           <div className="brand-mark" aria-hidden="true">

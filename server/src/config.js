@@ -120,6 +120,50 @@ export function loadConfig(env = process.env) {
     }
   }
 
+  // Live SMS through RingCentral (docs/sms.md). A server-side app with JWT sign-in, separate
+  // from the calling widget above. Production must use the production platform; development
+  // and QA may only use the RingCentral sandbox, and their sends are always sandboxed anyway
+  // (NOTIFICATIONS_MODE is forced to sandbox outside production).
+  let ringcentralSms = null;
+  const smsSet = !!(env.RINGCENTRAL_SMS_CLIENT_ID || env.RINGCENTRAL_SMS_JWT);
+  if (smsSet) {
+    const server = (env.RINGCENTRAL_SMS_SERVER || (isProd ? 'https://platform.ringcentral.com' : 'https://platform.devtest.ringcentral.com')).replace(/\/+$/, '');
+    const sandboxServer = /devtest|sandbox/i.test(server);
+    const numbers = String(env.RINGCENTRAL_SMS_NUMBERS || '').split(/[,\s]+/).filter(Boolean);
+    const webhookUrl = env.RINGCENTRAL_SMS_WEBHOOK_URL || null;
+    const webhookToken = env.RINGCENTRAL_SMS_WEBHOOK_TOKEN || null;
+    if (!(env.RINGCENTRAL_SMS_CLIENT_ID && env.RINGCENTRAL_SMS_CLIENT_SECRET && env.RINGCENTRAL_SMS_JWT)) warnings.push('RingCentral SMS needs RINGCENTRAL_SMS_CLIENT_ID, RINGCENTRAL_SMS_CLIENT_SECRET and RINGCENTRAL_SMS_JWT; SMS is not connected.');
+    else if (!isProd && !sandboxServer) warnings.push(`RingCentral SMS disabled in ${appEnv}: only the RingCentral sandbox (platform.devtest.ringcentral.com) is allowed outside production.`);
+    else if (isProd && sandboxServer) warnings.push('RingCentral SMS disabled: production must use the production platform (platform.ringcentral.com), not the sandbox.');
+    else if (webhookUrl && !/^https:\/\//.test(webhookUrl)) warnings.push('RINGCENTRAL_SMS_WEBHOOK_URL must be an https:// address; SMS is not connected.');
+    else if (webhookUrl && (!webhookToken || webhookToken.length < 16 || webhookToken.length > 64)) warnings.push('RINGCENTRAL_SMS_WEBHOOK_TOKEN must be 16-64 random characters when a webhook address is set; SMS is not connected.');
+    else {
+      ringcentralSms = { server, clientId: env.RINGCENTRAL_SMS_CLIENT_ID, clientSecret: env.RINGCENTRAL_SMS_CLIENT_SECRET, jwt: env.RINGCENTRAL_SMS_JWT, numbers, webhookUrl, webhookToken: webhookUrl ? webhookToken : null };
+      if (!webhookUrl) warnings.push('RingCentral SMS has no RINGCENTRAL_SMS_WEBHOOK_URL: incoming texts arrive through the Message Store check (every 5 minutes) instead of instantly.');
+    }
+  }
+
+  // Live SMS through Twilio (docs/sms.md), alongside RingCentral: each number belongs to one
+  // provider. Production only: Twilio has no separate test data, so dev and QA would read real
+  // customers' texts. They use the sandbox SMS channel instead.
+  let twilioSms = null;
+  if (env.TWILIO_ACCOUNT_SID || env.TWILIO_AUTH_TOKEN) {
+    const numbers = String(env.TWILIO_SMS_NUMBERS || '').split(/[,\s]+/).filter(Boolean);
+    const rcNumbers = new Set((ringcentralSms?.numbers || []).map((n) => n.replace(/[^\d+]/g, '')));
+    const overlap = numbers.filter((n) => rcNumbers.has(n.replace(/[^\d+]/g, '')));
+    const base = env.TWILIO_WEBHOOK_BASE_URL ? env.TWILIO_WEBHOOK_BASE_URL.replace(/\/+$/, '') : null;
+    if (!isProd) warnings.push(`Twilio SMS settings ignored in ${appEnv}: only production reads and sends real texts. SMS runs in sandbox mode here.`);
+    else if (!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN)) warnings.push('Twilio SMS needs TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN; Twilio is not connected.');
+    else if (!numbers.length) warnings.push('TWILIO_SMS_NUMBERS is empty: list the Twilio numbers to text from; Twilio is not connected.');
+    else if (overlap.length) warnings.push(`A number can belong to only one SMS provider: ${overlap.join(', ')} is set for both RingCentral and Twilio. Twilio is not connected.`);
+    else if (base && !/^https:\/\//.test(base)) warnings.push('TWILIO_WEBHOOK_BASE_URL must be an https:// address; Twilio is not connected.');
+    else {
+      twilioSms = { accountSid: env.TWILIO_ACCOUNT_SID, authToken: env.TWILIO_AUTH_TOKEN, apiKeySid: env.TWILIO_API_KEY_SID || null, apiKeySecret: env.TWILIO_API_KEY_SECRET || null, numbers, webhookBaseUrl: base };
+      if (!base) warnings.push('Twilio SMS has no TWILIO_WEBHOOK_BASE_URL: incoming texts arrive through the 5-minute check, and delivery status by polling.');
+    }
+  }
+  if (isProd && !ringcentralSms && !twilioSms) warnings.push('SMS is not connected: set the RINGCENTRAL_SMS_* or TWILIO_* variables (docs/sms.md). Text replies are saved, not sent.');
+
   const placement = parsePlacementTokens(env.PLACEMENT_TOKENS);
   const placementIps = parseIpList(env.PLACEMENT_ALLOWED_IPS);
   if (placement.tokens.size && l27Mode === 'live' && !(env.L27_PLACEMENT_EMAIL && env.L27_PLACEMENT_PASSWORD)) {
@@ -186,6 +230,8 @@ export function loadConfig(env = process.env) {
     pgliteDir: env.PGLITE_DIR || '.data/pglite',
     migrateOnBoot: env.MIGRATE_ON_BOOT === undefined ? true : truthy(env.MIGRATE_ON_BOOT),
     adminEmails: env.ADMIN_EMAILS || '',
+    // Monthly raise check: who gets the bell notification (comma-separated). Empty = every admin.
+    raiseDigestEmails: env.RAISE_DIGEST_EMAILS || '',
     supervisorEmails: env.SUPERVISOR_EMAILS || '',
     // Utilization report (read-only): everyone, production included. UTILIZATION_EMAILS, if set,
     // narrows it to those logins.
@@ -197,6 +243,8 @@ export function loadConfig(env = process.env) {
     portalName,
     portalLinks,
     ringcentralClientId,
+    ringcentralSms,
+    twilioSms,
     ringcentralServer,
     ringcentralRecord,
     workerIntervalMs: Number(env.INBOX_WORKER_INTERVAL_MS || 30_000),
@@ -221,6 +269,18 @@ export function loadConfig(env = process.env) {
     // Bookings from placement are written as this Launch27 staff user (live only; mock signs in itself).
     l27PlacementEmail: l27Mode === 'live' ? env.L27_PLACEMENT_EMAIL || null : null,
     l27PlacementPassword: l27Mode === 'live' ? env.L27_PLACEMENT_PASSWORD || null : null,
+    // Complaint Resolution Engine (docs/complaints-engine.md). Real sources are read in
+    // production only, so dev and QA never pull real complaint text. All read-only.
+    kustomerApiKey: isProd ? env.KUSTOMER_API_KEY || null : null,
+    kustomerComplaintKlass: env.KUSTOMER_COMPLAINT_KLASS || null,
+    // Kustomer migration (docs/kustomer-migration.md): exported records are encrypted with this.
+    // Production must set its own; dev and QA (synthetic Kustomer only) use a fixed test key.
+    kustomerExportKey: isProd ? env.KUSTOMER_EXPORT_KEY || null : env.KUSTOMER_EXPORT_KEY || 'dev-and-qa-only-kustomer-export-key-synthetic-data',
+    kustomerExportRpm: Math.min(1000, Math.max(10, Number(env.KUSTOMER_EXPORT_RPM) || 300)),
+    slackBotToken: isProd ? env.SLACK_BOT_TOKEN || null : null,
+    slackChannels: parseSlackChannels(env.COMPLAINT_SLACK_CHANNELS),
+    // Claude classification of redacted complaint text. Optional; rules-only without it.
+    anthropicApiKey: isProd ? env.ANTHROPIC_API_KEY || null : null,
     warnings,
   };
 }
@@ -258,4 +318,15 @@ export function canSeeUtilization(config, email) {
   if (!config?.utilizationEnabled) return false;
   const list = config.utilizationEmails || [];
   return !list.length || list.includes(String(email || '').toLowerCase());
+}
+
+// "C04469ZQMC1=finance-refunds,C06JZHD9G83=finance-operations-collaboration" -> { id: label }.
+// Empty = the default finance channels (src/complaints/sources/slack.js).
+function parseSlackChannels(value) {
+  const out = {};
+  for (const part of String(value || '').split(',')) {
+    const [id, label] = part.split('=').map((s) => s && s.trim());
+    if (id && /^[CG][A-Z0-9]{6,}$/.test(id)) out[id] = label || id;
+  }
+  return Object.keys(out).length ? out : null;
 }

@@ -65,7 +65,7 @@ export interface Booking {
   location?: Named;
   frequency?: Named;
   address?: { full_address?: string; street?: string; city?: string; state?: string; zip?: string };
-  user?: Named & { email?: string; is_new_customer?: boolean; referral_code?: string; is_stripe_card?: boolean };
+  user?: Named & { email?: string; is_new_customer?: boolean; referral_code?: string; is_stripe_card?: boolean; tags_info?: Tag[] | null };
   teams?: { id?: number; title?: string }[];
   services?: Service[];
   staff_notes?: string | null;

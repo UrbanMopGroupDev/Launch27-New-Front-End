@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { utilizationFacts, utilizationReport, clampRange } from '../src/reports/utilization.js';
+import { utilizationFacts, utilizationReport, clampRange, dataCheck, withRecordedDays } from '../src/reports/utilization.js';
 import { createReports } from '../src/reports/service.js';
 import { createSchedule } from '../src/schedule/service.js';
 import { createMockLaunch27 } from '../src/mock/launch27.js';
@@ -49,9 +49,12 @@ describe('utilization: the arithmetic, by hand', () => {
     assert.equal(t.spoken_h, 16);
     assert.equal(t.left_h, 68);
     assert.equal(t.utilization, 16 / 84);
-    // Typical booking 3h (12h over 4 cleaner-visits) + a 6-min leg = 3.1h each: 68 ÷ 3.1 → 21.
+    // Room for: 3.1 h slots (a typical 3 h booking + a 6-min drive) that fit into each cleaner's open
+    // stretches. A: Mon 1 (after v1), Tue 2, Wed 2, Thu 1 (own 4 h), Fri 1 (before v6; 54 min after
+    // is too short), Sat 2 = 9. B: Mon 1, Tue 2, Wed 1 (after v5), Thu 0 (closed), Fri 2, Sat 2 = 8.
+    // 17 slots − the unassigned visit − the visit to move = 15.
     assert.equal(t.typical_booking_h, 3);
-    assert.equal(t.room_bookings, 21);
+    assert.equal(t.room_bookings, 15);
   });
 
   test('brand view: the shared cleaner loses the hours booked for the other brand', () => {
@@ -139,5 +142,195 @@ describe('utilization: on the sample Launch27', () => {
       server.close();
       await db.close();
     }
+  });
+});
+
+describe('utilization: data check', () => {
+  test('flags refused hours, booked with no hours, booked while not taking, no hours set, no home location', () => {
+    const NOHOURS = { id: 4, name: 'No hours', area: 'Unknown', assignable: true, location_ids: [1], lat: null, lng: null, rules: {}, availability: [] };
+    const REFUSED = { ...NOHOURS, id: 5, name: 'Refused', ...HOME, area: 'Central', availability_error: 'Launch27 refused: not allowed for this login (403)' };
+    const visits = [...VISITS, visit('v8', '2026-11-10', 600, 720, [4]), visit('v9', '2026-11-11', 600, 720, [5])];
+    const all = [A, B, OFF, NOHOURS, REFUSED].map((c) => ({ ...c, weekly_hours: c.availability.length ? 8 * 7 : 0, status_label: c.assignable ? 'Active' : 'On hold' }));
+    const f = utilizationFacts({ today: TODAY, cleaners: all, visits, holidays: HOLIDAYS, until: '2026-11-15' });
+    const dc = dataCheck({ facts: f, inWin: (d) => d >= TODAY && d <= '2026-11-15', cleaners: all, source: { full_at: '2026-11-09T10:00:00Z', cleaners_by: 'person' } });
+    const kinds = (id) => dc.cleaners.find((c) => c.cleaner_id === id).flags.map((x) => x.kind);
+    assert.deepEqual(kinds(5), ['refused', 'booked_no_hours']);
+    assert.deepEqual(kinds(4), ['booked_no_hours', 'no_hours', 'no_home']);
+    assert.deepEqual(kinds(3), ['booked_not_taking']);
+    assert.deepEqual(kinds(1), []);
+    assert.equal(dc.cleaners[0].cleaner_id, 5); // problems first, refused at the top
+    assert.equal(dc.counts.booked_no_hours, 2);
+    assert.equal(dc.read_by, 'person');
+  });
+
+  test('the planner records a refusal instead of hiding it, and retries a temporary one', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const mock = createMockLaunch27({ password: 'demo' });
+    let tries429 = 0;
+    const fetchImpl = async (url, init) => {
+      if (url.includes('/v1/staff/teams/9000/availability')) return new Response('{}', { status: 403 });
+      if (url.includes('/v1/staff/teams/9001/availability') && tries429++ === 0) return new Response('{}', { status: 429 });
+      return mock(url, init);
+    };
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet, retryDelayMs: 0 });
+    await schedule.sync();
+    const src = await schedule.utilizationSource();
+    const c0 = src.cleaners.find((c) => c.id === 9000);
+    const c1 = src.cleaners.find((c) => c.id === 9001);
+    assert.equal(c0.availability_error, 'Launch27 refused: not allowed for this login (403)');
+    assert.deepEqual(c0.availability, []);
+    assert.equal(c1.availability_error, null); // 429 once, then fine on the retry
+    assert.ok(c1.availability.length > 0);
+    assert.equal(src.cleaners_by, 'sync');
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    const r = await reports.utilization({});
+    assert.ok(r.data_check.cleaners.find((c) => c.cleaner_id === 9000).flags.some((f) => f.kind === 'refused'));
+    await db.close();
+  });
+});
+
+describe('reading Launch27 hours', () => {
+  test('times in any common format', async () => {
+    const { toMinutes } = await import('../src/schedule/rules.js');
+    assert.deepEqual(['09:00', '9:00:00', '9:00 AM', '9am', '5:00 PM', '5pm', '17:30', '12:00 PM', '12:30 AM'].map(toMinutes), [540, 540, 540, 540, 1020, 1020, 1050, 720, 30]);
+  });
+  test('a date row with no times does not wipe out the weekly hours; split days count; AM/PM read right', async () => {
+    const { workingWindow, weeklyHours } = await import('../src/schedule/rules.js');
+    const rows = [
+      { date: null, weekday: 1, dayoff: false, start_time: '9:00 AM', end_time: '5:00 PM' },
+      { date: null, weekday: 2, dayoff: false, start_time: '08:00', end_time: '12:00' },
+      { date: null, weekday: 2, dayoff: false, start_time: '13:00', end_time: '17:00' },
+      { date: '2026-11-16', weekday: null, dayoff: false, start_time: null, end_time: null }, // Monday, says nothing
+      { date: '2026-11-23', weekday: null, dayoff: true, start_time: null, end_time: null }, // Monday off
+      { date: '2026-11-30', weekday: null, dayoff: false, start_time: '10:00', end_time: '14:00' }, // short Monday
+    ];
+    assert.deepEqual(workingWindow(rows, '2026-11-16'), [540, 1020]);
+    assert.equal(workingWindow(rows, '2026-11-23'), null);
+    assert.deepEqual(workingWindow(rows, '2026-11-30'), [600, 840]);
+    assert.deepEqual(workingWindow(rows, '2026-11-17'), [480, 1020]);
+    assert.equal(weeklyHours(rows), 8 + 8);
+  });
+});
+test('a split day counts its blocks, not the gap', async () => {
+  const { workingMinutes } = await import('../src/schedule/rules.js');
+  const rows = [{ date: null, weekday: 2, dayoff: false, start_time: '08:00', end_time: '12:00' }, { date: null, weekday: 2, dayoff: false, start_time: '13:00', end_time: '17:00' }];
+  assert.equal(workingMinutes(rows, '2026-11-17'), 480);
+});
+
+describe('utilization: past weeks and shared cleaners', () => {
+  test('past dates can be chosen back to the earliest kept date', () => {
+    assert.deepEqual(clampRange('2026-11-17', '2026-11-08', '2026-11-14', '2027-01-11', '2026-09-22'), { from: '2026-11-08', to: '2026-11-14' });
+    assert.deepEqual(clampRange('2026-11-17', '2026-08-01', '2026-08-10', '2027-01-11', '2026-09-22'), { from: '2026-09-22', to: '2026-09-22' });
+  });
+
+  test('a past week is counted like any other, and marked past', () => {
+    // "Today" is the Sunday after the test week, so the whole week Nov 9–14 is in the past.
+    const f = utilizationFacts({ today: '2026-11-15', start: TODAY, cleaners: [A, B, OFF], visits: VISITS, holidays: HOLIDAYS, until: '2026-11-15' });
+    const r = utilizationReport({ facts: f, from: TODAY, to: '2026-11-14', maxTo: '2027-01-10', minFrom: '2026-09-20' });
+    assert.equal(r.past, true);
+    assert.equal(r.min_from, '2026-09-20');
+    assert.equal(r.totals.available_h, 84);
+    assert.equal(r.totals.assigned_h, 12);
+    assert.equal(r.totals.unassigned_h, 2);
+  });
+
+  test('a shared cleaner shows open hours and the other brand\'s share', () => {
+    const r = report([1]);
+    const b = r.cleaners.find((c) => c.cleaner_id === 2);
+    assert.deepEqual([b.open_h, b.other_brand_h, b.available_h], [40, 3, 37]); // Wednesday 9–12 went to the other brand
+    const a = r.cleaners.find((c) => c.cleaner_id === 1);
+    assert.deepEqual([a.open_h, a.other_brand_h, a.available_h], [44, 0, 44]);
+  });
+
+  test('the planner keeps visits and one-day changes from past weeks for the report', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet, retryDelayMs: 0 });
+    await schedule.sync();
+    const src = await schedule.utilizationSource();
+    assert.ok(src.history_from < src.today);
+    assert.ok(src.visits.some((v) => v.date < src.today), 'past visits are included');
+    assert.ok(src.cleaners.some((c) => c.availability.some((row) => row.date && String(row.date).slice(0, 10) < addDaysT(src.today, -7))), 'one-day changes older than a week are kept');
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    const r = await reports.utilization({ from: addDaysT(src.today, -14), to: addDaysT(src.today, -8) });
+    assert.equal(r.past, true);
+    assert.equal(r.from, addDaysT(src.today, -14));
+    assert.ok(r.totals.available_h > 0 && r.totals.assigned_h > 0);
+    await db.close();
+  });
+});
+const addDaysT = (d, n) => new Date(Date.parse(`${d}T12:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
+
+describe('utilization: bookings that need a cleaner', () => {
+  test('lists unassigned and to-move bookings in the dates, Monday to Saturday, once each', () => {
+    const r = report();
+    const list = r.needs_cleaner;
+    // v3 (Tuesday, unassigned) and v7 (Saturday, on the on-hold cleaner); Sunday v4 is left out.
+    assert.deepEqual(list.map((x) => [x.kind, x.key]), [['unassigned', 'v3'], ['not_taking', 'v7']]);
+    assert.equal(list[0].hours, 2);
+    assert.equal(list[1].cleaner, 'On hold');
+    assert.equal(list.filter((x) => x.kind === 'unassigned').length, r.totals.unassigned_visits);
+  });
+});
+
+test('room for counts bookings that fit into real gaps, not hours ÷ length', () => {
+  // One cleaner, Monday 9–5 (8 h), with a 2 h visit at 12–2 in the middle: 3 h before, 3 h after.
+  const C = { id: 7, name: 'C', area: 'Central', assignable: true, location_ids: [1], ...HOME, rules: {}, availability: week() };
+  const f = utilizationFacts({ today: TODAY, cleaners: [C], visits: [visit('m', '2026-11-09', 720, 840, [7], { duration: 120 })], until: '2026-11-09' });
+  const t = utilizationReport({ facts: f, from: TODAY, to: TODAY, maxTo: '2026-11-15' }).totals;
+  // A typical booking here is 2 h + a 6-min drive = 126 min. Before: 9:00–11:54 (174 min) fits 1;
+  // after: 2:06–5:00 (174 min) fits 1.
+  // Four 1 h visits at 10, 12, 2 and 4: about 3.5 open hours remain, but every gap is under an hour
+  // (9:00–9:54, 11:06–11:54, …), too short for a 1 h visit plus its 6-min drive: room for none.
+  assert.equal(t.room_bookings, 2);
+  const g = utilizationFacts({ today: TODAY, cleaners: [C], visits: [visit('a', '2026-11-09', 600, 660, [7], { duration: 60 }), visit('b', '2026-11-09', 720, 780, [7], { duration: 60 }), visit('c', '2026-11-09', 840, 900, [7], { duration: 60 }), visit('d', '2026-11-09', 960, 1020, [7], { duration: 60 })], until: '2026-11-09' });
+  const u = utilizationReport({ facts: g, from: TODAY, to: TODAY, maxTo: '2026-11-15' }).totals;
+  assert.ok(u.left_h > 3, 'several open hours remain');
+  assert.equal(u.room_bookings, 0, 'no gap fits a 1 h visit plus its drive');
+});
+
+describe('utilization: daily history record', () => {
+  test('a saved day replaces the same day rebuilt from current hours', () => {
+    // Live: A works 9–5 every day now. The record for Tue Nov 10 says A only had 9–1 that day.
+    const live = utilizationFacts({ today: '2026-11-16', start: TODAY, cleaners: [A], visits: [], until: '2026-11-15' });
+    const A_then = { ...A, availability: [{ id: 1, date: null, weekday: 2, dayoff: false, start_time: '09:00', end_time: '13:00' }] };
+    const rec = { ...utilizationFacts({ today: '2026-11-16', start: '2026-11-10', until: '2026-11-10', cleaners: [A_then], visits: [] }), recorded_days: ['2026-11-10'] };
+    const merged = withRecordedDays(live, [rec]);
+    const t = utilizationReport({ facts: merged, from: '2026-11-10', to: '2026-11-10', maxTo: '2027-01-10' }).totals;
+    assert.equal(t.available_h, 4);
+    const wk = utilizationReport({ facts: merged, from: TODAY, to: '2026-11-14', maxTo: '2027-01-10' }).totals;
+    // Mon 8 + Tue 4 (recorded) + Wed 8 + Thu 4 (A's own Thursday hours) + Fri 8 + Sat 8 = 40.
+    assert.equal(wk.available_h, 40);
+    assert.deepEqual(merged.recorded_days, ['2026-11-10']);
+  });
+
+  test('the planner saves today and yesterday on each refresh; the report uses saved past days', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet, retryDelayMs: 0 });
+    await schedule.sync();
+    const src = await schedule.utilizationSource();
+    const y = addDaysT(src.today, -1);
+    const rows = (await db.query('SELECT day FROM utilization_days ORDER BY day')).rows;
+    assert.equal(rows.length, 2);
+    const saved = await schedule.recordedDays(y, src.today);
+    assert.deepEqual(saved.map((r) => r.day), [y, src.today]);
+    assert.ok(saved[0].cleaners.length > 0 && Array.isArray(saved[0].visits));
+    assert.ok(saved[0].cleaners.every((c) => c.availability.every((row) => !row.date || String(row.date).slice(0, 10) === y)), 'only that day\'s one-day changes are kept');
+    // Pretend yesterday everyone had the day off: the report must follow the record, not today's hours.
+    const off = { ...saved[0], cleaners: saved[0].cleaners.map((c) => ({ ...c, availability: [] })) };
+    delete off.day;
+    await db.query('UPDATE utilization_days SET data = $2::jsonb WHERE day = $1', [y, JSON.stringify(off)]);
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    const r = await reports.utilization({ from: y, to: y });
+    if (new Date(`${y}T12:00:00Z`).getUTCDay() !== 0) {
+      assert.equal(r.totals.available_h, 0);
+      assert.deepEqual([r.history.recorded_days, r.history.past_days], [1, 1]);
+    }
+    assert.equal(r.history.first_recorded, y);
+    await db.close();
   });
 });

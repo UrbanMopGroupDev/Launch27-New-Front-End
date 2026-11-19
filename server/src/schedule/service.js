@@ -1,6 +1,7 @@
 // Scheduling planner: sync from Launch27 (read-only), detect changes, answer the screens.
 // Writes (assigning a cleaner) go to Launch27 with the signed-in user's own login.
 import { SAMPLE_VERSION } from '../mock/launch27.js';
+import { torontoInstant } from '../reports/raise.js';
 import { clientId, clientLabel, harmonizePartners, noteHints, partnerOf } from '../commercial/partners.js';
 import {
   FREQ_LABEL, STATUS_LABEL, addDays, areaOf, customerPrefs, cycleWeek, cycleWeeks, daysBetween, fitsDay, frequencyKind,
@@ -10,6 +11,13 @@ import {
 
 const PAST_DAYS = 91;
 const AHEAD_DAYS = 56;
+// How cleaners' hours are read. Bump when that changes: the next look at the planner then re-reads
+// everyone's hours instead of waiting for the hourly refresh.
+const HOURS_VERSION = 4; // 3: one-day changes kept HISTORY_DAYS back; 4: 13 weeks back
+// How far back cleaners' one-day changes, closed dates and days marked unavailable are kept, so
+// Utilization can look at past weeks (visits go back PAST_DAYS).
+export const HISTORY_DAYS = 91;
+const AVAIL_CHUNK = 28; // days per availability request (Launch27's calendar asks for 42)
 const NEAR_DAYS = 14; // problems are raised for this many days ahead
 const NEAR_EVERY_MS = 3 * 60_000; // next 14 days of bookings
 const FULL_EVERY_MS = 60 * 60_000; // cleaners' hours and status, the whole window
@@ -104,7 +112,7 @@ export function slimVisit(b) {
 }
 
 // dataTag (dev/QA): names the data underneath (sample version or QA copy) so a switch is noticed.
-export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {}, warn() {}, error() {} }, now = () => Date.now(), dataTag = () => SAMPLE_VERSION, writes = null }) {
+export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {}, warn() {}, error() {} }, now = () => Date.now(), dataTag = () => SAMPLE_VERSION, writes = null, retryDelayMs = 2000 }) {
   let snap = null; // latest snapshot (in memory)
   let unavailable = new Map(); // cleanerId -> Set(dates)
   let running = null;
@@ -116,7 +124,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     const u = new URL(config.l27BaseUrl + path);
     for (const [k, v] of Object.entries(query)) if (v !== undefined && v !== null) u.searchParams.set(k, String(v));
     const res = await fetchImpl(u.toString(), { headers: { authorization: `Bearer ${bearer}`, accept: 'application/json' }, signal: AbortSignal.timeout(30_000) });
-    if (!res.ok) throw new Error(`Launch27 ${path} returned ${res.status}`);
+    if (!res.ok) throw Object.assign(new Error(`Launch27 ${path} returned ${res.status}`), { l27Status: res.status });
     return res.json();
   };
   const pullAll = async (bearer, path, query, maxPages = 400) => {
@@ -150,7 +158,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
   }
 
   async function loadUnavailable() {
-    const rows = (await db.query('SELECT cleaner_id, day FROM schedule_unavailable WHERE day >= $1', [addDays(today(), -1)])).rows;
+    const rows = (await db.query('SELECT cleaner_id, day FROM schedule_unavailable WHERE day >= $1', [addDays(today(), -HISTORY_DAYS)])).rows;
     unavailable = new Map();
     for (const r of rows) {
       const id = Number(r.cleaner_id);
@@ -302,7 +310,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       const was = b.team_ids.join(',');
       const is = a.team_ids.join(',');
       if (was !== is && b.team_ids.length) {
-        out.push({ kind: 'cleaner_changed', key: `cleaner_changed:${k}:${is || 'none'}`, due: a.date, visit_key: k, customer_id: a.customer_id, cleaner_id: b.team_ids[0], title: `${a.customer} · ${nice(a.date)}: ${b.team_ids.map((id) => name(next, id)).join(' & ')} → ${a.team_ids.length ? a.team_ids.map((id) => name(next, id)).join(' & ') : 'no cleaner'}`, detail: { from: b.team_ids, to: a.team_ids } });
+        out.push({ kind: 'cleaner_changed', key: `cleaner_changed:${k}:${is || 'none'}`, due: a.date, visit_key: k, customer_id: a.customer_id, cleaner_id: b.team_ids[0], title: `${a.customer} · ${nice(a.date)}: ${b.team_ids.map((id) => name(next, id)).join(' & ')} → ${a.team_ids.length ? a.team_ids.map((id) => name(next, id)).join(' & ') : 'no cleaner'}`, detail: { from: b.team_ids, to: a.team_ids, date: a.date, start: a.start, booking_id: a.id || null, customer: a.customer } });
       }
     }
     for (const [k, b] of before) {
@@ -314,7 +322,9 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     for (const c of next.cleaners) {
       const old = prev.byId?.get(c.id);
       if (!old) continue;
-      const sig = (x) => JSON.stringify((x.availability || []).map((r) => [r.date, r.weekday, r.dayoff, r.start_time, r.end_time]).sort());
+      // Only hours that matter from today on: past one-day changes (kept for Utilization's past
+      // weeks) coming or going is not a change to handle.
+      const sig = (x) => JSON.stringify((x.availability || []).filter((r) => !r.date || String(r.date).slice(0, 10) >= t).map((r) => [r.date, r.weekday, r.dayoff, r.start_time, r.end_time]).sort());
       const statusChanged = old.assignable !== c.assignable;
       if (sig(old) === sig(c) && !statusChanged) continue;
       const affected = next.future.filter((v) => v.team_ids.includes(c.id)).filter((v) => {
@@ -339,10 +349,23 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     for (const f of found) {
       const res = await q.query(
         `INSERT INTO schedule_changes (key, kind, due, visit_key, customer_id, cleaner_id, title, detail) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
-         ON CONFLICT (key) WHERE resolved_at IS NULL DO UPDATE SET title = EXCLUDED.title, detail = EXCLUDED.detail, due = EXCLUDED.due RETURNING (xmax = 0) AS inserted`,
+         ON CONFLICT (key) WHERE resolved_at IS NULL DO UPDATE SET title = EXCLUDED.title, detail = EXCLUDED.detail, due = EXCLUDED.due RETURNING id, (xmax = 0) AS inserted`,
         [f.key, f.kind, f.due || null, f.visit_key || null, f.customer_id ?? null, f.cleaner_id ?? null, f.title, JSON.stringify(f.detail || {})],
       );
       if (res.rows[0]?.inserted) added++;
+      // A cleaner taken off an assigned visit: log the drop so dispatch can code the reason
+      // (raise readiness counts cleaner-initiated ones). Dispatch's own removals are already
+      // logged, with the moment they happened, so those rows are left alone.
+      if (f.kind === 'cleaner_changed' && res.rows[0]?.id) {
+        const removed = (f.detail.from || []).filter((id) => !(f.detail.to || []).includes(id));
+        for (const cid of removed) {
+          await q.query(
+            `INSERT INTO cleaner_drops (cleaner_id, visit_key, booking_id, customer, visit_at, dropped_at, source, change_id) VALUES ($1,$2,$3,$4,$5,now(),'sync',$6)
+             ON CONFLICT (visit_key, cleaner_id) DO UPDATE SET change_id = COALESCE(cleaner_drops.change_id, EXCLUDED.change_id)`,
+            [cid, f.visit_key, f.detail.booking_id ?? null, f.detail.customer ?? null, new Date(torontoInstant(f.detail.date || f.due, f.detail.start ?? 9 * 60)).toISOString(), res.rows[0].id],
+          );
+        }
+      }
     }
     return added;
   }
@@ -362,23 +385,96 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     return b;
   }
 
-  async function fullData(bearer, t) {
+  // A cleaner's hours from Launch27 (Team Availability), asked in two parts so one can never wipe
+  // the other:
+  //  - weekly hours: a plain request (no dates), as before Nov 9;
+  //  - one-day changes (a day off, a short day): dated rows, asked AVAIL_CHUNK days at a time
+  //    (Launch27's own calendar asks for 6 weeks at once).
+  // A refusal that looks temporary (too many requests, server error, network) is retried once after
+  // a pause. One that still fails keeps what the last snapshot had for that part and is recorded on
+  // the cleaner (Utilization → Data check) and in the log; it is never read as "no hours".
+  async function availabilityFor(bearer, id, t, prevRows) {
+    const path = `/v1/staff/teams/${id}/availability`;
+    const old = Array.isArray(prevRows) ? prevRows : null;
+    const read = async (query) => {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const rows = await get(bearer, path, query);
+          if (!Array.isArray(rows)) return { rows: null, error: 'Launch27 answered with no list of hours' };
+          return { rows, error: null };
+        } catch (err) {
+          const s = err.l27Status;
+          const temporary = !s || s === 429 || s >= 500;
+          if (temporary && attempt === 0) {
+            await new Promise((r) => setTimeout(r, retryDelayMs));
+            continue;
+          }
+          const why = s === 401 || s === 403 ? `not allowed for this login (${s})` : s === 404 ? 'not found (404)' : s === 429 ? 'too many requests (429)' : s ? `error ${s}` : `no answer (${String(err.message).slice(0, 80)})`;
+          return { rows: null, error: `Launch27 refused: ${why}` };
+        }
+      }
+    };
+    const errors = [];
+    const w = await read({});
+    if (w.error) errors.push(w.error);
+    const weekly = (w.rows || old || []).filter((r) => !r.date);
+    const end = addDays(t, AHEAD_DAYS);
+    const dated = [];
+    for (let from = addDays(t, -HISTORY_DAYS); from <= end; from = addDays(from, AVAIL_CHUNK)) {
+      const to = addDays(from, AVAIL_CHUNK - 1) < end ? addDays(from, AVAIL_CHUNK - 1) : end;
+      const d = await read({ from, to });
+      if (d.error) errors.push(`${d.error} (one-day changes ${from} to ${to})`);
+      for (const r of d.rows || old || []) {
+        const day = r.date ? String(r.date).slice(0, 10) : null;
+        if (day && day >= from && day <= to) dated.push(r);
+      }
+    }
+    return { rows: [...weekly, ...dated], error: errors[0] || null };
+  }
+
+  async function fullData(bearer, t, byPerson = false, prev = null) {
     const teams = (await pullAll(bearer, '/v1/staff/teams', {}, 40)).filter((x) => x.active !== false);
+    const before = new Map((prev?.cleaners || []).map((c) => [c.id, c.availability]));
     const cleaners = [];
-    for (const tm of teams) {
-      const c = parseCleaner(tm);
-      // With a date range Launch27 also returns one-day changes (a day off, a short day) on top of
-      // the weekly hours; without one it returns only the weekly hours.
-      c.availability = await get(bearer, `/v1/staff/teams/${tm.id}/availability`, { from: addDays(t, -7), to: addDays(t, AHEAD_DAYS) }).catch(() => []);
-      c.weekly_hours = weeklyHours(c.availability);
-      c.area = areaOf(c);
-      c.share = tm.share || null;
-      cleaners.push(c);
+    let refused = 0;
+    let firstError = null;
+    for (let i = 0; i < teams.length; i += 4) {
+      const batch = await Promise.all(teams.slice(i, i + 4).map(async (tm) => {
+        const c = parseCleaner(tm);
+        const av = await availabilityFor(bearer, tm.id, t, before.get(c.id));
+        c.availability = av.rows;
+        c.availability_error = av.error;
+        if (av.error) {
+          refused++;
+          firstError ||= av.error;
+        }
+        c.weekly_hours = weeklyHours(c.availability);
+        c.area = areaOf(c);
+        c.share = tm.share || null;
+        // For cleaner reports: Launch27 star rating and when the provider was created.
+        c.stars = tm.stars != null ? Number(tm.stars) : null;
+        c.ratings_count = tm.ratings_count != null ? Number(tm.ratings_count) : null;
+        c.created_at = tm.created_at || null;
+        return c;
+      }));
+      cleaners.push(...batch);
     }
     const visits = await pullRange(bearer, addDays(t, -PAST_DAYS), addDays(t, AHEAD_DAYS));
     const holidays = await closedDates(bearer, cleaners, t);
+    if (refused) log.warn("schedule: Launch27 refused some cleaners' hours; kept the last ones read", { refused, cleaners: teams.length, first_error: firstError });
+    // What Launch27 sent, in short, for cleaners who come out with no working hours at all (names
+    // and row shapes only), so a wrong reading can be compared with Launch27's Team Availability.
+    const noHours = cleaners.filter((c) => !weeklyHours(c.availability) && c.assignable);
+    const shape = (r) => [r.date ? String(r.date).slice(0, 10) : `wd${r.weekday}`, r.dayoff ? 'off' : `${r.start_time ?? '-'}/${r.end_time ?? '-'}`].join(' ');
+    log.info('schedule: cleaner hours read', {
+      cleaners: cleaners.length,
+      with_weekly_hours: cleaners.filter((c) => weeklyHours(c.availability) > 0).length,
+      no_hours: noHours.length,
+      examples: noHours.slice(0, 12).map((c) => ({ id: c.id, name: c.name, weekly_rows: c.availability.filter((r) => !r.date).length, dated_rows: c.availability.filter((r) => r.date).length, first_rows: c.availability.slice(0, 4).map(shape) })),
+    });
     const iso = new Date(now()).toISOString();
-    return { taken_at: iso, full_at: iso, today: t, cycle_anchor: '2026-11-02', cleaners, visits, holidays };
+    // cleaners_by: whose login read the cleaners' hours ("sync login" or a person who opened the planner).
+    return { taken_at: iso, full_at: iso, today: t, cycle_anchor: '2026-11-02', cleaners, visits, holidays, cleaners_by: byPerson ? 'person' : 'sync', hours_v: HOURS_VERSION };
   }
 
   // Company closed dates (Launch27 "closed dates", per location) in the planner's window.
@@ -390,7 +486,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       const rows = await pullAll(bearer, '/v1/staff/holidays', { locations: loc }, 20).catch(() => []);
       for (const h of rows) {
         const date = String(h.date || '').slice(0, 10);
-        if (date >= t && date <= addDays(t, AHEAD_DAYS)) out.push({ date, start_time: h.start_time || null, end_time: h.end_time || null, description: h.description || null, location_id: loc });
+        if (date >= addDays(t, -HISTORY_DAYS) && date <= addDays(t, AHEAD_DAYS)) out.push({ date, start_time: h.start_time || null, end_time: h.end_time || null, description: h.description || null, location_id: loc });
       }
     }
     return out;
@@ -414,13 +510,14 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     }
     const replaced = new Set([...freshKeys, ...extra.map((v) => v.key), ...gone]);
     const kept = prev.visits.filter((v) => !(v.date >= t && v.date <= until) && !replaced.has(v.key));
-    return { taken_at: new Date(now()).toISOString(), full_at: prev.full_at || prev.taken_at, today: t, cycle_anchor: prev.cycle_anchor, cleaners: prev.cleaners, holidays: prev.holidays || [], visits: [...kept, ...fresh, ...extra] };
+    return { taken_at: new Date(now()).toISOString(), full_at: prev.full_at || prev.taken_at, today: t, cycle_anchor: prev.cycle_anchor, cleaners: prev.cleaners, holidays: prev.holidays || [], cleaners_by: prev.cleaners_by || null, hours_v: prev.hours_v || null, visits: [...kept, ...fresh, ...extra] };
   }
 
   async function sync({ bearer, trigger = 'manual', kind = 'full' } = {}) {
     const run = (await db.query('INSERT INTO schedule_runs (trigger) VALUES ($1) RETURNING *', [`${trigger}:${kind}`])).rows[0];
     lastRun = run;
     try {
+      const byPerson = !!bearer; // a signed-in person's own login, not the sync login
       bearer = await bearerFor(bearer);
       if (!bearer) throw new Error('No Launch27 login for the schedule sync (set L27_SYNC_EMAIL and L27_SYNC_PASSWORD)');
       const t = today();
@@ -430,7 +527,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       const restart = config.l27Mode === 'mock' && loaded && loaded.sample !== sample;
       const prev = restart ? null : loaded;
       const doNear = kind === 'near' && prev && prev.today === t;
-      const data = { ...(doNear ? await nearData(bearer, prev, t) : await fullData(bearer, t)), sample };
+      const data = { ...(doNear ? await nearData(bearer, prev, t) : await fullData(bearer, t, byPerson, prev)), sample };
       await loadUnavailable();
       const next = index(data);
       const found = [...(prev ? diff(prev, next) : []), ...problems(next)];
@@ -442,6 +539,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
         added = await recordChanges(q, found);
       });
       snap = next;
+      await recordDays(next);
       lastRun = (await db.query("UPDATE schedule_runs SET status = 'done', finished_at = now(), visits = $2, cleaners = $3, changes = $4 WHERE id = $1 RETURNING *", [run.id, data.visits.length, data.cleaners.length, added])).rows[0];
       log.info('schedule updated', { trigger, kind: doNear ? 'near' : 'full', visits: data.visits.length, cleaners: data.cleaners.length, changes: added });
       return lastRun;
@@ -488,7 +586,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     const fullAge = s ? t - new Date(s.full_at || s.taken_at).getTime() : Infinity;
     const anyAge = s ? t - new Date(s.taken_at).getTime() : Infinity;
     const trigger = bearer ? 'viewer' : s ? 'auto' : 'boot';
-    if (!s || fullAge >= FULL_EVERY_MS || s.today !== today()) start({ bearer: bearer || undefined, trigger, kind: 'full' });
+    if (!s || fullAge >= FULL_EVERY_MS || s.today !== today() || s.hours_v !== HOURS_VERSION) start({ bearer: bearer || undefined, trigger, kind: 'full' });
     else if (anyAge >= NEAR_EVERY_MS) start({ bearer: bearer || undefined, trigger, kind: 'near' });
   }
 
@@ -498,7 +596,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     if (!s) throw Object.assign(new Error('The schedule has not been loaded yet. It loads automatically within a few minutes, or click "Refresh now".'), { status: 409 });
     return s;
   }
-  const cleanerOut = (c) => ({ id: c.id, location_ids: c.location_ids || [], lat: c.lat, lng: c.lng, name: c.name, status: c.status, status_label: STATUS_LABEL[c.status], assignable: c.assignable, is_new: c.isNew, gender: c.gender, hours_type: c.hoursType, color: c.color, area: c.area, phone: c.phone, weekly_hours: c.weekly_hours, tags: c.tags, rules: c.rules });
+  const cleanerOut = (c) => ({ id: c.id, location_ids: c.location_ids || [], lat: c.lat, lng: c.lng, name: c.name, status: c.status, status_label: STATUS_LABEL[c.status], assignable: c.assignable, is_new: c.isNew, gender: c.gender, hours_type: c.hoursType, color: c.color, area: c.area, phone: c.phone, weekly_hours: c.weekly_hours, tags: c.tags, rules: c.rules, stars: c.stars ?? null, ratings_count: c.ratings_count ?? null, created_at: c.created_at ?? null, share: c.share ?? null });
 
   async function status() {
     const last = await latestRun();
@@ -1052,6 +1150,14 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     };
   }
 
+  // The cleaner on a booking (for the Inbox's Cleaner field). null when unknown.
+  async function cleanerForBooking(bookingId) {
+    const s = await need();
+    const v = s.visits.find((x) => Number(x.id) === Number(bookingId));
+    const id = v?.team_ids?.[0];
+    return id ? { id, name: s.byId.get(id)?.name || `Cleaner ${id}` } : null;
+  }
+
   async function cleaners() {
     const s = await need();
     return { cleaners: s.cleaners.map(cleanerOut).sort((a, b) => Number(b.assignable) - Number(a.assignable) || a.name.localeCompare(b.name)) };
@@ -1072,6 +1178,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       await q.query('DELETE FROM schedule_snapshots');
       await q.query("UPDATE schedule_changes SET resolved_at = now(), resolution = 'gone' WHERE resolved_at IS NULL");
       await q.query('DELETE FROM schedule_unavailable');
+      await q.query('DELETE FROM utilization_days'); // sample/QA data switched: its history goes too
     });
     snap = null;
   }
@@ -1082,13 +1189,72 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     return {
       taken_at: s.taken_at,
       today: s.today,
-      cleaners: s.cleaners.map((c) => ({ ...cleanerOut(c), availability: c.availability || [] })),
-      visits: s.future,
+      full_at: s.full_at || s.taken_at,
+      cleaners_by: s.cleaners_by || null,
+      cleaners: s.cleaners.map((c) => ({ ...cleanerOut(c), availability: c.availability || [], availability_error: c.availability_error || null })),
+      // From HISTORY_DAYS back, so past weeks can be shown too.
+      history_from: addDays(s.today, -HISTORY_DAYS),
+      visits: s.visits.filter((v) => v.date >= addDays(s.today, -HISTORY_DAYS)),
       holidays: s.holidays || [],
       unavailable,
     };
   }
 
-  return { utilizationSource, reset, dataChanged, cleanerProfile, clientWishes: clientWishesOut, sync, start, soon, maybeRun, status, overview, plan, gapOptions, unassigned, continuity, changes, resolveChange, findSlots, checkSlot, assign, markUnavailable, cleaners, isRunning: () => !!running, _load: load, _window: windowFor };
+  // ---------- daily history (Utilization) ----------
+  // Today's and yesterday's picture, saved on every refresh and then left alone: the cleaners with
+  // the hours they had set for that day, the day's visits, closed dates and days marked unavailable.
+  // Past weeks in Utilization use these instead of rebuilding from cleaners' current hours.
+  // Never fails a refresh.
+  const VISIT_FIELDS = ['key', 'id', 'date', 'start', 'end', 'duration', 'team_ids', 'team_hours', 'location_id', 'customer_id', 'customer', 'kind', 'freq', 'addr', 'lat', 'lng'];
+  function dayRecord(s, d) {
+    return {
+      v: 1,
+      day: d,
+      cleaners: s.cleaners.map((c) => ({
+        ...cleanerOut(c),
+        rules: { transit: !!c.rules?.transit },
+        availability: (c.availability || []).filter((r) => !r.date || String(r.date).slice(0, 10) === d),
+      })),
+      visits: s.visits.filter((v) => v.date === d).map((v) => Object.fromEntries(VISIT_FIELDS.map((k) => [k, v[k] ?? null]))),
+      holidays: (s.holidays || []).filter((h) => h.date === d),
+      unavailable: [...unavailable].filter(([, days]) => days.has(d)).map(([id]) => id),
+    };
+  }
+  async function recordDays(s) {
+    try {
+      for (const d of [addDays(s.today, -1), s.today]) {
+        await db.query('INSERT INTO utilization_days (day, data, recorded_at) VALUES ($1, $2::jsonb, now()) ON CONFLICT (day) DO UPDATE SET data = EXCLUDED.data, recorded_at = now()', [d, JSON.stringify(dayRecord(s, d))]);
+      }
+    } catch (err) {
+      log.warn('utilization: could not save the daily record', { error: err.message });
+    }
+  }
+  // Saved days between from and to (inclusive), oldest first.
+  async function recordedDays(from, to) {
+    const rows = (await db.query('SELECT day, data FROM utilization_days WHERE day >= $1 AND day <= $2 ORDER BY day', [from, to])).rows;
+    return rows.map((r) => ({ day: dateStr(r.day), ...r.data }));
+  }
+  async function firstRecordedDay() {
+    const row = (await db.query('SELECT min(day) AS d FROM utilization_days')).rows[0];
+    return row?.d ? dateStr(row.d) : null;
+  }
+
+  // Recommended cleaners for unassigned visits (by visit key), the same ranking the planner uses.
+  async function recommendFor(keys = [], limit = 3) {
+    const s = await need();
+    const ctx = ctxFor(s);
+    const byKey = new Map(s.visits.map((v) => [v.key, v]));
+    const out = {};
+    for (const key of keys) {
+      const v = byKey.get(key);
+      if (!v || v.team_ids.length || v.date < s.today) continue;
+      const cust = s.customers.get(v.customer_id);
+      const job = { dates: [v.date], start: v.start, duration: v.duration, place: { lat: v.lat, lng: v.lng }, customerId: v.customer_id, kind: v.kind, services: v.services, prefs: cust?.prefs, mainCleanerId: cust?.main?.id, history: cust?.history, firstDate: v.date };
+      out[key] = rankCleaners(job, s.cleaners, ctx, { limit }).map((c) => ({ cleaner_id: c.cleaner_id, name: c.name, score: c.score, free: c.fits > 0, travel: c.travel, reasons: c.reasons.map((r) => ({ text: r.text, tone: r.tone })) }));
+    }
+    return out;
+  }
+
+  return { utilizationSource, recommendFor, recordedDays, firstRecordedDay, reset, dataChanged, cleanerProfile, cleanerForBooking, clientWishes: clientWishesOut, sync, start, soon, maybeRun, status, overview, plan, gapOptions, unassigned, continuity, changes, resolveChange, findSlots, checkSlot, assign, markUnavailable, cleaners, isRunning: () => !!running, _load: load, _window: windowFor };
 }
 

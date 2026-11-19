@@ -11,7 +11,7 @@ export interface DispatchBooking {
   arrival_window?: number | string;
   duration?: number; // minutes
   active?: boolean;
-  user?: { id?: number; name?: string; email?: string };
+  user?: { id?: number; name?: string; email?: string; tags_info?: { id: number; name: string }[] | null };
   phone?: string;
   address?: { full_address?: string; street?: string; city?: string; latitude?: number | null; longitude?: number | null };
   location?: { id?: number; name?: string };
@@ -79,7 +79,10 @@ export const fmtClock = (min: number) => {
 export function workingWindow(rows: AvailabilityRow[] | undefined, date: string): { start: number; end: number } | 'off' | null {
   if (!rows) return null;
   const dow = new Date(`${date}T12:00:00`).getDay();
-  const row = rows.find((r) => r.date && r.date.slice(0, 10) === date) || rows.find((r) => !r.date && r.weekday === dow);
+  // A date row only overrides the weekly hours when it says something: a day off, or its own times
+  // (Launch27 can return a row for a date with neither; that is not a day off).
+  const says = (r: AvailabilityRow) => r.dayoff || (r.start_time && r.end_time);
+  const row = rows.find((r) => r.date && r.date.slice(0, 10) === date && says(r)) || rows.find((r) => !r.date && r.weekday === dow);
   if (!row) return null;
   if (row.dayoff || !row.start_time || !row.end_time) return 'off';
   return { start: hhmmToMinutes(row.start_time), end: hhmmToMinutes(row.end_time) };

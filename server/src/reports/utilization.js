@@ -10,7 +10,7 @@
 // Available hours = each cleaner's hours in Launch27 (weekly hours, or that date's own hours
 // when set), minus days off set in Launch27 or marked unavailable in this app, minus company
 // closed dates (unless the cleaner has their own hours set for that date).
-import { addDays, areaOf, km, mondayOf, toMinutes, travelMinutes, weekday, workingWindow } from '../schedule/rules.js';
+import { addDays, areaOf, km, mondayOf, toMinutes, travelMinutes, weekday, workingMinutes, workingWindow } from '../schedule/rules.js';
 import { UTILIZATION } from './utilization-config.js';
 
 const r1 = (x) => (x == null || !Number.isFinite(x) ? null : Math.round(x * 10) / 10);
@@ -29,6 +29,17 @@ function merge(list) {
 }
 const clip = (list, [w0, w1]) => list.map(([a, b]) => [Math.max(a, w0), Math.min(b, w1)]).filter(([a, b]) => b > a);
 const total = (list) => merge(list).reduce((m, [a, b]) => m + (b - a), 0);
+// Lengths (minutes) of the open stretches of a window once the blocks are taken out.
+function openStretches(window, blocks) {
+  const out = [];
+  let t = window[0];
+  for (const [a, b] of merge(clip(blocks, window))) {
+    if (a > t) out.push(a - t);
+    t = Math.max(t, b);
+  }
+  if (window[1] > t) out.push(window[1] - t);
+  return out;
+}
 
 /**
  * The per-day facts every figure is summed from.
@@ -37,7 +48,7 @@ const total = (list) => merge(list).reduce((m, [a, b]) => m + (b - a), 0);
  *   visits:   planner visits from today on ({ key, date, start, end, duration, team_ids, team_hours, location_id, customer_id, kind, lat, lng })
  *   holidays: company closed dates ({ date, start_time, end_time, location_id })
  */
-export function utilizationFacts({ today, cleaners, visits, holidays = [], unavailable = new Map(), locations = null, cfg = UTILIZATION, until }) {
+export function utilizationFacts({ today, start = today, cleaners, visits, holidays = [], unavailable = new Map(), locations = null, cfg = UTILIZATION, until }) {
   const brandIds = Array.isArray(locations) && locations.length ? new Set(locations.map(Number)) : null;
   const inBrand = (v) => !brandIds || brandIds.has(Number(v.location_id));
   const cleanerInBrand = (c) => !brandIds || !c.location_ids?.length || c.location_ids.some((id) => brandIds.has(Number(id)));
@@ -59,7 +70,7 @@ export function utilizationFacts({ today, cleaners, visits, holidays = [], unava
   const taking = cleaners.filter((c) => c.assignable && cleanerInBrand(c));
   const takingIds = new Set(taking.map((c) => c.id));
 
-  const future = visits.filter((v) => v.date >= today && v.date <= end);
+  const future = visits.filter((v) => v.date >= start && v.date <= end);
   const busy = new Map(); // `${id}|${date}` -> visits
   for (const v of future) for (const id of v.team_ids) {
     const k = `${id}|${v.date}`;
@@ -74,14 +85,14 @@ export function utilizationFacts({ today, cleaners, visits, holidays = [], unava
   const ownHoursOn = (c, d) => (c.availability || []).some((r) => r.date && String(r.date).slice(0, 10) === d && !r.dayoff && r.start_time && r.end_time);
 
   const days = []; // one per taking cleaner per date
-  for (let d = today; d <= end; d = addDays(d, 1)) {
+  for (let d = start; d <= end; d = addDays(d, 1)) {
     const sunday = !operating.has(weekday(d));
     for (const c of taking) {
       const w = workingWindow(c.availability, d, unavailable.get(c.id));
       const list = busy.get(`${c.id}|${d}`) || [];
       const mine = list.filter(inBrand);
       const other = list.filter((v) => !inBrand(v));
-      const base = w ? w[1] - w[0] : 0;
+      const base = w ? Math.min(w[1] - w[0], workingMinutes(c.availability, d, unavailable.get(c.id))) : 0;
       // Company closed date: not available, unless this cleaner has their own hours set that day.
       const closed = w && !ownHoursOn(c, d) ? clip(closedFor(c, d), w) : [];
       const otherBlocks = w ? clip(other.map((v) => [v.start, v.end]), w) : [];
@@ -98,15 +109,24 @@ export function utilizationFacts({ today, cleaners, visits, holidays = [], unava
       const route = [...list].sort((a, b) => a.start - b.start);
       let travel = 0;
       let at = home;
+      const busyBlocks = []; // every visit (either brand) plus the drive to it, for the open gaps
       for (const v of route) {
         const m = leg(at, v, transit);
         if (inBrand(v)) travel += m;
         legs.push(m);
+        busyBlocks.push([v.start - m, v.end]);
         at = v;
       }
       const last = route[route.length - 1];
-      if (last && cfg.travelReturnHome && inBrand(last)) travel += leg(last, home, transit);
-      days.push({ d, sunday, cid: c.id, area: c.area || 'Unknown', base, closed: closedMin, other: otherMin, avail, assigned, otherBooked, travel, visits: mine.length });
+      if (last && cfg.travelReturnHome) {
+        const m = leg(last, home, transit);
+        if (inBrand(last)) travel += m;
+        busyBlocks.push([last.end, last.end + m]);
+      }
+      // Open stretches of the day once visits, their drives and closed hours are taken out:
+      // "Room for" counts how many bookings actually fit into these, not hours ÷ booking length.
+      const gaps = w ? openStretches(w, [...closed, ...busyBlocks]) : [];
+      days.push({ d, sunday, cid: c.id, area: c.area || 'Unknown', base, closed: closedMin, other: otherMin, avail, assigned, otherBooked, travel, visits: mine.length, gaps });
     }
   }
 
@@ -119,14 +139,14 @@ export function utilizationFacts({ today, cleaners, visits, holidays = [], unava
     const addrArea = areaOf({ lat: v.lat, lng: v.lng });
     if (brand && v.customer_id != null) customers.push({ d: v.date, sunday, customer: v.customer_id, recurring: v.kind !== 'one', area: addrArea });
     if (!v.team_ids.length) {
-      loose.push({ kind: 'unassigned', d: v.date, sunday, brand, area: addrArea, hours: v.duration, travel: 0, key: v.key });
+      loose.push({ kind: 'unassigned', d: v.date, sunday, brand, area: addrArea, hours: v.duration, travel: 0, key: v.key, v });
       continue;
     }
     if (!brand) continue;
     for (const id of v.team_ids) {
       if (takingIds.has(id)) continue;
       const c = byId.get(id);
-      loose.push({ kind: 'not_taking', d: v.date, sunday, brand, area: c?.area || addrArea, hours: share(v, id), travel: 0, cid: id, key: v.key });
+      loose.push({ kind: 'not_taking', d: v.date, sunday, brand, area: c?.area || addrArea, hours: share(v, id), travel: 0, cid: id, key: v.key, v, cleaner: c?.name || null });
     }
   }
   // Visits not on a taking cleaner have no route of their own: one average leg each.
@@ -149,14 +169,18 @@ function sum(facts, inRange, area = null, cfg = UTILIZATION) {
   const travel = add(days, 'travel') + add(loose, 'travel');
   const spoken = assigned + unassignedH + notTakingH + travel;
   const left = avail - spoken;
-  // Room for more bookings: hours left ÷ (a typical booking + one average leg of travel).
+  // Room for more bookings: how many typical bookings (plus a drive to each) fit into the open
+  // stretches of each cleaner's day, less the unassigned visits that will need those slots.
   const visits = days.reduce((m, x) => m + x.visits, 0);
   const typical = visits ? assigned / visits : cfg.typicalBookingHours;
   const perBooking = typical + facts.avg_leg_min / 60;
+  const slot = perBooking * 60;
+  const fits = slot > 0 ? days.reduce((m, x) => m + (x.gaps || []).reduce((k, g) => k + Math.floor(g / slot), 0), 0) : 0;
+  const room = Math.max(0, fits - unassigned.length - new Set(notTaking.map((x) => x.key)).size);
   return {
     closed: add(days, 'closed'), avail, assigned, unassigned: unassignedH, unassigned_visits: unassigned.length,
     not_taking: notTakingH, not_taking_visits: new Set(notTaking.map((x) => x.key)).size, travel, spoken, left,
-    utilization: ratio(spoken, avail), room: left > 0 && perBooking > 0 ? Math.floor(left / perBooking) : 0, typical,
+    utilization: ratio(spoken, avail), room: left > 0 ? room : 0, typical,
   };
 }
 const rounded = (s) => ({
@@ -165,12 +189,14 @@ const rounded = (s) => ({
   spoken_h: r1(s.spoken), left_h: r1(s.left), utilization: s.utilization, room_bookings: s.room, typical_booking_h: r1(s.typical),
 });
 
-// The dates that can be shown: from today until the end of the planner's copy.
-export function clampRange(today, from, to, maxTo) {
+// The dates that can be shown: from minFrom (past weeks; today if not given) until the end of the
+// planner's copy.
+export function clampRange(today, from, to, maxTo, minFrom = today) {
   const ok = (d) => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d);
   let f = ok(from) ? from : today;
   let t = ok(to) ? to : addDays(today, 6);
-  if (f < today) f = today;
+  if (f < minFrom) f = minFrom;
+  if (t < minFrom) t = minFrom;
   if (t > maxTo) t = maxTo;
   if (f > maxTo) f = maxTo;
   if (t < f) t = f;
@@ -183,7 +209,7 @@ export function clampRange(today, from, to, maxTo) {
  *   { capacity4, booked4, unassigned_visits, tolerance } (planner overview: its 4 weeks, and all future;
  *   tolerance = the rounding the planner applies, 0.05 h per cleaner-week)
  */
-export function utilizationReport({ facts, from, to, maxTo, cfg = UTILIZATION, existing = null, takenAt = null }) {
+export function utilizationReport({ facts, from, to, maxTo, minFrom = null, cfg = UTILIZATION, existing = null, takenAt = null, cleaners: allCleaners = [], source = {} }) {
   const { today } = facts;
   const inWin = (d) => d >= from && d <= to;
   const all = sum(facts, inWin, null, cfg);
@@ -204,13 +230,15 @@ export function utilizationReport({ facts, from, to, maxTo, cfg = UTILIZATION, e
     const days = facts.days.filter((x) => x.cid === c.id && !x.sunday && inWin(x.d));
     const h = (k) => days.reduce((m, x) => m + x[k], 0) / 60;
     const avail = h('avail'), assigned = h('assigned'), travel = h('travel');
+    // Shared cleaners: hours open in Launch27 vs hours already booked for the other brand (brand view only).
+    const open = h('base') - h('closed'), otherBrand = h('other');
     const visits = days.reduce((m, x) => m + x.visits, 0);
     const area = c.area || 'Unknown';
     const left = areaSums.get(area)?.left ?? 0;
     const load = assigned + travel;
     return {
       cleaner_id: c.id, name: c.name, area, status_label: c.status_label || null, visits,
-      available_h: r1(avail), assigned_h: r1(assigned), travel_h: r1(travel), travel_per_visit_min: visits ? Math.round((travel * 60) / visits) : null,
+      open_h: r1(open), other_brand_h: r1(otherBrand), available_h: r1(avail), assigned_h: r1(assigned), travel_h: r1(travel), travel_per_visit_min: visits ? Math.round((travel * 60) / visits) : null,
       left_h: r1(avail - assigned - travel), utilization: ratio(assigned + travel, avail),
       // null + area_short: their area already has no hours left.
       if_left: load > 0 && left > 0 ? load / left : load > 0 ? null : 0, area_short: load > 0 && left <= 0,
@@ -242,7 +270,7 @@ export function utilizationReport({ facts, from, to, maxTo, cfg = UTILIZATION, e
     const weekdays = d4.filter((x) => !x.sunday);
     const capSteps = { existing: existing.capacity4, sundays: h(sundays, 'base'), closed: h(weekdays, 'closed'), other_brand: h(weekdays, 'other'), floor: h(weekdays, 'base') - h(weekdays, 'closed') - h(weekdays, 'other') - h(weekdays, 'avail'), result: h(weekdays, 'avail') };
     const bookSteps = { existing: existing.booked4, sundays: h(sundays, 'assigned') + h(sundays, 'otherBooked'), other_brand: h(weekdays, 'otherBooked'), result: h(weekdays, 'assigned') };
-    const un = facts.loose.filter((x) => x.kind === 'unassigned');
+    const un = facts.loose.filter((x) => x.kind === 'unassigned' && x.d >= today);
     const unSteps = { existing: existing.unassigned_visits, other_brand: un.filter((x) => !x.brand).length, sundays: un.filter((x) => x.brand && x.sunday).length, outside: un.filter((x) => x.brand && !x.sunday && !inWin(x.d)).length, result: un.filter((x) => x.brand && !x.sunday && inWin(x.d)).length };
     const tol = existing.tolerance ?? 0.5;
     const tie = (s, keys) => s.existing != null && Math.abs(keys.reduce((m, k) => m - s[k], s.existing) - s.result) <= tol;
@@ -256,8 +284,110 @@ export function utilizationReport({ facts, from, to, maxTo, cfg = UTILIZATION, e
   }
 
   return {
-    taken_at: takenAt, today, from, to, max_to: maxTo, avg_leg_min: Math.round(facts.avg_leg_min),
+    taken_at: takenAt, today, from, to, max_to: maxTo, min_from: minFrom || today, past: to < today, avg_leg_min: Math.round(facts.avg_leg_min),
+    data_check: dataCheck({ facts, inWin, cleaners: allCleaners, source }),
     totals: { ...rounded(all), cleaners: facts.taking.length, customers: new Set(cust.map((x) => x.customer)).size, customers_recurring: new Set(cust.filter((x) => x.recurring).map((x) => x.customer)).size },
     areas, cleaners, by_day: byDay, trend, reconcile,
+    needs_cleaner: needsCleaner(facts, inWin),
+  };
+}
+
+// Data check: per cleaner, what the report knows from Launch27 and what looks wrong, for the dates
+// shown. Cleaners taking bookings, plus anyone else with bookings in these dates.
+const FLAG = {
+  refused: 'Launch27 refused their hours',
+  booked_no_hours: 'Booked, but 0 available hours',
+  booked_not_taking: 'Booked, but not taking bookings',
+  no_hours: 'No hours set in Launch27',
+  no_home: 'No home location (area Unknown)',
+};
+const FLAG_ORDER = Object.keys(FLAG);
+export function dataCheck({ facts, inWin, cleaners = [], source = {} }) {
+  const takingIds = new Set(facts.taking.map((c) => c.id));
+  const per = new Map();
+  for (const x of facts.days) {
+    if (x.sunday || !inWin(x.d)) continue;
+    const p = per.get(x.cid) || { avail: 0, booked: 0, visits: 0, open: 0, other: 0 };
+    p.avail += x.avail;
+    p.open += x.base - x.closed;
+    p.other += x.other;
+    p.booked += x.assigned;
+    p.visits += x.visits;
+    per.set(x.cid, p);
+  }
+  for (const x of facts.loose) {
+    if (x.kind !== 'not_taking' || x.sunday || !x.brand || !inWin(x.d)) continue;
+    const p = per.get(x.cid) || { avail: 0, booked: 0, visits: 0, open: 0, other: 0 };
+    p.booked += x.hours;
+    p.visits += 1;
+    per.set(x.cid, p);
+  }
+  const rows = [];
+  for (const c of cleaners) {
+    const taking = takingIds.has(c.id);
+    const p = per.get(c.id) || { avail: 0, booked: 0, visits: 0, open: 0, other: 0 };
+    if (!taking && !p.visits) continue;
+    const weekly = (c.availability || []).filter((r) => !r.date);
+    const weeklyH = c.weekly_hours ?? null;
+    const flags = [];
+    if (c.availability_error) flags.push('refused');
+    if (taking && p.visits && p.avail <= 0) flags.push('booked_no_hours');
+    if (!taking && p.visits) flags.push('booked_not_taking');
+    if (!c.availability_error && taking && !(weeklyH > 0)) flags.push('no_hours');
+    if (c.lat == null || c.lng == null) flags.push('no_home');
+    rows.push({
+      cleaner_id: c.id, name: c.name, status_label: c.status_label || null, taking, area: c.area || 'Unknown',
+      home_location: c.lat != null && c.lng != null, weekly_hours: weeklyH, weekly_rows: weekly.length, dated_rows: (c.availability || []).length - weekly.length,
+      availability_error: c.availability_error || null,
+      // Exactly what Launch27 sent (weekly rows, and a few date rows), to compare with its screen.
+      sent: {
+        weekly: weekly.slice(0, 14).map((r) => ({ weekday: r.weekday ?? null, start: r.start_time ?? null, end: r.end_time ?? null, dayoff: !!r.dayoff })),
+        dated: (c.availability || []).filter((r) => r.date).slice(0, 6).map((r) => ({ date: String(r.date).slice(0, 10), weekday: r.weekday ?? null, start: r.start_time ?? null, end: r.end_time ?? null, dayoff: !!r.dayoff })),
+        dated_total: (c.availability || []).filter((r) => r.date).length,
+      },
+      open_h: r1(p.open / 60), other_brand_h: r1(p.other / 60), available_h: r1(p.avail / 60), booked_h: r1(p.booked / 60), visits: p.visits,
+      flags: flags.map((k) => ({ kind: k, label: FLAG[k] })),
+    });
+  }
+  const rank = (r) => (r.flags.length ? Math.min(...r.flags.map((f) => FLAG_ORDER.indexOf(f.kind))) : 99);
+  rows.sort((a, b) => rank(a) - rank(b) || b.booked_h - a.booked_h || a.name.localeCompare(b.name));
+  const counts = Object.fromEntries(FLAG_ORDER.map((k) => [k, rows.filter((r) => r.flags.some((f) => f.kind === k)).length]));
+  return { refreshed_at: source.full_at || null, read_by: source.cleaners_by || null, counts, labels: FLAG, cleaners: rows };
+}
+
+// The bookings behind "Unassigned" (no cleaner yet) and "On cleaners not taking bookings" (to move),
+// in the chosen dates, Monday to Saturday, for the drill-down list.
+export function needsCleaner(facts, inWin) {
+  const seen = new Set();
+  const out = [];
+  for (const x of facts.loose) {
+    if (x.sunday || !x.brand || !inWin(x.d) || !x.v) continue;
+    const k = `${x.kind}|${x.key}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const v = x.v;
+    out.push({
+      kind: x.kind, key: v.key, booking_id: v.id || null, projected: !v.id, date: v.date, start: v.start, hours: r1(v.duration / 60),
+      customer: v.customer || null, area: x.area, freq: v.freq || null, address: v.addr || null, cleaner: x.cleaner || null,
+    });
+  }
+  return out.sort((a, b) => a.date.localeCompare(b.date) || a.start - b.start).slice(0, 1000);
+}
+
+// Past days from the daily record replace the same days rebuilt from today's planner copy (which
+// only knows cleaners' current weekly hours). `recorded` = facts built from each saved day.
+export function withRecordedDays(live, recorded = []) {
+  if (!recorded.length) return live;
+  const days = new Set(recorded.flatMap((f) => f.recorded_days || []));
+  const keep = (x) => !days.has(x.d);
+  const taking = new Map(live.taking.map((c) => [c.id, c]));
+  for (const f of recorded) for (const c of f.taking) if (!taking.has(c.id)) taking.set(c.id, c);
+  return {
+    ...live,
+    days: [...live.days.filter(keep), ...recorded.flatMap((f) => f.days)],
+    loose: [...live.loose.filter(keep), ...recorded.flatMap((f) => f.loose)],
+    customers: [...live.customers.filter(keep), ...recorded.flatMap((f) => f.customers)],
+    taking: [...taking.values()],
+    recorded_days: [...days].sort(),
   };
 }
