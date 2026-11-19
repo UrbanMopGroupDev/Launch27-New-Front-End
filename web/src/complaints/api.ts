@@ -109,12 +109,14 @@ export interface Settings {
   budget: { target_pct: number | null; below_average_by: number; amber_at: number; red_at: number; alert_slack_user: string | null; qbo_tolerance: number };
   costs: { cleaner_hourly_default: number; margin_per_hour_default: number; travel_per_visit: number; reclean_default_hours: number; reclean_spot_share: number };
   pilot_months: number;
+  auto: { enabled: boolean; history_months: number };
 }
 
 export interface Status {
   running: boolean;
   sources: Record<string, string>;
   window: { from: string; to: string };
+  auto: { enabled: boolean; history_months: number; next: null | { kind: 'history' | 'recent'; from: string; to: string; label: string }; last_daily_update: string | null; overnight: boolean };
   mined: { window_from: string; window_to: string; finished_at: string | null; status: string }[];
   last_run: null | { id: number; started_at: string; finished_at: string | null; status: string; window_from: string; window_to: string; log: { at: string; level: string; msg: string }[] };
 }
