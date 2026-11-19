@@ -76,7 +76,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
   // ---------- the run ----------
   // bearer: the Launch27 login of the admin who started the run. Used when there's no
   // L27_SYNC_EMAIL service login (production today), the same way "Refresh now" works.
-  async function run({ from, to, userId = null, bearer = null }) {
+  async function run({ from, to, userId = null, bearer = null, label = null, refreshFrom = null }) {
     const runRow = await one(db, 'INSERT INTO complaint_runs (started_by, window_from, window_to) VALUES ($1,$2,$3) RETURNING id', [userId, from, to]);
     const runLog = [];
     const note = (level, msg, extra = {}) => {
@@ -86,6 +86,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       log[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info'](`complaints: ${msg}`, extra);
     };
     try {
+      if (label) note('info', label);
       const settings = await getSettings();
       const ctx = await loadContext(note, bearer);
       const staffNames = (await many(db, 'SELECT name FROM users WHERE name IS NOT NULL')).map((r) => r.name);
@@ -103,15 +104,32 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       const save = async (label, cases) => {
         // info@ is mostly not complaints: the free keyword rules screen it first, and only
         // emails that read as a complaint go to Claude.
-        const work = cases
+        // Already read on an earlier run? Reuse what Claude (or a person) decided then, and skip
+        // emails already judged not to be complaints. Daily updates re-read the last two weeks,
+        // so this is what keeps them quick and cheap.
+        const ids = cases.map((c) => c.source_id);
+        const src = cases[0]?.source;
+        const known = new Map(!ids.length ? [] : (await many(db, "SELECT source_id, category, tone, severity, areas_cited, hard_route, summary, classified_by, classifier_confidence FROM complaint_cases WHERE source = $1 AND source_id = ANY($2::text[]) AND classified_by IN ('claude', 'human')", [src, ids])).map((r) => [r.source_id, r]));
+        const notComplaints = new Set(!ids.length ? [] : (await many(db, "SELECT source_id FROM complaint_source_items WHERE source = $1 AND source_id = ANY($2::text[]) AND kind = 'not_complaint'", [src, ids])).map((r) => r.source_id));
+        const fresh = cases.filter((c) => !notComplaints.has(c.source_id));
+        const work = fresh
           .map((c) => ({ c, rules: classifyRules(c.text, { claimAmount: c.claim_amount }) }))
-          .filter(({ c, rules }) => c.source !== 'gmail' || rules.category !== 'other' || rules.tone !== 'mild');
+          .filter(({ c, rules }) => known.has(c.source_id) || c.source !== 'gmail' || rules.category !== 'other' || rules.tone !== 'mild');
         const screened = cases.length - work.length;
+        let reused = 0;
         // Classify several at a time (Claude calls are the slow part), then save in order.
         await pool(work, CLASSIFY_CONCURRENCY, async (w) => {
+          const k = known.get(w.c.source_id);
+          if (k) {
+            reused++;
+            w.c.cls = { category: k.category, tone: k.tone, severity: k.severity, areas: k.areas_cited || [], hard_route: k.hard_route || w.rules.hard_route, summary: k.summary, classified_by: k.classified_by, confidence: k.classifier_confidence };
+            return;
+          }
           const model = classifier && w.c.text ? await classifier(redact(w.c.text, { names: [w.c.customer_name, ...(w.c.cleaner_names || []), ...staffNames] })) : null;
           w.c.cls = mergeClassification(w.rules, model);
           w.skip = w.c.source === 'gmail' && ((model && model.is_complaint === false) || (!model && (w.c.cls.category === 'other' || w.c.cls.tone === 'mild')));
+          // Remember emails Claude read and found not to be complaints, so they aren't sent again.
+          if (w.skip && model) await db.query("INSERT INTO complaint_source_items (source, source_id, occurred_at, kind) VALUES ($1, $2, $3, 'not_complaint') ON CONFLICT (source, source_id) DO NOTHING", [w.c.source, w.c.source_id, w.c.opened_at]).catch(() => {});
         });
         let kept = 0;
         for (const w of work) {
@@ -120,7 +138,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
           kept++;
         }
         saved += kept;
-        note('info', `${label}: ${kept} complaint case${kept === 1 ? '' : 's'} saved${screened ? ` (${screened} screened out as not complaints)` : ''}`);
+        note('info', `${label}: ${kept} complaint case${kept === 1 ? '' : 's'} saved${screened ? ` (${screened} screened out as not complaints)` : ''}${reused ? `, ${reused} already classified` : ''}`);
       };
 
       if (config.kustomerApiKey) await save('Kustomer', await guarded('Kustomer', () => fromKustomer(from, to, ctx, note)));
@@ -135,7 +153,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       if (config.slackBotToken) await guarded('Slack', () => fromSlack(from, to, ctx, note));
       else note('warn', 'Slack refund history skipped: SLACK_BOT_TOKEN is not set');
 
-      await enrich(from, to, ctx, settings, note);
+      await enrich(refreshFrom && refreshFrom < from ? refreshFrom : from, to, ctx, settings, note);
       // 'partial': it finished, but a source failed (shown on the page with the reason).
       const status = runLog.some((l) => l.level === 'error') ? 'partial' : 'done';
       await db.query('UPDATE complaint_runs SET finished_at = now(), status = $3, log = $2::jsonb WHERE id = $1', [runRow.id, json(runLog), status]);
@@ -558,8 +576,65 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
   // ---------- reads for the UI ----------
   function start({ from, to, userId, bearer = null }) {
     if (running) throw Object.assign(new Error('A run is already going'), { status: 409 });
-    running = run({ from, to, userId, bearer }).catch((err) => ({ error: err.message })).finally(() => (running = null));
+    running = run({ from, to, userId, bearer }).catch((err) => ({ error: err.message })).finally(() => {
+      running = null;
+      chain(bearer);
+    });
     return { started: true };
+  }
+
+  // ---------- automatic updates ----------
+  // Nobody should have to click. Every day the engine re-reads the last two weeks (new
+  // complaints, late refunds) and refreshes outcomes; until the history target is reached it
+  // also reads one older month after another. State lives in the database (finished runs =
+  // what's been read), so a release that restarts the app just means the next trigger picks
+  // up where it stopped. It needs a Launch27 login: the L27_SYNC_EMAIL service login when
+  // set (then the worker runs it overnight), otherwise the login of a supervisor or admin
+  // who opens the Complaint playbook (then it runs the first time someone opens it each day).
+  let heldBearer = null;
+  let lastAutoAttempt = 0;
+  const torontoDay = (ms) => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Toronto' }).format(new Date(ms));
+  async function nextAuto() {
+    const settings = await getSettings();
+    if (!settings.auto.enabled) return null;
+    const today = torontoDay(now());
+    const mined = await many(db, "SELECT window_from::text AS f, window_to::text AS t FROM complaint_runs WHERE status IN ('done', 'partial')");
+    const recent = await one(db, "SELECT cursor FROM complaint_sync_state WHERE source = 'auto_recent'");
+    return planAuto({ mined: mined.map((m) => ({ from: m.f.slice(0, 10), to: m.t.slice(0, 10) })), today, historyDays: Math.round(settings.auto.history_months * 30.44), recentDone: recent?.cursor || null });
+  }
+  async function maybeRun({ bearer = null } = {}) {
+    if (running) return false;
+    if (now() - lastAutoAttempt < 60_000) return false;
+    const login = bearer || heldBearer || (syncBearer ? await syncBearer().catch(() => null) : null);
+    if (!login) return false;
+    const job = await nextAuto();
+    if (!job) return false;
+    // A job that keeps failing (not interrupted: failed) waits half an hour between tries.
+    const lastFail = await one(db, "SELECT finished_at FROM complaint_runs WHERE status = 'failed' ORDER BY id DESC LIMIT 1");
+    if (lastFail?.finished_at && now() - new Date(lastFail.finished_at).getTime() < 30 * 60_000) return false;
+    if (running) return false;
+    lastAutoAttempt = now();
+    heldBearer = login;
+    running = run({ from: job.from, to: job.to, bearer: login, label: job.label, refreshFrom: job.refreshFrom })
+      .then(async (r) => {
+        if (job.kind === 'recent') await db.query("INSERT INTO complaint_sync_state (source, cursor, last_run_at, last_ok_at) VALUES ('auto_recent', $1, now(), now()) ON CONFLICT (source) DO UPDATE SET cursor = EXCLUDED.cursor, last_run_at = now(), last_ok_at = now()", [torontoDay(now())]);
+        return r;
+      })
+      .catch((err) => ({ error: err.message }))
+      .finally(() => {
+        running = null;
+        chain(login);
+      });
+    return true;
+  }
+  // After any run, look for the next piece of work a few seconds later (older history, or today's update).
+  function chain(bearer) {
+    if (bearer) heldBearer = bearer;
+    const t = setTimeout(() => {
+      lastAutoAttempt = 0;
+      maybeRun().catch(() => {});
+    }, 5_000);
+    t.unref?.();
   }
 
   // A run lives in this process: a restart (every release) ends it. Called at startup, so a
@@ -573,7 +648,12 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     const last = await one(db, 'SELECT id, started_at, finished_at, status, window_from, window_to, log FROM complaint_runs ORDER BY id DESC LIMIT 1');
     // Which periods have been mined (finished runs), so the page can say what a date range covers.
     const mined = await many(db, "SELECT window_from, window_to, finished_at, status FROM complaint_runs WHERE status IN ('done', 'partial') ORDER BY window_from");
-    return { running: !!running, sources: sources(), last_run: last, mined };
+    const settings = await getSettings();
+    const next = await nextAuto().catch(() => null);
+    const recent = await one(db, "SELECT cursor, last_ok_at FROM complaint_sync_state WHERE source = 'auto_recent'");
+    const hasSyncLogin = config.l27Mode === 'mock' || !!(config.l27SyncEmail && config.l27SyncPassword);
+    const auto = { enabled: settings.auto.enabled, history_months: settings.auto.history_months, next, last_daily_update: recent?.last_ok_at || null, overnight: hasSyncLogin };
+    return { running: !!running, sources: sources(), last_run: last, mined, auto };
   }
 
   async function listCases({ from, to, category, limit = 500 }) {
@@ -675,6 +755,45 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     return buildClients(rows, now());
   }
 
-  return { getSettings, saveSettings, kustomerDiscover, start, run, status, markInterrupted, listCases, getCase, setCategory, playbook, clients, sources };
+  return { getSettings, saveSettings, kustomerDiscover, start, run, status, markInterrupted, maybeRun, listCases, getCase, setCategory, playbook, clients, sources };
 }
 
+
+/**
+ * What should an automatic update read next? Pure.
+ *   mined: finished runs' windows [{from, to}] (YYYY-MM-DD); today: local date;
+ *   historyDays: how far back to keep history; recentDone: the day the daily update last ran.
+ * 1. The newest stretch of days (up to a month) that hasn't been read, back to the history target.
+ * 2. Otherwise, once a day: the last two weeks again, refreshing outcomes for ~4 months.
+ */
+export function planAuto({ mined, today, historyDays, recentDone }) {
+  const add = (d, n) => {
+    const x = new Date(`${d}T12:00:00Z`);
+    x.setUTCDate(x.getUTCDate() + n);
+    return x.toISOString().slice(0, 10);
+  };
+  const yesterday = add(today, -1);
+  const target = add(today, -historyDays);
+  // Walk back from yesterday through everything already read.
+  let p = yesterday;
+  for (let moved = true; moved && p >= target; ) {
+    moved = false;
+    for (const m of mined) {
+      if (m.from <= p && m.to >= p) {
+        p = add(m.from, -1);
+        moved = true;
+      }
+    }
+  }
+  if (p >= target) {
+    // Unread days end at p. Start a month earlier, but not before anything already read or the target.
+    const readBelow = mined.filter((m) => m.to < p).map((m) => m.to).sort().pop();
+    let from = add(p, -30);
+    if (readBelow && add(readBelow, 1) > from) from = add(readBelow, 1);
+    if (from < target) from = target;
+    const catchUp = p === yesterday;
+    return { kind: 'history', from, to: p, refreshFrom: null, label: catchUp ? 'Automatic update: reading the days since the last update' : 'Automatic update: reading older history' };
+  }
+  if (recentDone !== today) return { kind: 'recent', from: add(today, -14), to: yesterday, refreshFrom: add(today, -130), label: 'Automatic daily update: the last two weeks, and outcomes for the last four months' };
+  return null;
+}

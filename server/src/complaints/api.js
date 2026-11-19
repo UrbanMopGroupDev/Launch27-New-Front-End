@@ -25,7 +25,12 @@ export function registerComplaintRoutes(r, { complaints, needRole, wrap, now = (
     return { from, to };
   };
 
-  r.get('/complaints/status', lead, h(async (req, res) => res.json({ ...(await complaints.status()), window: await windowOf(req) })));
+  r.get('/complaints/status', lead, h(async (req, res) => {
+    // Opening the page is what keeps it up to date where there's no overnight Launch27 login:
+    // start today's update (or the next older month) in the background with this person's login.
+    complaints.maybeRun({ bearer: req.bearer }).catch(() => {});
+    res.json({ ...(await complaints.status()), window: await windowOf(req) });
+  }));
   r.get('/complaints/playbook', lead, h(async (req, res) => res.json(await complaints.playbook(await windowOf(req)))));
   r.get('/complaints/cases', lead, h(async (req, res) => {
     const w = await windowOf(req);

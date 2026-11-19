@@ -37,6 +37,8 @@ export const DEFAULT_SETTINGS = {
   roles: {},
   hard_route_role: 'office_manager',
   credit_expiry_days: 90,
+  // Automatic updates: daily, plus reading older months until this much history is stored.
+  auto: { enabled: true, history_months: 12 },
   budget: {
     target_pct: null, // null = 20% below the historical average once the baseline is known
     below_average_by: 0.2,
@@ -70,6 +72,7 @@ export function normalizeSettings(input = {}) {
   if (['office_manager', 'gm', 'owner'].includes(src.hard_route_role)) s.hard_route_role = src.hard_route_role;
   const n = (v, lo, hi, d) => (Number.isFinite(Number(v)) && Number(v) >= lo && Number(v) <= hi ? Number(v) : d);
   s.credit_expiry_days = n(src.credit_expiry_days, 7, 730, s.credit_expiry_days);
+  s.auto = { enabled: src.auto?.enabled !== false, history_months: n(src.auto?.history_months, 1, 12, 12) };
   s.pilot_months = n(src.pilot_months, 1, 24, s.pilot_months);
   const b = src.budget || {};
   s.budget.target_pct = b.target_pct == null ? null : n(b.target_pct, 0, 0.2, null);
