@@ -25,7 +25,10 @@ export function createSheetReader({ serviceAccount, fetchImpl = fetch, now = () 
     async values(sheetId, range) {
       const res = await fetchImpl(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(sheetId)}/values/${encodeURIComponent(range)}`, { headers: { authorization: `Bearer ${await token()}`, accept: 'application/json' }, signal: AbortSignal.timeout(60_000) });
       const body = await res.json().catch(() => ({}));
-      if (res.status === 403 || res.status === 404) throw new Error(`The sheet isn't shared with ${serviceAccount.client_email} (share it as Viewer), or the Google Sheets API is off for that Google project`);
+      // The two 403s need different fixes, so say which one it is.
+      if (res.status === 403 && /has not been used|is disabled|SERVICE_DISABLED/i.test(JSON.stringify(body.error || ''))) throw new Error(`The Google Sheets API is turned off for the Google project that owns ${serviceAccount.client_email}. The sheet is fine; someone with access to that Google Cloud project needs to enable the Google Sheets API, then click Refresh now`);
+      if (res.status === 403) throw new Error(`The sheet isn't shared with ${serviceAccount.client_email} (share it as Viewer)`);
+      if (res.status === 404) throw new Error(`Google can't find the sheet: check PAY_ADJUSTMENTS_SHEET_ID`);
       if (!res.ok) throw new Error(`Google Sheets ${res.status}: ${body.error?.message || 'request failed'}`);
       return body.values || [];
     },
