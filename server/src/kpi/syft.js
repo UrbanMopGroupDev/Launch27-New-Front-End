@@ -68,7 +68,10 @@ const pdfParts = (payload, out = []) => {
  * the same thread replaces the earlier figure for its month.
  */
 export function createSyftKpi({ db, gmail, mailbox, brand, log = { info() {}, warn() {}, error() {} }, now = () => Date.now(), readPdf = pdfLines }) {
-  const QUERY = 'subject:"Management Report as at" has:attachment filename:pdf newer_than:1100d';
+  // The bookkeeper's subjects and file names have changed over time, so the search is broad and
+  // each PDF is checked: right company on its cover, and the month read from the report itself.
+  const QUERY = brand.syftQuery;
+  const SEEN = 'v2:'; // bump to re-read every email after the matching rules change
   let running = null;
   let lastAttempt = 0;
   let memo = null;
@@ -102,17 +105,21 @@ export function createSyftKpi({ db, gmail, mailbox, brand, log = { info() {}, wa
       } while (pageToken && ids.length < 1000);
       let read = 0;
       for (const id of ids) {
-        if (seen[id]) continue;
+        if (String(seen[id] || '').startsWith(SEEN)) continue;
         const msg = await gmail.message(mailbox, id);
         const received = new Date(Number(msg.internalDate) || now()).toISOString();
-        const mine = pdfParts(msg.payload).filter((p) => brand.syftReport.test(p.filename));
-        seen[id] = mine.length ? 'read' : 'no report for this brand';
+        const mine = pdfParts(msg.payload).filter((p) => brand.syftReport.test(p.filename) && !brand.syftNotReport?.test(p.filename));
+        seen[id] = `${SEEN}${mine.length ? 'read' : 'no report for this brand'}`;
         for (const part of mine) {
           try {
             const att = await gmail.attachment(mailbox, id, part.attachmentId);
-            const got = parseSyftReport(await readPdf(b64(att.data)));
+            const lines = await readPdf(b64(att.data));
+            // Another company's report under a similar file name is left alone.
+            const cover = lines.slice(0, 12);
+            if (brand.syftEntity && (!cover.some((l) => brand.syftEntity.test(l)) || cover.some((l) => brand.syftNotReport?.test(l)))) continue;
+            const got = parseSyftReport(lines);
             if (!got) {
-              seen[id] = 'report page not found';
+              seen[id] = `${SEEN}report page not found`;
               log.warn('kpi syft: no Operational Cost Ratio line in report', { file: part.filename });
               continue;
             }

@@ -607,8 +607,10 @@ describe('kpi live connectors (production path), run against the synthetic Launc
       m1: { internalDate: String(Date.parse('2026-09-11T14:00:00Z')), payload: { parts: [pdf('Luxoclean Management Report August 2026.pdf', 'lux'), pdf('UM Canada Management Report August 2026.pdf', 'aug-v1')] } },
       m2: { internalDate: String(Date.parse('2026-09-15T14:00:00Z')), payload: { parts: [pdf('UM Canada Management Report August 2026.pdf', 'aug-v2')] } },
       m3: { internalDate: String(Date.parse('2026-09-12T14:00:00Z')), payload: { parts: [{ filename: 'notes.docx', body: { attachmentId: 'x' } }] } },
+      // Earlier months used other file names; one PDF with a matching name is another company's.
+      m4: { internalDate: String(Date.parse('2026-05-11T14:00:00Z')), payload: { parts: [pdf('UrbanMop April Management Report V1.pdf', 'apr'), pdf('UrbanMop Monthly Report -Other.pdf', 'other-co')] } },
     };
-    const reports = { 'aug-v1': ['Aug 2026  Jul 2026  Variance  Variance (%)', 'Total Income  $100,000  $95,000', 'Operational Cost Ratio  61.5%  60.2%'], 'aug-v2': ['Aug 2026  Jul 2026  Variance  Variance (%)', 'Total Income  $101,000  $95,000', 'Operational Cost Ratio  62.0%  60.2%'] };
+    const reports = { 'aug-v1': ['UrbanMop Inc.', 'Aug 2026  Jul 2026  Variance  Variance (%)', 'Total Income  $100,000  $95,000', 'Operational Cost Ratio  61.5%  60.2%'], apr: ['UM Canada Monthly Report', 'Apr 2026  Mar 2026  Variance  Variance (%)', 'Total Income  $90,000  $88,000', 'Operational Cost Ratio  59.0%  58.5%'], 'other-co': ['Some Other Co.', 'Apr 2026  Mar 2026  Variance  Variance (%)', 'Operational Cost Ratio  10.0%  11.0%'], 'aug-v2': ['UrbanMop Inc.', 'Aug 2026  Jul 2026  Variance  Variance (%)', 'Total Income  $101,000  $95,000', 'Operational Cost Ratio  62.0%  60.2%'] };
     const gmail = {
       search: async (account, q) => (calls.push(['search', account, q]), { ids: Object.keys(mail), next: null }),
       message: async (account, id) => (calls.push(['message', id]), mail[id]),
@@ -616,16 +618,16 @@ describe('kpi live connectors (production path), run against the synthetic Launc
     };
     const syft = createSyftKpi({ db, gmail, mailbox: 'books@example.com', brand, log: quiet, now: () => NOW, readPdf: async (bytes) => reports[bytes.toString()] });
     assert.equal((await syft.pull()).refreshed_at, null);
-    assert.deepEqual(await syft.job.start(), { months: 2, read: 2 });
+    assert.deepEqual(await syft.job.start(), { months: 4, read: 3 });
     const got = (await syft.pull()).syft;
-    assert.deepEqual(got.map((r) => [r.month, r.ocr_pct, r.income, !!r.restated]), [['2026-07', 60.2, null, true], ['2026-08', 62, 101000, false]]);
+    assert.deepEqual(got.map((r) => [r.month, r.ocr_pct, r.income, !!r.restated]), [['2026-03', 58.5, null, true], ['2026-04', 59, 90000, false], ['2026-07', 60.2, null, true], ['2026-08', 62, 101000, false]]);
     assert.ok(!calls.some((c) => c[1] === 'lux'));
     assert.equal(calls[0][1], 'books@example.com');
     // Second run: nothing is downloaded again.
     const before = calls.length;
-    assert.deepEqual(await syft.job.start(), { months: 2, read: 0 });
+    assert.deepEqual(await syft.job.start(), { months: 4, read: 0 });
     assert.equal(calls.slice(before).filter((c) => c[0] !== 'search').length, 0);
-    assert.deepEqual((await db.query("SELECT status, row_count FROM kpi_refresh_log WHERE source = 'syft'")).rows, [{ status: 'ok', row_count: 2 }]);
+    assert.deepEqual((await db.query("SELECT status, row_count FROM kpi_refresh_log WHERE source = 'syft'")).rows, [{ status: 'ok', row_count: 4 }]);
     // On the scorecard: OCR comes from the report, marked as Syft with no cross-check.
     const kpi = createKpi({ db, config: { ...config, production: true }, log: quiet, now: () => NOW, connectors: [syft] });
     const tile = (await kpi.scorecard({ month: '2026-08' })).tiles.find((t) => t.kpi === 'ocr');
