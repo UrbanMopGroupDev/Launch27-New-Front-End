@@ -465,6 +465,21 @@ input.qty { width: 64px; padding: 3px 6px; }
 .legend-chip.off-hours { background: repeating-linear-gradient(45deg, #f3f4f6, #f3f4f6 4px, #e9ebee 4px, #e9ebee 8px); border-color: #d4d8de; }
 .dispatch-drawer { width: min(460px, 100vw); z-index: 25; }
 .drawer-links { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0 4px; }
+.dispatch-drawer .drawer-header { margin-bottom: 6px; }
+.dd-time { font-size: 28px; font-weight: 700; line-height: 1.1; color: var(--accent); letter-spacing: -.01em; }
+.dd-time-to { font-size: 18px; font-weight: 600; color: var(--muted); }
+.dd-name { font-size: 20px; margin: 4px 0 2px; }
+.dd-address { font-size: 15px; font-weight: 500; line-height: 1.35; }
+.dd-address a { color: inherit; text-decoration: none; }
+.dd-address a:hover { text-decoration: underline; }
+.dd-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 12px 0 8px; }
+.drawer .dd-facts > div { display: block; border-bottom: 0; background: var(--bg); border-radius: 8px; padding: 6px 8px; min-width: 0; }
+.dd-facts dt { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.drawer .dd-facts dd { margin: 2px 0 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dd-service { margin-bottom: 8px; }
+.dd-notes { display: flex; flex-direction: column; gap: 8px; background: var(--warn-soft); border-radius: 8px; padding: 8px 10px; margin: 8px 0; }
+.dd-notes p { margin: 2px 0 0; }
+@media (max-width: 480px) { .dd-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .secondary-link { background: var(--panel); color: var(--text); border: 1px solid var(--border); padding: 6px 10px; font-size: 13px; }
 .drawer-notes { background: var(--bg); border-radius: 6px; padding: 6px 10px; }
 .drawer-notes p { margin: 4px 0; }
