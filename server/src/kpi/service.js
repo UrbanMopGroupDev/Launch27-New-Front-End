@@ -17,10 +17,10 @@ export function canSeeKpi(config, email) {
   return (config.kpiEmails || []).includes(String(email || '').toLowerCase());
 }
 
-export function createKpi({ db, config, log = { info() {}, warn() {}, error() {} }, now = () => Date.now(), fetchImpl = fetch, syncBearer = null, connectors = null }) {
+export function createKpi({ db, config, log = { info() {}, warn() {}, error() {} }, now = () => Date.now(), fetchImpl = fetch, syncBearer = null, gmail = null, connectors = null }) {
   const synthetic = !config.production;
   // Dev and QA: synthetic. Production: live Launch27 and Kustomer; the rest read "No data" until connected.
-  connectors = connectors || (synthetic || !syncBearer ? createKpiConnectors({ synthetic }) : createLiveKpiConnectors({ db, config, fetchImpl, syncBearer, brand: KPI_BRANDS[0], log, now }));
+  connectors = connectors || (synthetic || !syncBearer ? createKpiConnectors({ synthetic }) : createLiveKpiConnectors({ db, config, fetchImpl, syncBearer, brand: KPI_BRANDS[0], log, now, gmail }));
   const jobs = connectors.map((c) => c.job).filter(Boolean);
   let cache = null;
   let manualVersion = 0;
@@ -42,6 +42,7 @@ export function createKpi({ db, config, log = { info() {}, warn() {}, error() {}
       ds.sources[c.key] = { refreshed_at: got.refreshed_at || null, note: got.note || null };
       if (got.bookings) ds.bookings = got.bookings;
       if (got.complaints) ds.complaints = got.complaints;
+      if (got.complaintCoverage) ds.complaintCoverage = got.complaintCoverage;
       if (got.reviews) (ds.reviews = got.reviews), (ds.reviewBaseline = got.reviewBaseline);
       if (got.qbo) ds.ocr.qbo = got.qbo;
       if (got.syft) ds.ocr.syft = got.syft;

@@ -9,6 +9,7 @@
 // same pull twice leaves the same snapshot.
 import { addDays, localDate } from '../schedule/rules.js';
 import { KPI_RULES, KPI_SOURCES } from './config.js';
+import { createSyftKpi } from './syft.js';
 
 const LOCAL = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Toronto', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 /** ISO timestamp -> local calendar string 'YYYY-MM-DDTHH:MM' (Toronto), or null. */
@@ -174,17 +175,29 @@ export function createKustomerKpi({ db, brand }) {
     label: KPI_SOURCES.kustomer.label,
     mode: 'live',
     async pull() {
-      const state = (await db.query("SELECT last_ok_at FROM complaint_sync_state WHERE source = 'kustomer'")).rows[0];
-      if (!state?.last_ok_at) return { refreshed_at: null, note: 'the Complaint playbook has not read Kustomer yet' };
+      // The playbook reads Kustomer in runs, each covering a date window. Freshness is the last
+      // run that finished; coverage is the windows that have been read.
+      const runs = (await db.query("SELECT window_from::text AS f, window_to::text AS t, finished_at FROM complaint_runs WHERE status IN ('done', 'partial') AND window_from IS NOT NULL AND window_to IS NOT NULL ORDER BY window_from")).rows;
+      if (!runs.length) return { refreshed_at: null, note: 'the Complaint playbook has not finished reading Kustomer yet' };
+      const last = runs.map((r) => new Date(r.finished_at).getTime()).filter(Number.isFinite).sort((x, y) => y - x)[0];
+      const coverage = [];
+      for (const r of runs) {
+        const w = { from: r.f.slice(0, 10), to: r.t.slice(0, 10) };
+        const prev = coverage[coverage.length - 1];
+        // Windows that touch or overlap are one covered stretch.
+        if (prev && w.from <= addDays(prev.to, 1)) prev.to = w.to > prev.to ? w.to : prev.to;
+        else coverage.push(w);
+      }
       const rows = (
         await db.query(
           `SELECT id, l27_customer_id, l27_booking_id, customer_name, customer_email, opened_at, channel, category
-             FROM complaint_cases WHERE source = 'kustomer' AND brand = $1 AND merged_into IS NULL ORDER BY id`,
+             FROM complaint_cases WHERE source = 'kustomer' AND brand = $1 AND merged_into IS NULL AND excluded_at IS NULL ORDER BY id`,
           [brand.complaintBrand || 'residential'],
         )
       ).rows;
       return {
-        refreshed_at: new Date(state.last_ok_at).toISOString(),
+        refreshed_at: new Date(last).toISOString(),
+        complaintCoverage: coverage,
         complaints: rows.map((r) => ({
           id: Number(r.id),
           // Not every complaint is matched to a Launch27 client; fall back to the email so one client still dedupes.
@@ -203,12 +216,13 @@ export function createKustomerKpi({ db, brand }) {
 const notConnected = (key, note) => ({ key, label: KPI_SOURCES[key].label, mode: 'not_connected', pull: async () => ({ refreshed_at: null, note }) });
 
 /** Production connectors: Launch27 and Kustomer live; QuickBooks, Syft and Google not connected yet. */
-export function createLiveKpiConnectors({ db, config, fetchImpl, syncBearer, brand, log, now }) {
+export function createLiveKpiConnectors({ db, config, fetchImpl, syncBearer, brand, log, now, gmail = null }) {
+  const syft = gmail && config.kpiSyftMailbox && brand.syftReport ? createSyftKpi({ db, gmail, mailbox: config.kpiSyftMailbox, brand, log, now }) : notConnected('syft', gmail ? 'no mailbox set for the Syft report (KPI_SYFT_MAILBOX)' : 'Gmail is not connected');
   return [
     createLaunch27Kpi({ db, config, fetchImpl, syncBearer, brand, log, now }),
     createKustomerKpi({ db, brand }),
     notConnected('google', 'Google Business Profile is not connected yet'),
     notConnected('qbo', 'QuickBooks is not connected yet'),
-    notConnected('syft', 'the Syft report is not connected yet'),
+    syft,
   ];
 }
