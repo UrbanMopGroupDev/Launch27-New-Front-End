@@ -3,7 +3,7 @@
 import { ApiError, describeErrors } from '../api';
 
 export type Kpi = 'ocr' | 'churn' | 'fulfilment' | 'complaints' | 'reviews' | 'billing';
-export type Mode = 'month' | 't12';
+export type Mode = 'month' | 't12' | 'range';
 export type Tone = 'good' | 'warning' | 'critical' | 'neutral';
 
 export interface Tile {
@@ -42,6 +42,8 @@ export interface Scorecard {
   references: Partial<Record<Kpi, Reference>>;
   months: { value: string; label: string }[];
   default_month: string;
+  first_day: string;
+  range: { from: string; to: string } | null;
   sources: { key: string; label: string; mode: string; refreshed_at: string | null; note: string | null }[];
   outage: string | null;
   outages: Record<string, string> | null;
@@ -53,7 +55,7 @@ export interface DrillColumn { key: string; label: string; kind?: 'money' | 'pct
 export type DrillRow = Record<string, string | number | boolean | null> & { counted?: boolean; outcome?: string };
 export interface Drill { title: string; tabs: { key: string; label: string; columns: DrillColumn[]; rows: DrillRow[]; defaultFilter?: string }[] }
 
-export interface Query { brand?: string | null; month?: string | null; mode: Mode; outage?: string | null }
+export interface Query { brand?: string | null; month?: string | null; mode: Mode; outage?: string | null; from?: string | null; to?: string | null }
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api/kpi${path}`, { method, credentials: 'same-origin', headers: body ? { 'content-type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined });
@@ -69,6 +71,7 @@ const qs = (q: Query, extra: Record<string, string> = {}) => {
   if (q.brand) p.set('brand', q.brand);
   if (q.month) p.set('month', q.month);
   if (q.outage) p.set('outage', q.outage);
+  if (q.mode === 'range' && q.from && q.to) { p.set('from', q.from); p.set('to', q.to); }
   return p.toString();
 };
 

@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { indexDataset, isRecurring, isTest, isInstitutional, reasonCategory, churnBand, isOverCancel, cancellationCause, churnMonth, fulfilmentMonth, complaintsMonth, reviewsMonth, ocrMonth, scorecard, drill, lastClosedMonth, sourceState, ocrStatus, fulfilmentStatus } from '../src/kpi/calc.js';
+import { indexDataset, isRecurring, isTest, isInstitutional, reasonCategory, churnBand, isOverCancel, cancellationCause, churnMonth, fulfilmentMonth, complaintsMonth, reviewsMonth, ocrMonth, fulfilmentRange, scorecard, drill, lastClosedMonth, sourceState, ocrStatus, fulfilmentStatus } from '../src/kpi/calc.js';
 import { KPI_BRANDS, KPI_RULES } from '../src/kpi/config.js';
 import { buildSyntheticDataset } from '../src/kpi/synthetic.js';
 import { createKpi, canSeeKpi } from '../src/kpi/service.js';
@@ -427,6 +427,63 @@ describe('scorecard', () => {
   });
 });
 
+describe('custom date range and month in progress', () => {
+  const brand = KPI_BRANDS[0];
+  const steady = () => Array.from({ length: 10 }, (_, i) => [b(100 + i, `Steady ${i}`, '2026-11-03'), b(100 + i, `Steady ${i}`, '2026-11-17'), b(100 + i, `Steady ${i}`, '2026-12-01')]).flat();
+  test('churn over exact dates: events inside the range ÷ clients with a recurring visit in the 31 days from its start', () => {
+    const data = ix([
+      ...steady(),
+      b(1, 'In Range', '2026-11-02'), b(1, 'In Range', '2026-11-16', { cancellation: cx('2026-11-10', 'Moving out of Ottawa') }),
+      b(2, 'After Range', '2026-11-04'), b(2, 'After Range', '2026-11-25', { cancellation: cx('2026-11-20', 'Too expensive') }),
+      b(3, 'Monthly, Next Visit Late', '2026-11-28', { frequency: 'Monthly - 5% off' }),
+      b(4, 'Starts Too Late', '2026-12-05'),
+    ]);
+    const r = churnMonth(data, '2026-11', '2026-11-25', KPI_RULES, { from: '2026-11-01', to: '2026-11-19' });
+    assert.deepEqual([r.num, r.den], [1, 13]); // ten steady + In Range + After Range + the monthly client; not the December starter
+    assert.deepEqual(r.events.map((e) => e.customer), ['In Range']);
+    // The whole month counts both cancellations.
+    assert.equal(churnMonth(data, '2026-11', '2026-12-05').num, 2);
+  });
+  test('complaints, reviews and fulfilment follow the same dates', () => {
+    const rated = b(1, 'Rated Early', '2026-10-04', { rating: 0, rated_at: '2026-10-05' });
+    const ratedLate = b(2, 'Rated Late', '2026-10-25', { rating: 0, rated_at: '2026-10-26' });
+    const visits = Array.from({ length: 20 }, (_, i) => b(300 + i, `V ${i}`, i < 10 ? '2026-10-06' : '2026-10-22'));
+    const reviews = [{ id: 1, date: '2026-10-03', rating: 5 }, { id: 2, date: '2026-10-09', rating: 3 }, { id: 3, date: '2026-10-20', rating: 5 }];
+    const data = ix([rated, ratedLate, ...visits], { reviews });
+    const w = { from: '2026-10-01', to: '2026-10-15' };
+    const c = complaintsMonth(data, '2026-10', TODAY, KPI_RULES, w);
+    assert.deepEqual([c.num, c.den], [1, 11]);
+    const r = reviewsMonth(data, '2026-10', KPI_RULES, w);
+    assert.deepEqual([r.value, r.avg, r.alltime_count], [2, 4, 102]);
+  });
+  test('scorecard in range mode: label, comparison with the days before, OCR by month only, no churn band', () => {
+    const data = indexDataset(buildSyntheticDataset({ today: TODAY, now: NOW }));
+    const c = scorecard(data, { brand, mode: 'range', range: { from: '2026-11-01', to: '2026-11-18' }, now: NOW, today: TODAY });
+    const tile = (k) => c.tiles.find((t) => t.kpi === k);
+    assert.equal(c.period, 'Nov 1, 2026 – Nov 18, 2026');
+    assert.equal(c.mode, 'range');
+    assert.deepEqual([tile('ocr').state, tile('ocr').value], ['no_data', null]);
+    assert.match(tile('ocr').note, /by month only/);
+    assert.equal(tile('churn').state, 'ok');
+    assert.equal(tile('churn').status, null);
+    assert.ok(tile('churn').badges.some((x) => /do not apply to a partial period/.test(x.text)));
+    assert.equal(tile('fulfilment').delta.versus, 'the 18 days before');
+    assert.equal(fulfilmentRange(data, '2026-11-01', '2026-11-18', TODAY).num, Number(tile('fulfilment').details[0].value.split(' ÷ ')[0].replace(/,/g, '')));
+    const d = drill(data, { kpi: 'churn', mode: 'range', range: { from: '2026-11-01', to: '2026-11-18' }, today: TODAY });
+    assert.ok(d.tabs[0].rows.every((r) => r.cancelled_on >= '2026-11-01' && r.cancelled_on <= '2026-11-18'));
+    assert.match(d.title, /Nov 1, 2026 – Nov 18, 2026/);
+  });
+  test('the month in progress is shown to date, marked, and its last-12-months figure uses complete months', () => {
+    const data = indexDataset(buildSyntheticDataset({ today: TODAY, now: NOW }));
+    const c = scorecard(data, { brand, month: '2026-11', now: NOW, today: TODAY });
+    assert.equal(c.period, 'Nov 2026 to date');
+    const churn = c.tiles.find((t) => t.kpi === 'churn');
+    assert.ok(churn.badges.some((x) => /Month in progress/.test(x.text)));
+    assert.equal(churn.status, null);
+    assert.equal(churn.last12, scorecard(data, { brand, month: '2026-10', now: NOW, today: TODAY }).tiles.find((t) => t.kpi === 'churn').last12);
+  });
+});
+
 describe('kpi service', () => {
   const quiet = { info() {}, warn() {}, error() {} };
   test('dev: scorecard defaults to the last closed month; refresh log is idempotent; manual reviews round-trip', async () => {
@@ -439,7 +496,13 @@ describe('kpi service', () => {
     await kpi.scorecard();
     assert.equal((await db.query('SELECT count(*)::int AS n FROM kpi_refresh_log')).rows[0].n, 5);
     await assert.rejects(kpi.scorecard({ month: '2023-12' }), { status: 400 });
-    await assert.rejects(kpi.scorecard({ month: '2026-11' }), { status: 400 });
+    // The month in progress can be picked; a future month cannot.
+    assert.equal((await kpi.scorecard({ month: '2026-11' })).period, 'Nov 2026 to date');
+    await assert.rejects(kpi.scorecard({ month: '2026-12' }), { status: 400 });
+    // Custom dates: validated, and never in the future.
+    assert.equal((await kpi.scorecard({ mode: 'range', from: '2026-11-01', to: '2026-11-19' })).period, 'Nov 1, 2026 – Nov 19, 2026');
+    for (const bad of [{ from: '2026-11-10', to: '2026-11-01' }, { from: '2026-11-01', to: '2026-11-20' }, { from: '2023-12-31', to: '2026-11-01' }, { from: '2026-02-30', to: '2026-11-01' }, { from: '2026-11-01' }]) await assert.rejects(kpi.scorecard({ mode: 'range', ...bad }), { status: 400 });
+    assert.ok((await kpi.drill({ kpi: 'fulfilment', mode: 'range', from: '2026-11-01', to: '2026-11-19' })).tabs[0].rows.length > 0);
     await assert.rejects(kpi.drill({ kpi: 'billing' }), { status: 400 });
     await kpi.saveManualReviews({ brand: 'urbanmop', month: '2026-10', entry: { new_reviews: 7, avg_rating: 4.6, alltime_avg: 4.7, alltime_count: 500 }, email: 'qa@example.com' });
     const after = (await kpi.scorecard()).tiles.find((t) => t.kpi === 'reviews');
