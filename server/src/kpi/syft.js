@@ -31,7 +31,7 @@ export async function pdfLines(bytes) {
 
 /**
  * The report's own figures for its month and the month before:
- * { month, ocr_pct, income, prev: { month, ocr_pct } } or null when the page is not found.
+ * { month, ocr_pct, income, prev: { month, ocr_pct, income } } or null when the page is not found.
  */
 export function parseSyftReport(lines) {
   const at = lines.findIndex((l) => /^Operational Cost Ratio\b/i.test(l.trim()));
@@ -40,10 +40,14 @@ export function parseSyftReport(lines) {
   // The column headings above it: "Aug 2026  Jul 2026  Variance  Variance (%)".
   let cols = null;
   let income = null;
+  let prevIncome = null;
   for (let i = at - 1; i >= 0 && i > at - 60; i--) {
     if (income == null) {
-      const t = lines[i].trim().match(/^Total Income\s+\$?\s*([\d,]+(?:\.\d+)?)/i);
-      if (t) income = Number(t[1].replace(/,/g, ''));
+      const t = lines[i].trim().match(/^Total Income\s+\$?\s*([\d,]+(?:\.\d+)?)(?:\s+\$?\s*([\d,]+(?:\.\d+)?))?/i);
+      if (t) {
+        income = Number(t[1].replace(/,/g, ''));
+        prevIncome = t[2] ? Number(t[2].replace(/,/g, '')) : null;
+      }
     }
     const h = lines[i].match(/([A-Z][a-z]{2,8} \d{4})\s+([A-Z][a-z]{2,8} \d{4})\s+Variance/);
     if (h) {
@@ -52,7 +56,7 @@ export function parseSyftReport(lines) {
     }
   }
   if (!cols?.[0] || !Number.isFinite(pct[0]) || pct[0] <= 0 || pct[0] >= 200) return null;
-  return { month: cols[0], ocr_pct: pct[0], income, prev: cols[1] && Number.isFinite(pct[1]) ? { month: cols[1], ocr_pct: pct[1] } : null };
+  return { month: cols[0], ocr_pct: pct[0], income, prev: cols[1] && Number.isFinite(pct[1]) ? { month: cols[1], ocr_pct: pct[1], income: prevIncome } : null };
 }
 
 const b64 = (s) => Buffer.from(String(s || '').replace(/-/g, '+').replace(/_/g, '/'), 'base64');
@@ -124,10 +128,15 @@ export function createSyftKpi({ db, gmail, mailbox, brand, log = { info() {}, wa
               continue;
             }
             read += 1;
-            // A later email (a revision) wins for its month.
-            if (!reports[got.month] || reports[got.month].received_at <= received) reports[got.month] = { month: got.month, ocr_pct: got.ocr_pct, income: got.income, received_at: received, file: part.filename };
-            // The report also restates the month before; use it only if that month has no report of its own.
-            if (got.prev && !reports[got.prev.month]) reports[got.prev.month] = { month: got.prev.month, ocr_pct: got.prev.ocr_pct, income: null, received_at: received, file: `${part.filename} (previous-month column)`, restated: true };
+            // The books get revised, so the most recently received report that gives a month's
+            // figure wins: a revision of that month's own report, or the next month's report,
+            // which restates it in its previous-month column.
+            const put = (m, restated) => {
+              if (reports[m.month] && reports[m.month].received_at > received) return;
+              reports[m.month] = { month: m.month, ocr_pct: m.ocr_pct, income: m.income ?? null, received_at: received, file: restated ? `${part.filename} (previous-month column)` : part.filename, restated };
+            };
+            put(got, false);
+            if (got.prev) put(got.prev, true);
           } catch (err) {
             delete seen[id]; // try again next time
             log.warn('kpi syft: could not read a report', { file: part.filename, error: err.message });
