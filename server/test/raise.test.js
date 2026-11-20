@@ -515,5 +515,12 @@ describe('Pay adjustments sheet', () => {
       assert.equal(c.loyal, c.cleans >= 5 && c.share >= 0.8);
     }
     for (const r of v2.rows) assert.equal(r.churned + r.at_risk, r.drill.churn.length);
+    // Churn %: churned ÷ the recurring clients they were the regular cleaner for in the period.
+    for (const r of v2.rows) {
+      assert.ok(r.recurring_clients >= r.churned, 'the base includes the churned clients');
+      assert.equal(r.churn_rate, r.recurring_clients ? Math.round((r.churned / r.recurring_clients) * 1000) / 1000 : null);
+    }
+    assert.ok(v2.rows.some((r) => r.recurring_clients > 0 && r.churned === 0), 'cleaners with recurring clients and no churn read 0%, not blank');
+    assert.equal(v2.team.recurring_clients, v2.rows.reduce((a, r) => a + r.recurring_clients, 0));
   });
 });
