@@ -56,6 +56,15 @@ Churn rules, in the order they are applied to each cancellation in the month:
 Test and institutional clients are also left out of the base. The event is dated by the
 cancellation date, and the last cleaner is the one on the client's last completed visit.
 
+## Periods
+
+- **Month**: any month from January 2024, including the month in progress (shown "to date").
+- **Trailing 12**: the 12 months ending at the chosen month, pooled.
+- **Custom dates**: any start and end date up to today, compared with the same number of days
+  before. Churn is events in the range ÷ clients with a recurring visit booked in the 31 days from
+  the start date; the monthly bands and target are not applied to a partial period. OCR is
+  reported by month only, so its tile reads "No data" for a custom range.
+
 ## Refresh schedule
 
 Dev and QA: synthetic data is generated in memory, the same for everyone on a given day.
