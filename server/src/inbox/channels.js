@@ -61,6 +61,8 @@ export function guardConnectors(connectors = {}, mode = 'sandbox') {
       send: async () => {
         throw new Error(EMAIL_READ_ONLY_MESSAGE);
       },
+      // Reading a file off a received email is still allowed (live only: sandboxes have none).
+      ...(typeof c.attachment === 'function' && !c.sandbox ? { attachment: c.attachment } : {}),
     };
   }
   return guarded;

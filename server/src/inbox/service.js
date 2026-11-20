@@ -402,7 +402,7 @@ export async function reply(q, user, convId, { body, channel, to, subject, from,
   }
   await q.query(
     `UPDATE conversations SET first_response_at = COALESCE(first_response_at, now()), awaiting_reply_since = NULL,
-            sla_due_at = NULL, sla_warned_at = NULL, last_message_at = now(), last_preview = $2,
+            sla_due_at = NULL, sla_warned_at = NULL, last_message_at = now(), last_preview = $2, draft = NULL, draft_at = NULL,
             owner_id = CASE WHEN $4 THEN COALESCE(owner_id, $3) ELSE owner_id END, status = CASE WHEN status = 'snoozed' THEN 'open' ELSE status END, updated_at = now()
      WHERE id = $1`,
     [convId, body.slice(0, 160), user.id, (await getSettings(q)).assign_on_reply],

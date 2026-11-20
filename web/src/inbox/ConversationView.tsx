@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { inbox, type Channel, type Complaint, type ConversationDetail, type Disposition, type Message } from './api';
@@ -11,9 +11,36 @@ export interface ComposerHandle {
   insert: (text: string) => void;
 }
 
-export function ConversationView({ id, composerRef, assist }: { id: number; composerRef?: React.Ref<ComposerHandle>; assist?: React.ReactNode }) {
+export function ConversationView({ id, composerRef, assist, onShowPerson }: { id: number; composerRef?: React.Ref<ComposerHandle>; assist?: React.ReactNode; onShowPerson?: () => void }) {
   const queryClient = useQueryClient();
   const detail = useQuery({ queryKey: ['inbox', 'conversation', id], queryFn: () => inbox.get(id), refetchInterval: 5_000 });
+  // One timeline per person: their texts, calls and emails together, however they reached
+  // us. Email conversations open on their own thread instead: one sender often writes about
+  // several things, and each email thread is its own piece of work. The choice is remembered
+  // separately for email and for texts and calls.
+  const isEmail = detail.data?.conversation.channel === 'email';
+  const prefKey = isEmail ? 'inbox.wholeHistory.email' : 'inbox.wholeHistory';
+  const [picked, setPicked] = useState<Record<string, boolean>>({});
+  const stored = (() => {
+    try {
+      const v = localStorage.getItem(prefKey);
+      return v === null ? !isEmail : v !== 'off';
+    } catch {
+      return !isEmail;
+    }
+  })();
+  const whole = picked[prefKey] ?? stored;
+  const hasContact = !!detail.data?.contact;
+  const history = useQuery({ queryKey: ['inbox', 'history', id], queryFn: () => inbox.personHistory(id), enabled: whole && hasContact, refetchInterval: 5_000 });
+  const toggleWhole = () => {
+    const next = !whole;
+    setPicked((p) => ({ ...p, [prefKey]: next }));
+    try {
+      localStorage.setItem(prefKey, next ? 'on' : 'off');
+    } catch {
+      /* not remembered */
+    }
+  };
   const me = useInboxMe();
   const meta = useMeta();
   const [panel, setPanel] = useState<null | 'done' | 'snooze' | 'assign' | 'complaint'>(null);
@@ -37,12 +64,14 @@ export function ConversationView({ id, composerRef, assist }: { id: number; comp
   const mine = me.data && c.owner_id === me.data.id;
 
   return (
-    <div className="conv">
+    <div className={panel ? 'conv panel-open' : 'conv'}>
       <header className="conv-header">
         <div className="conv-who">
-          <div className="mobile-only small">
-            <Link to="/inbox">← Inbox</Link>
-            {d.contact && <> · <Link to={`/contacts/${d.contact.id}`}>Profile and bookings</Link></>}
+          <div className="mobile-only conv-mobile-nav">
+            <Link to="/inbox" className="conv-back">← Inbox</Link>
+            {d.contact && (onShowPerson
+              ? <button type="button" className="secondary conv-person" onClick={onShowPerson}>{d.contact.roles?.includes('cleaner') ? 'Cleaner' : 'Customer'} details →</button>
+              : <Link to={`/contacts/${d.contact.id}`}>Profile and bookings</Link>)}
           </div>
           <h2>
             {d.contact?.name || displayIdentity(c.their_identity) || 'Unknown sender'}
@@ -85,7 +114,14 @@ export function ConversationView({ id, composerRef, assist }: { id: number; comp
       {panel === 'complaint' && <ComplaintPanel initial={c.complaint} bookingId={c.l27_booking_id} onCancel={() => setPanel(null)} onSave={(complaint) => act.mutate(() => inbox.patch(id, { complaint }))} />}
       {c.needs_match && <MatchPanel detail={d} onMatch={(contactId) => act.mutate(() => inbox.match(id, contactId))} />}
 
-      <Timeline messages={d.messages} />
+      {d.contact && (d.others.length > 0 || (history.data?.conversations || 0) > 1) && (
+        <div className="tl-scope small">
+          <button type="button" className={whole ? 'tab active' : 'tab'} onClick={() => !whole && toggleWhole()}>Everything with {d.contact.name?.split(' ')[0] || 'them'}</button>
+          <button type="button" className={!whole ? 'tab active' : 'tab'} onClick={() => whole && toggleWhole()}>This {CHANNEL_LABEL[c.channel].toLowerCase()} thread only</button>
+          {whole && <span className="muted"> Texts, calls and emails in one timeline. Your reply goes by {CHANNEL_LABEL[c.channel].toLowerCase()}.</span>}
+        </div>
+      )}
+      <Timeline subject={c.subject} currentId={id} messages={whole && history.data ? history.data.messages.filter((m) => m.conversation_id === id || m.kind !== 'event') : d.messages} />
       {assist}
 
       {c.status === 'done' && c.disposition && (
@@ -99,20 +135,39 @@ export function ConversationView({ id, composerRef, assist }: { id: number; comp
   );
 }
 
-function Timeline({ messages }: { messages: Message[] }) {
+function Timeline({ messages, subject, currentId }: { messages: Message[]; subject?: string | null; currentId?: number }) {
   const end = useRef<HTMLDivElement>(null);
   useEffect(() => {
     // Braces matter: newer browsers return a promise from scrollIntoView, which React would treat as a cleanup.
     end.current?.scrollIntoView({ block: 'end' });
   }, [messages.length]);
   let lastDay = '';
+  // An email's subject shows only when it changes: the header already names the thread, and
+  // "Re: Booking" under "Booking" is the same subject.
+  let lastSubject = sameSubject(subject);
+  let lastOther: number | null = null;
   return (
     <div className="timeline">
       {messages.map((m) => {
         const day = dayHeading(m.created_at);
         const sep = day !== lastDay ? <div key={`d-${m.id}`} className="tl-day"><span>{day}</span></div> : null;
         lastDay = day;
-        return [sep, renderMessage(m)];
+        let showSubject = false;
+        if (m.kind === 'message' && m.channel === 'email' && m.subject) {
+          const s = sameSubject(m.subject);
+          showSubject = !!s && s !== lastSubject;
+          lastSubject = s || lastSubject;
+        }
+        // In "Everything with them", say which other conversation a message belongs to, so a
+        // reply here is not mistaken for an answer to it.
+        const other = currentId && m.conversation_id && m.conversation_id !== currentId && m.kind !== 'event';
+        const tag = other && m.conversation_id !== lastOther ? (
+          <div key={`o-${m.id}`} className="tl-other">
+            From another conversation{m.subject ? <>: <b>{m.subject}</b></> : ''} · <Link to={`/inbox/${m.conversation_id}`}>Open</Link>
+          </div>
+        ) : null;
+        lastOther = other ? m.conversation_id : null;
+        return [sep, tag, renderMessage(m, showSubject && !other)];
       })}
       <div ref={end} />
     </div>
@@ -150,7 +205,34 @@ function deliveryLabel(state: string | null) {
   }
 }
 
-function renderMessage(m: Message) {
+// A long message starts as a preview (about 8 lines, faded) that the agent can open.
+// Measured, so short messages look exactly as before and only real overflow gets the button.
+function LongText({ text, className = 'pre' }: { text: string; className?: string }) {
+  const box = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const [long, setLong] = useState(false);
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (el && !open) setLong(el.scrollHeight > el.clientHeight + 4);
+  }, [text, open]);
+  return (
+    <>
+      <div ref={box} className={`${className}${open ? '' : ' clamp'}${long && !open ? ' faded' : ''}`}>{text}</div>
+      {(long || open) && (
+        <button type="button" className="link small show-more" aria-expanded={open} onClick={() => setOpen(!open)}>
+          {open ? 'Show less' : 'Show more'}
+        </button>
+      )}
+    </>
+  );
+}
+
+// "Re: RE: Fwd: Booking  next week" and "booking next week" are the same subject.
+export function sameSubject(s?: string | null) {
+  return String(s || '').replace(/^\s*((re|fw|fwd|tr|aw|sv)(\[\d+\])?\s*:\s*)+/i, '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function renderMessage(m: Message, showSubject = true) {
         if (m.kind === 'event') {
           return (
             <div key={m.id} className="tl-event">
@@ -162,7 +244,7 @@ function renderMessage(m: Message) {
           return (
             <div key={m.id} className="tl-msg note">
               <div className="tl-meta"><Icon name="note" size={13} /> Internal note · {m.author_name} · {fmtTime(m.created_at)}</div>
-              <div className="pre">{m.body}</div>
+              <LongText text={m.body || ''} />
             </div>
           );
         }
@@ -177,11 +259,12 @@ function renderMessage(m: Message) {
         const notSent = m.delivery_state === 'not_connected' || m.delivery_state === 'failed';
         return (
           <div key={m.id} className={`tl-msg ${m.direction}`}>
-            {m.subject && m.channel === 'email' && <div className="tl-subject">{m.subject}</div>}
-            <div className="pre">{m.body}</div>
+            {showSubject && m.subject && m.channel === 'email' && <div className="tl-subject">{m.subject}</div>}
+            <LongText text={m.body || ''} />
             {m.channel === 'email' && <EmailExtras m={m} />}
             <div className="tl-meta">
               {m.channel && <Icon name={m.channel} size={12} />} {m.channel ? CHANNEL_LABEL[m.channel] : ''} · {m.direction === 'out' ? m.author_name || 'Agent' : displayIdentity(m.from_addr)} · {fmtTime(m.created_at)}
+              {m.direction === 'out' && !!m.meta?.via && <span className="muted"> · sent from {String(m.meta.via)}</span>}
               {m.direction === 'out' && <span className={notSent ? 'delivery bad' : 'delivery'}> · {deliveryLabel(m.delivery_state)}</span>}
               {m.direction === 'out' && m.delivery_state === 'failed' && m.channel === 'sms' && m.meta?.note && <div className="error small">{String(m.meta.note)}</div>}
             </div>
@@ -190,6 +273,75 @@ function renderMessage(m: Message) {
 }
 
 // Email details under a message: who else was copied, attachment names, the quoted history.
+const fileSize = (n: number) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n || 0} B`);
+
+// What kind of file it is, from its name: a short label and a colour for the badge.
+const FILE_KINDS: [RegExp, string, string][] = [
+  [/\.pdf$/i, 'PDF', 'pdf'],
+  [/\.(docx?|rtf|odt|pages)$/i, 'DOC', 'doc'],
+  [/\.(xlsx?|csv|ods|numbers)$/i, 'XLS', 'xls'],
+  [/\.(pptx?|key)$/i, 'PPT', 'ppt'],
+  [/\.(png|jpe?g|gif|webp|heic|bmp|svg)$/i, 'IMG', 'img'],
+  [/\.(zip|rar|7z|gz)$/i, 'ZIP', 'zip'],
+  [/\.(mp3|m4a|wav|ogg)$/i, 'AUD', 'aud'],
+  [/\.(mp4|mov|avi|webm)$/i, 'VID', 'vid'],
+  [/\.(txt|md|log)$/i, 'TXT', 'txt'],
+];
+export const fileKind = (name: string) => {
+  const hit = FILE_KINDS.find(([re]) => re.test(name));
+  return hit ? { label: hit[1], cls: hit[2] } : { label: (name.split('.').pop() || 'FILE').slice(0, 4).toUpperCase(), cls: 'other' };
+};
+
+// A file shown as a small card: what kind it is, its name and size.
+function FileCard({ name, size, note, action }: { name: string; size: number; note?: string | null; action?: React.ReactNode }) {
+  const kind = fileKind(name);
+  return (
+    <span className="file-card" title={name}>
+      <span className={`file-badge ${kind.cls}`} aria-hidden="true">{kind.label}</span>
+      <span className="file-text">
+        <span className="file-name">{name}</span>
+        <span className="file-size">{note || fileSize(size)}</span>
+      </span>
+      {action}
+    </span>
+  );
+}
+
+// One file on an email in the timeline. Pressing it fetches the file from the mailbox and saves it.
+function FileChip({ messageId, index, file, canGet }: { messageId: number; index: number; file: { filename: string; size: number }; canGet: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const get = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/messages/${messageId}/attachments/${index}`, { credentials: 'same-origin' });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.error || `Could not get the file (${res.status})`);
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = file.filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (!canGet) return <span className="file-card-wrap off" title="Recorded on a test message; there is no file to download"><FileCard name={file.filename} size={file.size} note={`${fileSize(file.size)} · test message, no file kept`} /></span>;
+  return (
+    <span className="file-card-wrap">
+      <button type="button" className="file-card-btn" disabled={busy} onClick={get} aria-label={`Download ${file.filename}`}>
+        <FileCard name={file.filename} size={file.size} note={busy ? 'Downloading…' : error ? null : `${fileSize(file.size)} · Download`} action={<span className="file-act" aria-hidden="true"><Icon name="download" size={16} /></span>} />
+      </button>
+      {error && <span className="error small file-error">{error} <button type="button" className="link small" onClick={get}>Try again</button></span>}
+    </span>
+  );
+}
+
 function EmailExtras({ m }: { m: Message }) {
   const [open, setOpen] = useState(false);
   const cc = Array.isArray(m.meta?.cc) ? (m.meta.cc as string[]) : [];
@@ -199,12 +351,16 @@ function EmailExtras({ m }: { m: Message }) {
   return (
     <div className="small muted email-extras">
       {cc.length > 0 && <div>Cc: {cc.join(', ')}</div>}
-      {files.length > 0 && <div><Icon name="note" size={12} /> {files.map((f) => f.filename).join(', ')} <span>(open the mailbox in Gmail to download)</span></div>}
+      {files.length > 0 && (
+        <div className="email-files">
+          {files.map((f, i) => <FileChip key={`${i}-${f.filename}`} messageId={m.id} index={i} file={f} canGet={!!m.meta?.gmail_id} />)}
+        </div>
+      )}
       {m.delivery_state === 'failed' && m.meta?.note && <div className="error small">Not sent: {String(m.meta.note)}</div>}
       {full && (
         <>
           <button type="button" className="link small" onClick={() => setOpen(!open)}>{open ? 'Hide earlier messages' : 'Show earlier messages in this email'}</button>
-          {open && <div className="pre quoted">{full}</div>}
+          {open && <LongText text={full} className="pre quoted" />}
         </>
       )}
     </div>
@@ -217,7 +373,10 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
   const location = useLocation();
   const key = `conv:${c.id}`;
   const [mode, setMode] = useState<'reply' | 'note'>('reply');
-  const [text, setText] = useState(() => drafts.get(key) || (location.state as { prefill?: string } | null)?.prefill || '');
+  // Started from "New conversation" and nothing in it yet: the draft is kept on the server,
+  // so the conversation shows in the inbox only once something is written.
+  const startedEmpty = c.routed_by === 'Started by agent' && !detail.messages.some((m) => m.conversation_id === c.id && ['message', 'note', 'call'].includes(m.kind));
+  const [text, setText] = useState(() => drafts.get(key) || (startedEmpty ? c.draft : null) || (location.state as { prefill?: string } | null)?.prefill || '');
   const [channel, setChannel] = useState<Channel>(c.channel === 'voice' || c.channel === 'chat' ? (detail.contact?.identities.some((i) => i.kind === 'phone') ? 'sms' : 'email') : c.channel);
   const [to, setTo] = useState('');
   const [from, setFrom] = useState('');
@@ -226,6 +385,12 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
   const [busy, setBusy] = useState(false);
   const sendKey = useRef<string | null>(null);
   const area = useRef<HTMLTextAreaElement>(null);
+
+  // A conversation just started from "New conversation": the cursor is already in the reply box.
+  useEffect(() => {
+    if (startedEmpty) area.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once, when the conversation opens
+  }, []);
 
   useImperativeHandle(ref, () => ({
     insert: (t: string) => {
@@ -237,6 +402,15 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
   useEffect(() => {
     drafts.set(key, text);
   }, [key, text]);
+  const savedDraft = useRef(c.draft || '');
+  useEffect(() => {
+    if (!startedEmpty || mode !== 'reply' || text === savedDraft.current) return;
+    const t = setTimeout(() => {
+      savedDraft.current = text;
+      inbox.saveDraft(c.id, text).catch(() => {});
+    }, 800);
+    return () => clearTimeout(t);
+  }, [startedEmpty, mode, text, c.id]);
 
   const kind = channel === 'email' ? 'email' : 'phone';
   const targets = (detail.contact?.identities || []).filter((i) => i.kind === kind);
@@ -302,10 +476,15 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
         {mode === 'reply' && (
           <div className="composer-route small">
             to
-            <select value={target} onChange={(e) => setTo(e.target.value)}>
-              {target && !targets.some((t) => t.value === target) && <option value={target}>{displayIdentity(target)}</option>}
-              {targets.map((t) => <option key={t.id} value={t.value}>{displayIdentity(t.value)}{t.opted_out ? ' (STOP)' : ''}</option>)}
-            </select>
+            {targets.length || defaultTo ? (
+              <select value={target} onChange={(e) => setTo(e.target.value)}>
+                {target && !targets.some((t) => t.value === target) && <option value={target}>{displayIdentity(target)}</option>}
+                {targets.map((t) => <option key={t.id} value={t.value}>{displayIdentity(t.value)}{t.opted_out ? ' (STOP)' : ''}</option>)}
+              </select>
+            ) : (
+              // Nothing on file for this channel: type where it should go.
+              <input className="composer-to" type={channel === 'email' ? 'email' : 'tel'} inputMode={channel === 'email' ? 'email' : 'tel'} autoComplete="off" placeholder={channel === 'email' ? 'Their email address' : 'Their mobile number'} aria-label={channel === 'email' ? 'Email address to send to' : 'Number to text'} value={to} onChange={(e) => setTo(e.target.value)} />
+            )}
             from
             <select value={sender} onChange={(e) => setFrom(e.target.value)}>
               {sender && !fromOptions?.includes(sender) && <option value={sender}>{displayIdentity(sender)}</option>}
@@ -343,11 +522,11 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
       {error && <div className="error small">{error}</div>}
       {optedOut && <div className="error small">This number replied STOP. Texts are blocked until they text START.</div>}
       <div className="composer-foot">
-        <span className="muted small">
+        <span className="muted small composer-hint">
           {mode === 'reply' && !connected && `${CHANNEL_LABEL[channel]} isn't connected yet: replies are saved, not sent.`}
           {mode === 'reply' && connected && sandboxed && !emailLocked && 'Sandbox: replies are recorded here, not sent to the customer.'}
           {mode === 'reply' && channel === 'sms' && text && <span className="mono"> {text.length} chars · {segments} text{segments === 1 ? '' : 's'}</span>}
-          {!text && <span> Type <span className="kbd">/</span> for saved replies · <span className="kbd">Ctrl</span>+<span className="kbd">Enter</span> to send</span>}
+          {!text && <span className="composer-keys"> Type <span className="kbd">/</span> for saved replies · <span className="kbd">Ctrl</span>+<span className="kbd">Enter</span> to send</span>}
         </span>
         <button disabled={busy || !text.trim() || !!optedOut || emailLocked || (mode === 'reply' && needsSubject && !subject.trim())} title={emailLocked ? 'Email is read-only' : mode === 'reply' && needsSubject && !subject.trim() ? 'Add a subject first' : undefined} className={mode === 'note' ? 'note-btn' : ''} onClick={send}>
           {mode !== 'note' && <Icon name="send" />}
@@ -358,7 +537,7 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
   );
 });
 
-function DonePanel({ initial, roles, meta, busy, onCancel, onSave }: { initial: Disposition; roles: string[]; meta: { audience: string[]; reason: string[]; outcome: string[]; cancellationReasons: string[] }; busy: boolean; onCancel: () => void; onSave: (d: Disposition) => void }) {
+export function DonePanel({ initial, roles, meta, busy, onCancel, onSave }: { initial: Disposition; roles: string[]; meta: { audience: string[]; reason: string[]; outcome: string[]; cancellationReasons: string[] }; busy: boolean; onCancel: () => void; onSave: (d: Disposition) => void }) {
   const guess = roles.includes('cleaner') ? 'Cleaner' : roles.includes('applicant') ? 'Applicant' : roles.includes('customer') ? 'Customer' : undefined;
   const [d, setD] = useState<Disposition>({ audience: guess, ...initial });
   const set = (k: keyof Disposition) => (e: React.ChangeEvent<HTMLSelectElement | HTMLInputElement>) => setD({ ...d, [k]: e.target.value || undefined });

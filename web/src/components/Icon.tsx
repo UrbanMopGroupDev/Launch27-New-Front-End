@@ -52,6 +52,8 @@ const PATHS: Record<string, string[]> = {
   menu: ['M4 7h16', 'M4 12h16', 'M4 17h10'],
   close: ['m6 6 12 12', 'M18 6 6 18'],
   chevron: ['m9 6 6 6-6 6'],
+  download: ['M12 4v11', 'm7 11 5 5 5-5', 'M5 20h14'],
+  filter: ['M3 5h18', 'M6 12h12', 'M10 19h4'],
   'chevron-down': ['m6 9 6 6 6-6'],
   'panel-close': ['M4 5h16v14H4z', 'M9.5 5v14', 'm16 10-2 2 2 2'],
   'panel-open': ['M4 5h16v14H4z', 'M9.5 5v14', 'm14 10 2 2-2 2'],

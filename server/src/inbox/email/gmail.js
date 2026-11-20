@@ -9,7 +9,7 @@
 // mark mail as read, so the team can keep using Gmail alongside the inbox.
 import { createSign } from 'node:crypto';
 import { normalizeEmail } from '../normalize.js';
-import { buildMessage, toBase64Url } from './mime.js';
+import { attachmentParts, buildMessage, toBase64Url } from './mime.js';
 
 // Email is read-only (channels.js EMAIL_SENDING_ENABLED): only the read permission is requested,
 // so Google itself refuses any attempt to send. Sending later also needs GMAIL_SEND_SCOPE here.
@@ -168,6 +168,17 @@ export function createGmailConnector({ client, mailboxes, fromName = null }) {
         // keep ours
       }
       return { id: sent.id, thread_key: threadKey(account, sent.threadId), message_id: finalId };
+    },
+    /**
+     * One file from a received email: { filename, type, data: Buffer }. Read from Gmail when
+     * an agent asks for it; the portal keeps no copy. Reading only: nothing is sent.
+     */
+    async attachment({ mailbox, gmailId, index }) {
+      const parts = attachmentParts(await client.message(mailbox, gmailId));
+      const part = parts[index];
+      if (!part) throw new GmailError(404, 'That file is no longer on the email in Gmail');
+      const data = part.attachmentId ? Buffer.from((await client.attachment(mailbox, gmailId, part.attachmentId)).data || '', 'base64url') : Buffer.from(part.data || '', 'base64url');
+      return { filename: part.filename, type: part.type, data };
     },
   };
 }
