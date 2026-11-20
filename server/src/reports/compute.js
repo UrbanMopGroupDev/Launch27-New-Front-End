@@ -148,15 +148,14 @@ export function periodRange(today, period) {
   return { from: addDays(today, -days), to: addDays(today, -1), days };
 }
 
-// Re-cleans from Launch27 (the same rule as the Complaint engine): a visit on the "Reclean"
-// service, or a $0 visit (not prepaid, not a partner), up to RECLEAN_DAYS after the client's
-// last regular clean. Charged to the cleaner(s) of that original clean, not whoever went back.
-export const RECLEAN_DAYS = 14;
+// Re-cleans from Launch27: a visit on the "Reclean" service. It is charged to the cleaner(s)
+// of the client's last regular clean before it (the clean that prompted it, up to RECLEAN_DAYS
+// earlier), not to whoever went back.
+export const RECLEAN_DAYS = 30;
 const RECLEAN_SERVICE = /\bre-?clean/i;
+// Only the Launch27 "Reclean" service counts. ($0 visits can be comps, so they're left out.)
 export function isRecleanVisit(v) {
-  if ((v.services || []).some((n) => RECLEAN_SERVICE.test(n))) return 'service';
-  if ((v.revenue || 0) === 0 && !/prepaid/i.test(v.freq || '') && !v.partner_kind) return 'free';
-  return null;
+  return (v.services || []).some((n) => RECLEAN_SERVICE.test(n)) ? 'service' : null;
 }
 export function findRecleans(byCustomer, days = RECLEAN_DAYS) {
   const out = new Map(); // cleaner id -> [{ date, customer, original_date, how, by, visit_id }]
@@ -172,12 +171,11 @@ export function findRecleans(byCustomer, days = RECLEAN_DAYS) {
         const gap = daysBetween(p.date, v.date);
         if (gap > days) break;
         if (p.at >= v.at || isRecleanVisit(p)) continue;
-        if (how === 'free' && gap < 1) continue; // same-day $0 rows are usually a split booking
         orig = p;
         break;
       }
       if (!orig) continue;
-      const ev = { date: v.date, customer: v.customer, original_date: orig.date, how, by: v.teams.map((t) => t.name), visit_id: v.id };
+      const ev = { date: v.date, customer: v.customer, customer_id: v.customer_id, original_date: orig.date, original_by: orig.teams.map((t) => t.name), gap_days: daysBetween(orig.date, v.date), how, by: v.teams.map((t) => t.name), visit_id: v.id };
       for (const t of orig.teams) {
         if (!out.has(t.id)) out.set(t.id, []);
         out.get(t.id).push(ev);
@@ -254,6 +252,7 @@ export function cleanerStats(visits, byCustomer, from, to, today, rules = LESLIE
         if (tm.distance != null) s.km.push(tm.distance);
       }
       if (v.rating) {
+        s.ratedList.push({ date: v.date, customer: v.customer, r: v.rating.r, comment: v.rating.comment || null });
         s.rated++;
         if (v.rating.r === 2) s.happy++;
         if (v.rating.r === 0) {
@@ -294,7 +293,7 @@ export function cleanerStats(visits, byCustomer, from, to, today, rules = LESLIE
   return map;
 }
 
-const emptyStats = (id, name) => ({ id, name, visits: 0, onsiteMin: 0, bookedMin: 0, tracked: 0, onTime: 0, lateMin: [], lateList: [], long: 0, early: 0, earlyList: [], residential: 0, missing: [], enroute: 0, km: [], rated: 0, happy: 0, unhappy: 0, unhappyRecent: 0, revenue: 0, earned: 0, earnedKnown: false, marginRev: 0, marginPay: 0, last40: [] });
+const emptyStats = (id, name) => ({ id, name, visits: 0, onsiteMin: 0, bookedMin: 0, tracked: 0, onTime: 0, lateMin: [], lateList: [], long: 0, early: 0, earlyList: [], residential: 0, missing: [], ratedList: [], enroute: 0, km: [], rated: 0, happy: 0, unhappy: 0, unhappyRecent: 0, revenue: 0, earned: 0, earnedKnown: false, marginRev: 0, marginPay: 0, last40: [] });
 export { emptyStats };
 
 // The team's overtime picture (cleans 15%+ over booked time) from everyone's last 40 visits:

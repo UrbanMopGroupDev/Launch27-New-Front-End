@@ -5,6 +5,7 @@ import { V2, findRecleans, isRecleanVisit, slimReportVisit, timing, indexVisits,
 import { classifyDrop, ladderOf, raiseReview, rateHistory, reliability, reliabilityWeeks, restrictiveTags, slackSummary, torontoInstant } from '../src/reports/raise.js';
 import { RAISE_THRESHOLDS } from '../src/reports/raise-config.js';
 import { createReports } from '../src/reports/service.js';
+import { adjustmentKind, nameMatcher, parseAdjustmentRows, parseSheetDate } from '../src/reports/adjustments.js';
 import { createSchedule } from '../src/schedule/service.js';
 import { createMockLaunch27 } from '../src/mock/launch27.js';
 import { openDb } from '../src/db/index.js';
@@ -384,11 +385,14 @@ describe('Cleaner reports 2.0 next to Leslie\'s', () => {
       assert.ok(r.churned >= 0 && r.at_risk >= 0);
     }
     const row = v2.rows.find((r) => r.id === someone.id);
-    assert.equal(row.reliability2, 2, 'one no-show + one last-minute cancellation');
-    // Reliability score: share of visits (+ dropped ones) with no issue; its parts are kept.
+    // The app's own drop log (one no-show + one late cancel) plus this cleaner's sheet rows.
+    const sheetRows = (await db.query("SELECT kind FROM pay_adjustments WHERE cleaner_name = $1 AND kind IN ('no_show', 'late_cancel')", [row.name])).rows;
     const rs = row.reliability_score;
-    assert.equal(rs.no_shows, 1);
-    assert.equal(rs.late_cancels, 1);
+    assert.equal(rs.no_shows, 1 + sheetRows.filter((x) => x.kind === 'no_show').length);
+    assert.equal(rs.late_cancels, 1 + sheetRows.filter((x) => x.kind === 'late_cancel').length);
+    assert.equal(row.reliability2, rs.no_shows + rs.late_cancels);
+    assert.equal(row.drill.no_shows.length, rs.no_shows, 'each number opens the rows behind it');
+    assert.equal(row.drill.late_cancels.length, rs.late_cancels);
     assert.equal(rs.issues, rs.no_shows + rs.late_cancels + rs.short_notice + rs.missing_checks);
     assert.equal(rs.score, Math.round((1 - rs.issues / (row.visits + 2)) * 1000) / 1000);
     assert.equal(row.complaints_n, 2);
@@ -407,20 +411,109 @@ describe('Cleaner reports 2.0 next to Leslie\'s', () => {
 });
 
 describe('Re-cleans from Launch27', () => {
-  test('a Reclean service or a $0 visit within 14 days is charged to the original cleaner', () => {
-    const mk = (date, team, { revenue = 200, service = 'Standard Cleaning', freq = 'Biweekly', partner_kind = null } = {}) => ({ id: nextId++, date, at: Date.parse(`${date}T14:00:00Z`), customer: 'Client', customer_id: 1, revenue, services: [service], freq, partner_kind, teams: [{ id: team, name: `C${team}` }] });
+  test('only the Reclean service counts, charged to the cleaner of the clean that prompted it', () => {
+    const mk = (date, team, { revenue = 200, service = 'Standard Cleaning' } = {}) => ({ id: nextId++, date, at: Date.parse(`${date}T14:00:00Z`), customer: 'Client', customer_id: 1, revenue, services: [service], teams: [{ id: team, name: `C${team}` }] });
     const list = [
       mk('2026-10-01', 7),
-      mk('2026-10-04', 8, { revenue: 0, service: 'Reclean' }), // Reclean 3 days later by someone else -> charged to 7
+      mk('2026-10-04', 8, { revenue: 0, service: 'Reclean' }), // someone else goes back -> charged to 7
       mk('2026-10-15', 7),
-      mk('2026-10-20', 7, { revenue: 0 }), // $0, 5 days later -> charged to 7
-      mk('2026-11-20', 9, { revenue: 0 }), // $0, 31 days after the last clean -> not a re-clean
-      mk('2026-11-25', 9, { revenue: 0, freq: 'Weekly - Prepaid' }), // prepaid $0 is normal
+      mk('2026-10-20', 7, { revenue: 0 }), // a $0 visit may be a comp: not a re-clean
+      mk('2026-12-20', 9, { revenue: 0, service: 'Reclean' }), // 66 days after the last clean: nothing prompted it
     ];
     const found = findRecleans(new Map([[1, list]]));
-    assert.deepEqual(found.get(7).map((e) => [e.date, e.original_date, e.how]), [['2026-10-04', '2026-10-01', 'service'], ['2026-10-20', '2026-10-15', 'free']]);
+    assert.deepEqual(found.get(7).map((e) => [e.date, e.original_date, e.original_by, e.by, e.gap_days]), [['2026-10-04', '2026-10-01', ['C7'], ['C8'], 3]]);
     assert.equal(found.get(8), undefined, 'the cleaner who went back is not charged');
     assert.equal(found.get(9), undefined);
-    assert.equal(isRecleanVisit(mk('2026-10-01', 7, { revenue: 0, partner_kind: 'homemaking' })), null, 'partner visits are billed differently');
+    assert.equal(isRecleanVisit(mk('2026-10-01', 7, { revenue: 0 })), null);
+  });
+});
+
+describe('Pay adjustments sheet', () => {
+  test('dates, reasons and rows as the office types them', () => {
+    assert.equal(parseSheetDate('13/11/2026'), '2026-11-13');
+    assert.equal(parseSheetDate('30/01/2024 00:00:00'), '2024-01-30');
+    assert.equal(parseSheetDate('2024-07-14 04:00:00'), '2024-07-14');
+    assert.equal(parseSheetDate('Google Review -2026-11-04T00:00:00.000Z - 5-Star'), '2026-11-04');
+    assert.equal(parseSheetDate('January 29th'), null, 'no year: left undated');
+    assert.equal(adjustmentKind('Cleaner-Initiated Last Min Cancellation', -30, 'Deduction'), 'late_cancel');
+    assert.equal(adjustmentKind('Client-Initiated Last Min Cancellation', 44, 'Addition'), 'client_cancel');
+    assert.equal(adjustmentKind('Last Minute Cancellation', -30, 'Deduction'), 'late_cancel');
+    assert.equal(adjustmentKind('Last Minute Cancellation', 30, 'Addition'), 'client_cancel');
+    assert.equal(adjustmentKind('No Show', -100, 'Deduction'), 'no_show');
+    assert.equal(adjustmentKind(' late arrival', -30, ''), 'late_arrival');
+    assert.equal(adjustmentKind('Google Review', 10, ''), 'google_review');
+    assert.equal(adjustmentKind('Parking Ticket', 20, ''), 'other');
+    const rows = parseAdjustmentRows([
+      ['Mai Anh Thu Le ', '-30', 'Cleaner-Initiated Last Min Cancellation', '18/11/2026', 'Sample Client A', 'Deduction', 'x', 'Office A', ''],
+      ['Robin Carter', '10', 'Google Review', '04/11/2026', 'Sample Client B', 'Addition', '', 'Office A', 'Valid'],
+      ['Dana Fielding', '10', 'Google Review', '', 'Sample Client C', '', '', '', 'Invalid'],
+      ['Lou Fils-Marin', '44', 'Client-Initiated Last Min Cancellation', '13/11/2026', '(OWCS)', 'Addition', '', 'Office B', 'Valid'],
+      ['Ada Okoro [Team]', '-100', 'No Show', '14/07/2024', 'A', 'Deduction', '', 'Office C', 'Valid'],
+    ]);
+    assert.deepEqual(rows.map((r) => [r.row_no, r.cleaner_name, r.kind, r.on_date, r.valid]), [
+      [2, 'Mai Anh Thu Le', 'late_cancel', '2026-11-18', true],
+      [3, 'Robin Carter', 'google_review', '2026-11-04', true],
+      [4, 'Dana Fielding', 'google_review', null, false],
+      [6, 'Ada Okoro', 'no_show', '2024-07-14', true],
+    ], 'client-initiated cancellations are not the cleaner\'s, so they are left out');
+  });
+
+  test('sheet names match Launch27 cleaners; ambiguous ones stay unmatched', () => {
+    const match = nameMatcher([{ id: 1, name: 'Samira Nakato' }, { id: 2, name: 'Robin Carter' }, { id: 3, name: 'Robin Martin' }, { id: 4, name: 'Jean-André Dubois' }, { id: 5, name: 'Mai Anh Thu Le' }]);
+    assert.equal(match('Samira '), 1, 'a first name only one cleaner has');
+    assert.equal(match('samira nakato'), 1);
+    assert.equal(match('Robin'), null, 'two Robins: not guessed');
+    assert.equal(match('Robin Carter'), 2);
+    assert.equal(match('Jean-Andre Dubois'), 4, 'accents and hyphens ignored');
+    assert.equal(match('Thu Le'), 5);
+    assert.equal(match('Somebody Else'), null);
+  });
+
+  test('the sheet feeds reliability and Google reviews; unmatched names are listed for admins', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await schedule.sync();
+    await reports.sync();
+    const before = await reports.cleaners2('13w', { admin: true });
+    assert.equal(before.adjustments.connected, true);
+    assert.ok(before.rows.every((r) => r.reliability_score.drops_known), 'with the sheet, reliability is known for the whole period');
+    const someone = before.rows.find((r) => r.visits >= 20);
+    const today = new Date().toISOString().slice(0, 10);
+    await db.query("INSERT INTO pay_adjustments (row_no, cleaner_name, kind, amount, on_date, customer) VALUES (900, $1, 'no_show', -100, $2, 'Test Client'), (901, $1, 'google_review', 10, $2, 'Happy Client'), (902, 'Nobody Known', 'late_cancel', -30, $2, 'X')", [someone.name.split(' ')[0] === someone.name ? someone.name : someone.name, today]);
+    const after = await reports.cleaners2('13w', { admin: true });
+    const row = after.rows.find((r) => r.id === someone.id);
+    const was = before.rows.find((r) => r.id === someone.id);
+    assert.equal(row.reliability_score.no_shows, was.reliability_score.no_shows + 1);
+    assert.equal(row.google_reviews, was.google_reviews + 1);
+    assert.ok(row.drill.reviews.some((g) => g.reviewer === 'Happy Client'));
+    assert.deepEqual(after.adjustments.unmatched, [{ name: 'Nobody Known', rows: 1 }]);
+    const asAgent = await reports.cleaners2('13w', { admin: false });
+    assert.equal(asAgent.adjustments.unmatched, undefined);
+    // A no-show on the sheet blocks a raise, like one logged in the app.
+    const page = await reports.cleaner2(someone.id, '13w', { admin: true });
+    assert.equal(page.raise.underlying, 'not_yet');
+    assert.ok(page.raise.gates.some((g) => /no-show/.test(g)));
+  });
+
+  test('churn rows say who cleaned last and how much of the client was theirs', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await schedule.sync();
+    await reports.sync();
+    const v2 = await reports.cleaners2('12m', { admin: true });
+    const all = v2.rows.flatMap((r) => r.drill.churn);
+    assert.ok(all.length > 0);
+    for (const c of all) {
+      assert.ok(Array.isArray(c.last_cleaner) && c.last_clean && c.days_since >= 7);
+      assert.ok(c.share >= 0 && c.share <= 1 && c.cleans <= c.total_cleans);
+      assert.equal(c.loyal, c.cleans >= 5 && c.share >= 0.8);
+    }
+    for (const r of v2.rows) assert.equal(r.churned + r.at_risk, r.drill.churn.length);
   });
 });

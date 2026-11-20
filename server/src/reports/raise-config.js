@@ -88,4 +88,4 @@ export const LADDER = ['Regular', 'Flex', 'Team Lead', 'Trainer'];
 // Cleaner reports 2.0 churn: a recurring client with nothing booked ahead (schedule cancelled)
 // is "at risk" from minGap days without a clean, and "churned" at `days` days. 60 rather than
 // 45 so a monthly client who skips one visit isn't counted as lost.
-export const CHURN = { days: 60, minGap: 7, flagAt: 2 }; // flagAt: churned clients in the period for a Needs attention flag
+export const CHURN = { days: 60, minGap: 7, flagAt: 2, loyalCleans: 5, loyalShare: 0.8, loyalFlagAt: 2 }; // flagAt: churned clients in the period for a Needs attention flag
