@@ -609,8 +609,10 @@ describe('kpi live connectors (production path), run against the synthetic Launc
       m3: { internalDate: String(Date.parse('2026-09-12T14:00:00Z')), payload: { parts: [{ filename: 'notes.docx', body: { attachmentId: 'x' } }] } },
       // Earlier months used other file names; one PDF with a matching name is another company's.
       m4: { internalDate: String(Date.parse('2026-05-11T14:00:00Z')), payload: { parts: [pdf('UrbanMop April Management Report V1.pdf', 'apr'), pdf('UrbanMop Monthly Report -Other.pdf', 'other-co')] } },
+      // The US company's report: similar name and layout, must never land on this brand.
+      m5: { internalDate: String(Date.parse('2026-09-20T14:00:00Z')), payload: { parts: [pdf('UrbanMop US Syft Report - August 2026 (Draft).pdf', 'us-name'), pdf('UrbanMop Syft Report - August 2026.pdf', 'us-cover')] } },
     };
-    const reports = { 'aug-v1': ['UrbanMop Inc.', 'Aug 2026  Jul 2026  Variance  Variance (%)', 'Total Income  $100,000  $95,000', 'Operational Cost Ratio  61.5%  60.2%'], apr: ['UM Canada Monthly Report', 'Apr 2026  Mar 2026  Variance  Variance (%)', 'Total Income  $90,000  $88,000', 'Operational Cost Ratio  59.0%  58.5%'], 'other-co': ['Some Other Co.', 'Apr 2026  Mar 2026  Variance  Variance (%)', 'Operational Cost Ratio  10.0%  11.0%'], 'aug-v2': ['UrbanMop Inc.', 'Aug 2026  Jul 2026  Variance  Variance (%)', 'Total Income  $101,000  $95,000', 'Operational Cost Ratio  62.0%  60.2%'] };
+    const reports = { 'aug-v1': ['UrbanMop Inc.', 'Aug 2026  Jul 2026  Variance  Variance (%)', 'Total Income  $100,000  $95,000', 'Operational Cost Ratio  61.5%  60.2%'], apr: ['UM Canada Monthly Report', 'Apr 2026  Mar 2026  Variance  Variance (%)', 'Total Income  $90,000  $88,000', 'Operational Cost Ratio  59.0%  58.5%'], 'us-cover': ['UrbanMop US Monthly Report', 'Aug 2026  Jul 2026  Variance  Variance (%)', 'Operational Cost Ratio  30.0%  31.0%'], 'other-co': ['Some Other Co.', 'Apr 2026  Mar 2026  Variance  Variance (%)', 'Operational Cost Ratio  10.0%  11.0%'], 'aug-v2': ['UrbanMop Inc.', 'Aug 2026  Jul 2026  Variance  Variance (%)', 'Total Income  $101,000  $95,000', 'Operational Cost Ratio  62.0%  60.2%'] };
     const gmail = {
       search: async (account, q) => (calls.push(['search', account, q]), { ids: Object.keys(mail), next: null }),
       message: async (account, id) => (calls.push(['message', id]), mail[id]),
@@ -622,6 +624,7 @@ describe('kpi live connectors (production path), run against the synthetic Launc
     const got = (await syft.pull()).syft;
     assert.deepEqual(got.map((r) => [r.month, r.ocr_pct, r.income, !!r.restated]), [['2026-03', 58.5, null, true], ['2026-04', 59, 90000, false], ['2026-07', 60.2, null, true], ['2026-08', 62, 101000, false]]);
     assert.ok(!calls.some((c) => c[1] === 'lux'));
+    assert.ok(!calls.some((c) => c[1] === 'us-name'));
     assert.equal(calls[0][1], 'books@example.com');
     // Second run: nothing is downloaded again.
     const before = calls.length;
