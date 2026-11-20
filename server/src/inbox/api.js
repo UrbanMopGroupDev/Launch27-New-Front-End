@@ -1357,7 +1357,7 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
         throw err;
       }
     });
-    const q = (req) => ({ brand: req.query.brand ? String(req.query.brand) : null, month: req.query.month ? String(req.query.month) : null, mode: String(req.query.mode || 'month'), outage: req.query.outage ? String(req.query.outage) : null });
+    const q = (req) => ({ brand: req.query.brand ? String(req.query.brand) : null, month: req.query.month ? String(req.query.month) : null, mode: String(req.query.mode || 'month'), outage: req.query.outage ? String(req.query.outage) : null, from: req.query.from ? String(req.query.from) : null, to: req.query.to ? String(req.query.to) : null });
     r.get('/kpi/scorecard', k((req) => kpi.scorecard(q(req))));
     r.get('/kpi/drill', k((req) => kpi.drill({ ...q(req), kpi: String(req.query.kpi || '') })));
     r.post('/kpi/refresh', k((req) => kpi.refresh({ bearer: req.bearer })));

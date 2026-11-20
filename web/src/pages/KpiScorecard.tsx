@@ -23,8 +23,11 @@ export function KpiScorecardPage() {
   // Summary for a quick read; Detailed opens every tile's breakdown. Remembered per browser.
   const [view, setView] = useState<'summary' | 'detailed'>(() => { try { return localStorage.getItem('kpi:view') === 'detailed' ? 'detailed' : 'summary'; } catch { return 'summary'; } });
   const pickView = (v: 'summary' | 'detailed') => { setView(v); try { localStorage.setItem('kpi:view', v); } catch { /* storage unavailable */ } };
-  const query: Query = { brand, month, mode, outage };
-  const q = useQuery({ queryKey: ['kpi', 'scorecard', brand, month, mode, outage], queryFn: () => kpiApi.scorecard(query), retry: false, placeholderData: (p) => p });
+  // Custom dates: the request goes out once both dates are set and in order.
+  const [range, setRange] = useState<{ from: string; to: string }>({ from: '', to: '' });
+  const rangeReady = mode !== 'range' || (!!range.from && !!range.to && range.from <= range.to);
+  const query: Query = { brand, month, mode, outage, from: range.from, to: range.to };
+  const q = useQuery({ queryKey: ['kpi', 'scorecard', brand, month, mode, outage, mode === 'range' ? range.from : '', mode === 'range' ? range.to : ''], queryFn: () => kpiApi.scorecard(query), retry: false, placeholderData: (p) => p, enabled: rangeReady });
   const s = q.data;
   return (
     <div className="seg-page sc-page">
@@ -50,18 +53,33 @@ export function KpiScorecardPage() {
             <div className="seg-period" role="group" aria-label="Period">
               <button className={mode === 'month' ? 'active' : ''} aria-pressed={mode === 'month'} onClick={() => setMode('month')}>Month</button>
               <button className={mode === 't12' ? 'active' : ''} aria-pressed={mode === 't12'} onClick={() => setMode('t12')}>Trailing 12</button>
+              <button className={mode === 'range' ? 'active' : ''} aria-pressed={mode === 'range'} onClick={() => { if (!range.from) setRange({ from: `${s.today.slice(0, 7)}-01`, to: s.today }); setMode('range'); }}>Custom dates</button>
             </div>
-            <label className="sc-month">
-              <span className="small muted">{mode === 't12' ? '12 months ending' : 'Month'}</span>
-              <select value={s.month} onChange={(e) => setMonth(e.target.value)}>
-                {s.months.map((m) => (
-                  <option key={m.value} value={m.value}>{m.label}{m.value === s.default_month ? ' (last closed)' : ''}</option>
-                ))}
-              </select>
-            </label>
+            {mode === 'range' ? (
+              <div className="sc-range">
+                <label className="sc-month">
+                  <span className="small muted">From</span>
+                  <input type="date" value={range.from} min={s.first_day} max={range.to || s.today} onChange={(e) => setRange({ ...range, from: e.target.value })} />
+                </label>
+                <label className="sc-month">
+                  <span className="small muted">To</span>
+                  <input type="date" value={range.to} min={range.from || s.first_day} max={s.today} onChange={(e) => setRange({ ...range, to: e.target.value })} />
+                </label>
+              </div>
+            ) : (
+              <label className="sc-month">
+                <span className="small muted">{mode === 't12' ? '12 months ending' : 'Month'}</span>
+                <select value={s.month} onChange={(e) => setMonth(e.target.value)}>
+                  {s.months.map((m) => (
+                    <option key={m.value} value={m.value}>{m.label}{m.value === s.default_month ? ' (last closed)' : ''}</option>
+                  ))}
+                </select>
+              </label>
+            )}
           </div>
         )}
       </header>
+      {!rangeReady && <p className="muted">Pick a start date and an end date, with the start first.</p>}
       {q.isError && (
         <section className="card seg-empty">
           <h2>The scorecard isn't available</h2>
@@ -82,7 +100,7 @@ export function KpiScorecardPage() {
           <SourcesCard s={s} outage={outage} setOutage={setOutage} />
         </>
       )}
-      {s && drill && <DrillPanel query={{ ...query, brand: s.brand.key, month: s.month }} kpi={drill} onClose={() => setDrill(null)} />}
+      {s && drill && <DrillPanel query={{ ...query, brand: s.brand.key, month: mode === 'range' ? null : s.month }} kpi={drill} onClose={() => setDrill(null)} />}
     </div>
   );
 }
@@ -322,7 +340,7 @@ function ManualReviewsForm({ s }: { s: Scorecard }) {
 // ---------- drill-down ----------
 type Filter = 'all' | 'counted' | 'excluded' | 'issues';
 function DrillPanel({ query, kpi, onClose }: { query: Query; kpi: string; onClose: () => void }) {
-  const q = useQuery({ queryKey: ['kpi', 'drill', kpi, query.brand, query.month, query.mode, query.outage], queryFn: () => kpiApi.drill(query, kpi), retry: false });
+  const q = useQuery({ queryKey: ['kpi', 'drill', kpi, query.brand, query.month, query.mode, query.outage, query.from, query.to], queryFn: () => kpiApi.drill(query, kpi), retry: false });
   useEffect(() => {
     const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     document.addEventListener('keydown', esc);
