@@ -595,7 +595,7 @@ describe('kpi live connectors (production path), run against the synthetic Launc
   test('Syft report: the stated Operational Cost Ratio and Total Income are read from the scorecard page', () => {
     // Invented figures in the layout of the report's Financial Health Scorecard page.
     const page = ['Financial Health Scorecard', '01 August 2026 - 31 August 2026 vs 01 July 2026 - 31 July 2026', 'Aug 2026  Jul 2026  Variance  Variance (%)', 'Revenue', 'Total Income  $100,000  $95,000  $5,000  5%', 'Gross profit margin  40.0%  41.0%  -1.0%  -2.4%', 'Service', 'Operational Cost Ratio  61.5%  60.2%  1.3%  2.2%', 'A/R Ratio  20.0%  19.0%  1.0%  5.3%'];
-    assert.deepEqual(parseSyftReport(page), { month: '2026-08', ocr_pct: 61.5, income: 100000, prev: { month: '2026-07', ocr_pct: 60.2 } });
+    assert.deepEqual(parseSyftReport(page), { month: '2026-08', ocr_pct: 61.5, income: 100000, prev: { month: '2026-07', ocr_pct: 60.2, income: 95000 } });
     assert.equal(parseSyftReport(['Income Statement', 'Total Income  $1']), null);
     assert.equal(parseSyftReport(['Aug 2026  Jul 2026  Variance  Variance (%)', 'Operational Cost Ratio  n/a  n/a']), null);
   });
@@ -607,8 +607,14 @@ describe('kpi live connectors (production path), run against the synthetic Launc
       m1: { internalDate: String(Date.parse('2026-09-11T14:00:00Z')), payload: { parts: [pdf('Luxoclean Management Report August 2026.pdf', 'lux'), pdf('UM Canada Management Report August 2026.pdf', 'aug-v1')] } },
       m2: { internalDate: String(Date.parse('2026-09-15T14:00:00Z')), payload: { parts: [pdf('UM Canada Management Report August 2026.pdf', 'aug-v2')] } },
       m3: { internalDate: String(Date.parse('2026-09-12T14:00:00Z')), payload: { parts: [{ filename: 'notes.docx', body: { attachmentId: 'x' } }] } },
+      // Earlier months used other file names; one PDF with a matching name is another company's.
+      m4: { internalDate: String(Date.parse('2026-05-11T14:00:00Z')), payload: { parts: [pdf('UrbanMop April Management Report V1.pdf', 'apr'), pdf('UrbanMop Monthly Report -Other.pdf', 'other-co')] } },
+      // September's report restates August in its previous-month column; received last, it wins for August.
+      m6: { internalDate: String(Date.parse('2026-10-10T14:00:00Z')), payload: { parts: [pdf('UM Canada Management Report September 2026.pdf', 'sep')] } },
+      // The US company's report: similar name and layout, must never land on this brand.
+      m5: { internalDate: String(Date.parse('2026-09-20T14:00:00Z')), payload: { parts: [pdf('UrbanMop US Syft Report - August 2026 (Draft).pdf', 'us-name'), pdf('UrbanMop Syft Report - August 2026.pdf', 'us-cover')] } },
     };
-    const reports = { 'aug-v1': ['Aug 2026  Jul 2026  Variance  Variance (%)', 'Total Income  $100,000  $95,000', 'Operational Cost Ratio  61.5%  60.2%'], 'aug-v2': ['Aug 2026  Jul 2026  Variance  Variance (%)', 'Total Income  $101,000  $95,000', 'Operational Cost Ratio  62.0%  60.2%'] };
+    const reports = { 'aug-v1': ['UrbanMop Inc.', 'Aug 2026  Jul 2026  Variance  Variance (%)', 'Total Income  $100,000  $95,000', 'Operational Cost Ratio  61.5%  60.2%'], apr: ['UM Canada Monthly Report', 'Apr 2026  Mar 2026  Variance  Variance (%)', 'Total Income  $90,000  $88,000', 'Operational Cost Ratio  59.0%  58.5%'], sep: ['UrbanMop Inc.', 'Sep 2026  Aug 2026  Variance  Variance (%)', 'Total Income  $102,000  $101,500', 'Operational Cost Ratio  60.0%  63.5%'], 'us-cover': ['UrbanMop US Monthly Report', 'Aug 2026  Jul 2026  Variance  Variance (%)', 'Operational Cost Ratio  30.0%  31.0%'], 'other-co': ['Some Other Co.', 'Apr 2026  Mar 2026  Variance  Variance (%)', 'Operational Cost Ratio  10.0%  11.0%'], 'aug-v2': ['UrbanMop Inc.', 'Aug 2026  Jul 2026  Variance  Variance (%)', 'Total Income  $101,000  $95,000', 'Operational Cost Ratio  62.0%  60.2%'] };
     const gmail = {
       search: async (account, q) => (calls.push(['search', account, q]), { ids: Object.keys(mail), next: null }),
       message: async (account, id) => (calls.push(['message', id]), mail[id]),
@@ -616,20 +622,21 @@ describe('kpi live connectors (production path), run against the synthetic Launc
     };
     const syft = createSyftKpi({ db, gmail, mailbox: 'books@example.com', brand, log: quiet, now: () => NOW, readPdf: async (bytes) => reports[bytes.toString()] });
     assert.equal((await syft.pull()).refreshed_at, null);
-    assert.deepEqual(await syft.job.start(), { months: 2, read: 2 });
+    assert.deepEqual(await syft.job.start(), { months: 5, read: 4 });
     const got = (await syft.pull()).syft;
-    assert.deepEqual(got.map((r) => [r.month, r.ocr_pct, r.income, !!r.restated]), [['2026-07', 60.2, null, true], ['2026-08', 62, 101000, false]]);
+    assert.deepEqual(got.map((r) => [r.month, r.ocr_pct, r.income, !!r.restated]), [['2026-03', 58.5, 88000, true], ['2026-04', 59, 90000, false], ['2026-07', 60.2, 95000, true], ['2026-08', 63.5, 101500, true], ['2026-09', 60, 102000, false]]);
     assert.ok(!calls.some((c) => c[1] === 'lux'));
+    assert.ok(!calls.some((c) => c[1] === 'us-name'));
     assert.equal(calls[0][1], 'books@example.com');
     // Second run: nothing is downloaded again.
     const before = calls.length;
-    assert.deepEqual(await syft.job.start(), { months: 2, read: 0 });
+    assert.deepEqual(await syft.job.start(), { months: 5, read: 0 });
     assert.equal(calls.slice(before).filter((c) => c[0] !== 'search').length, 0);
-    assert.deepEqual((await db.query("SELECT status, row_count FROM kpi_refresh_log WHERE source = 'syft'")).rows, [{ status: 'ok', row_count: 2 }]);
+    assert.deepEqual((await db.query("SELECT status, row_count FROM kpi_refresh_log WHERE source = 'syft'")).rows, [{ status: 'ok', row_count: 5 }]);
     // On the scorecard: OCR comes from the report, marked as Syft with no cross-check.
     const kpi = createKpi({ db, config: { ...config, production: true }, log: quiet, now: () => NOW, connectors: [syft] });
     const tile = (await kpi.scorecard({ month: '2026-08' })).tiles.find((t) => t.kpi === 'ocr');
-    assert.deepEqual([tile.state, tile.value, tile.status.label], ['ok', 62, 'On track']);
+    assert.deepEqual([tile.state, tile.value, tile.status.label], ['ok', 63.5, 'On track']);
     assert.ok(tile.badges.some((x) => /Syft report.*QuickBooks is not connected/.test(x.text)));
     await db.close();
   });
