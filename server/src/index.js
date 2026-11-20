@@ -58,7 +58,6 @@ const writes = createWriteLog({ db, log });
 const segments = createSegments({ db, config, fetchImpl, log });
 const schedule = createSchedule({ db, config, fetchImpl, log, writes, dataTag: () => (qaStore?.summary()?.created_at ? `qa:${qaStore.summary().created_at}:v8` : SAMPLE_VERSION) });
 const reports = createReports({ db, config, fetchImpl, schedule, log });
-const kpi = createKpi({ db, config, log, fetchImpl, syncBearer: createSyncBearer({ config, fetchImpl }) });
 const commercial = createCommercial({ reports, schedule });
 const commercialPlan = createWorkforce({ db, schedule });
 const placement = createPlacement({ db, config, fetchImpl, schedule, writes, log });
@@ -133,6 +132,8 @@ if (config.ringcentralSms || config.twilioSms) {
   connectors.sms = sandboxSms();
 }
 // Complaint Resolution Engine (Phase 1: history miner + playbook). Read-only on every source.
+// KPI scorecard. In production it reads the Syft report with the same read-only Gmail client.
+const kpi = createKpi({ db, config, log, fetchImpl, syncBearer: createSyncBearer({ config, fetchImpl }), gmail: gmailForComplaints?.client || null });
 const complaints = createComplaints({
   db,
   config,

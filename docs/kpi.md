@@ -5,9 +5,10 @@ Residential). It is read-only: it never writes to Launch27, QuickBooks, Kustomer
 Gmail, and it has no "edit data" controls.
 
 **Status.** Development and QA run on synthetic data. Production reads Launch27 (churn,
-fulfilment, visit counts) and the Kustomer complaints the Complaint playbook already collects.
-QuickBooks, Syft and Google Business Profile are not connected yet, so OCR and Google reviews
-read "No data" in production.
+fulfilment, visit counts), the Kustomer complaints the Complaint playbook already collects, and
+the monthly Syft management report from Gmail (OCR). QuickBooks and Google Business Profile are
+not connected yet: OCR shows the Syft report's stated figure with no cross-check, and Google
+reviews read "No data".
 
 ## Where the code is
 
@@ -17,7 +18,7 @@ read "No data" in production.
 | Every formula and exclusion rule | `server/src/kpi/calc.js` (pure; tests in `server/test/kpi.test.js`) |
 | One read-only connector per source | `server/src/kpi/connectors.js` |
 | Synthetic data for dev and QA | `server/src/kpi/synthetic.js` |
-| Live connectors (production) | `server/src/kpi/live.js` |
+| Live connectors (production) | `server/src/kpi/live.js`, `server/src/kpi/syft.js` |
 | Service and API (`/api/kpi/*`) | `server/src/kpi/service.js`, routes at the end of `server/src/inbox/api.js` |
 | Page | `web/src/pages/KpiScorecard.tsx`, `web/src/kpi/api.ts` |
 | Tables | `server/migrations/0029_kpi.sql` (`kpi_refresh_log`, `kpi_manual_reviews`), `server/migrations/0030_kpi_snapshots.sql` (`kpi_snapshots`) |
@@ -66,15 +67,23 @@ Production:
   read the whole history from January 2024; the others read bookings from 120 days back to 60
   days ahead and merge them in. Only the login and GET requests are ever sent. The result is one
   slimmed snapshot in `kpi_snapshots`; review comments and contact details are not copied.
-  "Refresh Launch27 now" under Sources starts a run by hand, using the signed-in person's own
+  "Refresh now" under Sources starts a run by hand, using the signed-in person's own
   Launch27 login. Without the sync login set, that button is the only way it refreshes.
 - **Kustomer**: no extra calls. Complaints are read from `complaint_cases` (source `kustomer`,
-  Residential), which the Complaint playbook keeps up to date.
+  Residential, not merged, not marked "not a complaint"), which the Complaint playbook keeps up to
+  date. Freshness is the playbook's last finished run; a month outside the periods it has read
+  shows "No data" rather than zero complaints.
+- **Syft report (OCR)**: once a day the mailbox in `KPI_SYFT_MAILBOX` is searched, read-only, for
+  "Management Report as at …" emails. Each "UM Canada Management Report <Month>.pdf" is read once
+  and the Operational Cost Ratio and Total Income printed on its Financial Health Scorecard page
+  are stored; a revised report in the same thread replaces the earlier figure. The figure is for
+  the whole company (Residential and Commercial), and it is Syft's own calculation, not the
+  account-by-account definition above, until QuickBooks is connected.
 - A failed refresh keeps the previous snapshot; the affected tiles turn "Stale" after 48 hours.
 - Every refresh writes one row per source per day to `kpi_refresh_log` (updated in place).
 - Only bookings at the Ottawa location count for UrbanMop Residential (`locations` in `KPI_BRANDS`).
 
-Not built yet: QuickBooks, Syft and Google connectors, the email alert when a refresh fails or
+Not built yet: QuickBooks and Google connectors, the email alert when a refresh fails or
 a source is stale, and per-brand roles for office managers.
 
 ## Who sees it

@@ -239,6 +239,8 @@ export function loadConfig(env = process.env) {
     utilizationEmails: String(env.UTILIZATION_EMAILS || '').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean),
     // KPI scorecard (Reports → KPI scorecard). Dev and QA: everyone, synthetic data. Production:
     // only these logins (comma-separated); empty = nobody.
+    // The one mailbox that receives the monthly Syft management report (read-only, production only).
+    kpiSyftMailbox: isProd ? String(env.KPI_SYFT_MAILBOX || '').trim().toLowerCase() || null : null,
     kpiEmails: String(env.KPI_EMAILS || '').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean),
     simulator: env.INBOX_SIMULATOR === undefined ? !isProd : truthy(env.INBOX_SIMULATOR),
     // Sample inbox conversations on an empty database. Never in production.
