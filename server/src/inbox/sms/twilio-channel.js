@@ -1,4 +1,4 @@
-// Live SMS through Twilio, alongside RingCentral: each business number belongs to one provider.
+// Live SMS through Twilio: every business number texts through Twilio.
 //
 //   Twilio ──signed webhook──▶ /webhooks/twilio/sms ──▶ sms_events ──worker──▶ ingestInbound()
 //   Twilio Messages list ──every 5 min, per number──▶ sms_events (same key: never twice)

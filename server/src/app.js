@@ -182,11 +182,7 @@ export function createApp(
     if (cid) await segments.refreshCustomer(bearer, cid);
   }
 
-  // SMS webhooks (no session: the provider calls them). RingCentral's carry our verification
-  // token and subscription id; Twilio's are signed with the Auth Token (X-Twilio-Signature).
-  if (smsProviders.ringcentral) {
-    app.post('/webhooks/ringcentral/sms', express.json({ limit: '256kb' }), (req, res, next) => smsProviders.ringcentral.handleWebhook(req, res).catch(next));
-  }
+  // SMS webhooks (no session: Twilio calls them), signed with the Auth Token (X-Twilio-Signature).
   if (smsProviders.twilio) {
     app.post('/webhooks/twilio/sms', express.urlencoded({ extended: false, limit: '256kb' }), (req, res, next) => smsProviders.twilio.handleWebhook(req, res).catch(next));
     app.post('/webhooks/twilio/status', express.urlencoded({ extended: false, limit: '64kb' }), (req, res, next) => smsProviders.twilio.handleStatus(req, res).catch(next));
