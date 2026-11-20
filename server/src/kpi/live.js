@@ -7,6 +7,7 @@
 // month the first time and once a week, and otherwise only the recent window (bookings from
 // 120 days back to 60 days ahead), merged into what is stored. Refreshes are idempotent: the
 // same pull twice leaves the same snapshot.
+import { readFileSync } from 'node:fs';
 import { addDays, localDate } from '../schedule/rules.js';
 import { KPI_RULES, KPI_SOURCES } from './config.js';
 import { createSyftKpi } from './syft.js';
@@ -213,6 +214,38 @@ export function createKustomerKpi({ db, brand }) {
   };
 }
 
+/**
+ * Google reviews from a one-off Google Takeout export kept in the repository (dates and star
+ * ratings only), until the Business Profile API is connected. Not live: the tile says so, and
+ * months after the export's last review read "No data".
+ */
+export function createGoogleExportKpi({ brand, load = loadGoogleExport }) {
+  return {
+    key: 'google',
+    label: KPI_SOURCES.google.label,
+    mode: 'export',
+    async pull() {
+      const data = brand.googleExport ? load(brand.googleExport) : null;
+      if (!data?.reviews?.length) return { refreshed_at: null, note: 'Google Business Profile is not connected yet' };
+      return {
+        refreshed_at: `${data.exported_on}T12:00:00.000Z`,
+        note: `Export of ${data.exported_on}, not live`,
+        static: true,
+        reviews: data.reviews.map(([date, rating], i) => ({ id: i + 1, date, rating, reviewer: '', comment: '' })),
+        reviewBaseline: { count: 0, avg: 0 },
+        reviewsExport: { exported_on: data.exported_on, reviews_to: data.reviews_to },
+      };
+    },
+  };
+}
+function loadGoogleExport(name) {
+  try {
+    return JSON.parse(readFileSync(new URL(`./data/${name}`, import.meta.url), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
 const notConnected = (key, note) => ({ key, label: KPI_SOURCES[key].label, mode: 'not_connected', pull: async () => ({ refreshed_at: null, note }) });
 
 /** Production connectors: Launch27 and Kustomer live; QuickBooks, Syft and Google not connected yet. */
@@ -221,7 +254,7 @@ export function createLiveKpiConnectors({ db, config, fetchImpl, syncBearer, bra
   return [
     createLaunch27Kpi({ db, config, fetchImpl, syncBearer, brand, log, now }),
     createKustomerKpi({ db, brand }),
-    notConnected('google', 'Google Business Profile is not connected yet'),
+    createGoogleExportKpi({ brand }),
     notConnected('qbo', 'QuickBooks is not connected yet'),
     syft,
   ];

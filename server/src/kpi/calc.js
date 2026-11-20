@@ -99,6 +99,8 @@ export function indexDataset(ds) {
 /** 'ok' | 'stale' | 'missing' for one source. Monthly sources (QBO, Syft) never go stale by age. */
 export function sourceState(source, key, now, rules = KPI_RULES) {
   if (!source || !source.refreshed_at) return 'missing';
+  // A one-off export has a fixed date: it does not go stale by age, and says what it is on the tile.
+  if (source.static) return 'ok';
   if (KPI_SOURCES[key]?.daily && now - Date.parse(source.refreshed_at) > rules.staleHours * 3_600_000) return 'stale';
   return 'ok';
 }
@@ -310,12 +312,15 @@ export function reviewsMonth(ix, month, rules = KPI_RULES) {
   }
   const base = ix.ds.reviewBaseline;
   if (!ix.ds.reviews || !base) return { month, state: 'no_data', value: null, num: 0, rows: [], visits };
+  // An export only knows reviews up to its last date: later months are No data, never zero.
+  const exp = ix.ds.reviewsExport || null;
+  if (exp && month > monthOf(exp.reviews_to)) return { month, state: 'no_data', value: null, num: 0, rows: [], visits, after_export: true };
   const rows = ix.reviewsByMonth.get(month) || [];
   const sum = rows.reduce((t, r) => t + r.rating, 0);
   let allCount = base.count;
   let allSum = base.count * base.avg;
   for (const [m, list] of ix.reviewsByMonth) if (m <= month) for (const r of list) (allCount += 1), (allSum += r.rating);
-  return { month, state: 'ok', manual: false, value: rows.length, num: rows.length, avg: rows.length ? sum / rows.length : null, rating_sum: sum, alltime_avg: allCount ? allSum / allCount : null, alltime_count: allCount, visits, per100: visits ? (rows.length / visits) * 100 : null, rows };
+  return { month, state: 'ok', manual: false, value: rows.length, num: rows.length, avg: rows.length ? sum / rows.length : null, rating_sum: sum, alltime_avg: allCount ? allSum / allCount : null, alltime_count: allCount, visits, per100: visits ? (rows.length / visits) * 100 : null, rows, export: exp, partial: !!exp && month === monthOf(exp.reviews_to) };
 }
 
 /** OCR against its target range (lower is better): on track, within 5% of missing it, or more than 5% off. */
@@ -468,6 +473,11 @@ export function scorecard(ix, { brand, month, mode = 'month', now, today, rules 
         { label: 'Per 100 completed visits', value: visits ? (cur.num / visits * 100).toFixed(1) : '—' },
       ];
       if (cur.parts.some((p) => p.manual)) tile.badges.push({ tone: 'warning', text: 'Manual entry (Google API not connected)' });
+      const exp = cur.parts.find((p) => p.export)?.export;
+      if (exp) {
+        tile.badges.push({ tone: 'warning', text: `From a Google export dated ${exp.exported_on}: not live. Reviews after ${exp.reviews_to} are not included` });
+        if (cur.parts.some((p) => p.partial)) tile.badges.push({ tone: 'warning', text: `${monthLabel(monthOf(exp.reviews_to))} is a partial month` });
+      }
     }
     return tile;
   });

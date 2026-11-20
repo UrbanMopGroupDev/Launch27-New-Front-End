@@ -592,6 +592,28 @@ describe('kpi live connectors (production path), run against the synthetic Launc
     const now2 = ix([b(1, 'V', '2026-11-10')], { complaintCoverage: [{ from: '2026-11-01', to: '2026-11-18' }] });
     assert.equal(complaintsMonth(now2, '2026-11', TODAY).state, 'ok');
   });
+  test('Google export: dated, not stale, labelled, and months after it are No data', async () => {
+    const { createGoogleExportKpi } = await import('../src/kpi/live.js');
+    const load = () => ({ exported_on: '2026-11-17', reviews_to: '2026-11-12', reviews: [['2025-01-05', 5], ['2026-10-03', 5], ['2026-10-09', 4], ['2026-10-20', 3], ['2026-11-12', 1]] });
+    const got = await createGoogleExportKpi({ brand, load }).pull();
+    assert.deepEqual([got.static, got.reviews.length, got.reviewsExport.reviews_to, got.reviews[0].reviewer], [true, 5, '2026-11-12', '']);
+    assert.equal((await createGoogleExportKpi({ brand, load: () => null }).pull()).refreshed_at, null);
+    // The export is weeks old but is not "stale"; Launch27 is fresh here.
+    const later = Date.parse('2026-12-20T15:00:00Z');
+    const fresh = new Date(later - 3_600_000).toISOString();
+    const visits = Array.from({ length: 150 }, (_, i) => b(900 + i, `V ${i}`, '2026-10-12'));
+    const data = indexDataset({ sources: { launch27: { refreshed_at: fresh }, google: { refreshed_at: got.refreshed_at, static: true } }, bookings: visits, complaints: [], reviews: got.reviews, reviewBaseline: got.reviewBaseline, reviewsExport: got.reviewsExport, ocr: { qbo: [], syft: [] }, manualReviews: {} });
+    const oct = reviewsMonth(data, '2026-10');
+    assert.deepEqual([oct.value, oct.avg, oct.alltime_count, oct.per100, oct.partial], [3, 4, 4, 2, false]);
+    assert.equal(reviewsMonth(data, '2026-11').partial, true);
+    assert.deepEqual([reviewsMonth(data, '2026-12').state, reviewsMonth(data, '2026-12').value], ['no_data', null]);
+    const tile = scorecard(data, { brand, month: '2026-10', now: later, today: '2026-12-20' }).tiles.find((t) => t.kpi === 'reviews');
+    assert.deepEqual([tile.state, tile.value], ['ok', 3]);
+    assert.ok(tile.badges.some((x) => /Google export dated 2026-11-17: not live/.test(x.text)));
+    // The real file in the repository loads, and holds dates and ratings only.
+    const real = await createGoogleExportKpi({ brand }).pull();
+    assert.ok(real.reviews.length > 500 && real.reviews.every((r) => /^\d{4}-\d{2}-\d{2}$/.test(r.date) && r.rating >= 1 && r.rating <= 5 && r.reviewer === '' && r.comment === ''));
+  });
   test('Syft report: the stated Operational Cost Ratio and Total Income are read from the scorecard page', () => {
     // Invented figures in the layout of the report's Financial Health Scorecard page.
     const page = ['Financial Health Scorecard', '01 August 2026 - 31 August 2026 vs 01 July 2026 - 31 July 2026', 'Aug 2026  Jul 2026  Variance  Variance (%)', 'Revenue', 'Total Income  $100,000  $95,000  $5,000  5%', 'Gross profit margin  40.0%  41.0%  -1.0%  -2.4%', 'Service', 'Operational Cost Ratio  61.5%  60.2%  1.3%  2.2%', 'A/R Ratio  20.0%  19.0%  1.0%  5.3%'];
@@ -654,7 +676,9 @@ describe('kpi live connectors (production path), run against the synthetic Launc
     assert.equal(c.synthetic, false);
     assert.deepEqual([tile('churn').state, tile('fulfilment').state], ['ok', 'ok']);
     assert.ok(tile('fulfilment').value > 50);
-    for (const k of ['ocr', 'complaints', 'reviews']) assert.deepEqual([tile(k).state, tile(k).value], ['no_data', null], k);
+    for (const k of ['ocr', 'complaints']) assert.deepEqual([tile(k).state, tile(k).value], ['no_data', null], k);
+    // Google reviews come from the export in the repository.
+    assert.equal(tile('reviews').state, 'ok');
     const rows = await kpi.drill({ kpi: 'fulfilment' });
     assert.ok(rows.tabs[0].rows.length > 0);
     await db.close();
