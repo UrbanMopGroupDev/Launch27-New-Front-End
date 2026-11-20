@@ -224,6 +224,9 @@ export function loadConfig(env = process.env) {
     adminEmails: env.ADMIN_EMAILS || '',
     // Monthly raise check: who gets the bell notification (comma-separated). Empty = every admin.
     raiseDigestEmails: env.RAISE_DIGEST_EMAILS || '',
+    // Pay adjustments sheet (read-only): late cancels, no-shows, Google review bonuses. Set its id in
+    // PAY_ADJUSTMENTS_SHEET_ID and share it as Viewer with the Google service account.
+    paySheet: { id: env.PAY_ADJUSTMENTS_SHEET_ID || null, range: env.PAY_ADJUSTMENTS_RANGE || 'Sheet1!A2:I', serviceAccount: l27Mode === 'live' ? parseServiceAccount(env.GMAIL_SERVICE_ACCOUNT_JSON) : null },
     supervisorEmails: env.SUPERVISOR_EMAILS || '',
     // Utilization report (read-only): everyone, production included. UTILIZATION_EMAILS, if set,
     // narrows it to those logins.
