@@ -120,7 +120,14 @@ export function ocrMonth(ix, month, today, rules = KPI_RULES) {
   const qboPct = ok ? (cost / q.revenue) * 100 : null;
   const syftPct = s?.ocr_pct ?? null;
   const diff = qboPct != null && syftPct != null ? qboPct - syftPct : null;
-  return { month, state: ok ? 'ok' : 'no_data', value: qboPct, num: ok ? cost : 0, den: ok ? q.revenue : 0, status, syft: syftPct, syft_received: s?.received_at || null, diff, flagged: diff != null && Math.abs(diff) > rules.ocrFlagPp, lines, revenue: q?.revenue ?? null };
+  const syftInfo = { syft: syftPct, syft_received: s?.received_at || null, syft_file: s?.file || null, syft_income: s?.income ?? null };
+  // QuickBooks is the source of truth. Until it is connected, the figure the Syft report
+  // states is shown as it is, clearly marked, with no cross-check.
+  if (!ok && syftPct != null) {
+    const income = s.income || 0;
+    return { month, state: 'ok', basis: 'syft', value: syftPct, num: (income * syftPct) / 100, den: income, status, ...syftInfo, diff: null, flagged: false, lines: [], revenue: s.income ?? null };
+  }
+  return { month, state: ok ? 'ok' : 'no_data', basis: 'qbo', value: qboPct, num: ok ? cost : 0, den: ok ? q.revenue : 0, status, ...syftInfo, diff, flagged: diff != null && Math.abs(diff) > rules.ocrFlagPp, lines, revenue: q?.revenue ?? null };
 }
 
 // ---------- 2. Churn ----------
@@ -254,6 +261,12 @@ export function fulfilmentMonth(ix, month, today, rules = KPI_RULES) {
  * is counted once.
  */
 export function complaintsMonth(ix, month, today, rules = KPI_RULES) {
+  // When the source only covers some periods, a month outside them is "No data", not zero complaints.
+  const cover = ix.ds.complaintCoverage;
+  if (cover) {
+    const end = monthEnd(month) < today ? monthEnd(month) : addDays(today, -1);
+    if (!cover.some((w) => w.from <= monthStart(month) && w.to >= end)) return { month, state: 'no_data', value: null, num: 0, den: 0, saved: { measurable: false, measurable_on: null, saved: null, total: 0, pct: null }, rows: [], uncovered: true };
+  }
   const rows = [];
   const add = (r) => rows.push({ ...r, sources: [r.source], counted: true, outcome: 'Counted' });
   const same = (r, customerId, bookingId, date) => r.customer_id === customerId && ((bookingId && r.booking_id === bookingId) || ((!bookingId || !r.booking_id) && daysApart(r.date, date) <= rules.dedupeDays));
@@ -344,7 +357,9 @@ function measure(ix, kpi, months, today, rules) {
   const ok = parts.filter((p) => p.state === 'ok');
   const num = ok.reduce((t, p) => t + p.num, 0);
   const den = ok.reduce((t, p) => t + (p.den || 0), 0);
-  const value = !ok.length ? null : kpi === 'reviews' ? num : den ? (num / den) * 100 : null;
+  // OCR from Syft reports that give no income figure cannot be pooled by dollars: average the months instead.
+  const unweighted = kpi === 'ocr' && ok.some((p) => !p.den);
+  const value = !ok.length ? null : kpi === 'reviews' ? num : unweighted ? ok.reduce((t, p) => t + p.value, 0) / ok.length : den ? (num / den) * 100 : null;
   return { state: value == null ? 'no_data' : 'ok', value, num, den, parts, missing: parts.length - ok.length };
 }
 
@@ -367,7 +382,9 @@ export function scorecard(ix, { brand, month, mode = 'month', now, today, rules 
     tile.sources = src.list;
     tile.refreshed_at = src.list.map((s) => s.refreshed_at).filter(Boolean).sort()[0] || null;
     // OCR can stand on QBO alone (Syft is the cross-check); everything else needs all its sources.
-    const blocking = kpi === 'ocr' ? sourcesFor(ix, ['qbo'], now, rules).state : src.state;
+    // OCR needs QuickBooks or, failing that, the Syft report; everything else needs all its sources.
+    const ocrBlock = () => (sourcesFor(ix, ['qbo'], now, rules).state === 'ok' ? 'ok' : sourcesFor(ix, ['syft'], now, rules).state);
+    const blocking = kpi === 'ocr' ? ocrBlock() : src.state;
     if (blocking !== 'ok') return { ...tile, state: blocking, note: src.list.filter((s) => s.state !== 'ok').map((s) => `${s.label}: ${s.state === 'stale' ? `no refresh in over ${rules.staleHours} hours` : s.note || 'not connected'}`).join(' · ') };
     const cur = measure(ix, kpi, months, today, rules);
     if (cur.state !== 'ok') return { ...tile, state: 'no_data', note: `No data for ${period}` };
@@ -389,10 +406,17 @@ export function scorecard(ix, { brand, month, mode = 'month', now, today, rules 
     tile.last12 = baseline == null ? null : kpi === 'reviews' ? `${(baseline / 12).toFixed(0)} a month` : kpi === 'complaints' ? `${baseline.toFixed(2)} per 100 visits` : `${baseline.toFixed(1)}%`;
     if (kpi === 'ocr') {
       tile.status = ocrStatus(cur.value, rules);
+      const fromSyft = cur.parts.filter((p) => p.state === 'ok' && p.basis === 'syft').length;
+      if (fromSyft) {
+        tile.badges.push({ tone: 'warning', text: `From the Syft report${fromSyft === cur.parts.length ? '' : ` for ${fromSyft} of ${cur.parts.length} months`}: QuickBooks is not connected, so there is no cross-check` });
+        if (brand.syftScope) tile.badges.push({ tone: 'neutral', text: brand.syftScope });
+        tile.details[0] = one ? { label: 'Total income (Syft report)', value: one.syft_income != null ? `$${Math.round(one.syft_income).toLocaleString('en-CA')}` : '—' } : { label: 'Months from the Syft report', value: `${fromSyft} of ${cur.parts.length}` };
+      }
       if (one) {
         if (one.status === 'Provisional') tile.badges.push({ tone: 'warning', text: `Provisional until the ${rules.closeDay}th of ${monthLabel(addMonths(month, 1))}` });
         tile.details.push({ label: 'Books', value: one.status });
         tile.details.push({ label: 'Syft reported', value: one.syft == null ? 'Not received yet' : `${one.syft.toFixed(1)}%` });
+        if (one.syft_file) tile.details.push({ label: 'Report', value: `${one.syft_file} · received ${dayOf(one.syft_received)}` });
         if (one.flagged) tile.badges.push({ tone: 'warning', text: `QBO and Syft differ by ${Math.abs(one.diff).toFixed(1)} pp` });
         else if (one.diff != null) tile.details.push({ label: 'QBO vs Syft', value: `${one.diff >= 0 ? '+' : '−'}${Math.abs(one.diff).toFixed(1)} pp` });
       } else {
@@ -474,8 +498,10 @@ export function drill(ix, { kpi, month, mode = 'month', today, rules = KPI_RULES
   const period = span === 1 ? monthLabel(month) : `${monthLabel(months[0])} – ${monthLabel(month)}`;
   if (kpi === 'ocr') {
     const rows = all((p) => p.lines.map((l) => ({ month: p.month, account: l.account, group: l.group, amount: l.amount, counted: l.included, outcome: l.included ? 'Included in operational cost' : 'Excluded' })).concat(p.state === 'ok' ? [{ month: p.month, account: 'Revenue', group: 'Revenue', amount: p.revenue, counted: true, outcome: 'Denominator' }] : []));
-    const compare = parts.map((p) => ({ month: p.month, qbo: round(p.value), syft: p.syft, diff: round(p.diff), status: p.status, flagged: p.flagged }));
-    return { title: `${KPI_LABELS.ocr} · ${period}`, tabs: [{ key: 'lines', label: 'QuickBooks lines', columns: [col('month', 'Month'), col('account', 'Account'), col('group', 'Category'), col('amount', 'Amount', 'money'), col('outcome', 'Treatment')], rows }, { key: 'compare', label: 'QBO vs Syft', columns: [col('month', 'Month'), col('qbo', 'QBO %', 'pct'), col('syft', 'Syft %', 'pct'), col('diff', 'Difference (pp)', 'num'), col('status', 'Status')], rows: compare.map((c) => ({ ...c, counted: true, outcome: c.flagged ? '⚠ over 1.0 pp' : '' })) }] };
+    const compare = parts.map((p) => ({ month: p.month, qbo: p.basis === 'syft' ? null : round(p.value), syft: p.syft, diff: round(p.diff), status: p.status, flagged: p.flagged, income: p.syft_income, file: p.syft_file, received: p.syft_received ? dayOf(p.syft_received) : null }));
+    const tabs = [{ key: 'lines', label: 'QuickBooks lines', columns: [col('month', 'Month'), col('account', 'Account'), col('group', 'Category'), col('amount', 'Amount', 'money'), col('outcome', 'Treatment')], rows }, { key: 'compare', label: 'QBO vs Syft', columns: [col('month', 'Month'), col('qbo', 'QBO %', 'pct'), col('syft', 'Syft %', 'pct'), col('diff', 'Difference (pp)', 'num'), col('status', 'Status'), col('income', 'Total income (Syft)', 'money'), col('file', 'Syft report'), col('received', 'Received')], rows: compare.map((c) => ({ ...c, counted: true, outcome: c.flagged ? '⚠ over 1.0 pp' : '' })) }];
+    // With no QuickBooks lines to show, lead with the Syft figures.
+    return { title: `${KPI_LABELS.ocr} · ${period}`, tabs: rows.length ? tabs : tabs.reverse() };
   }
   if (kpi === 'churn' || kpi === 'over_cancel') {
     const eventCols = [col('cancelled_on', 'Cancelled'), col('customer', 'Client'), col('outcome', 'Result'), col('reason', 'Reason'), col('frequency', 'Frequency'), col('cancelled_by', 'Cancelled by'), col('last_cleaner', 'Last cleaner')];

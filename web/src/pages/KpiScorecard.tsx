@@ -264,7 +264,7 @@ function SourcesCard({ s, outage, setOutage }: { s: Scorecard; outage: string | 
       <p className="small muted">Read-only: this page never changes anything in Launch27, QuickBooks, Kustomer or Google.</p>
       {s.refresh.available && (
         <p className="small">
-          {s.refresh.running || refresh.isSuccess ? <span className="muted">Reading Launch27 now. This takes a few minutes; reload the page afterwards.</span> : <button className="link" disabled={refresh.isPending} onClick={() => refresh.mutate()}>Refresh Launch27 now</button>}
+          {s.refresh.running || refresh.isSuccess ? <span className="muted">Refreshing now (Launch27 takes about seven minutes the first time). Reload the page afterwards.</span> : <button className="link" disabled={refresh.isPending} onClick={() => refresh.mutate()}>Refresh now</button>}
           {refresh.isError && <span className="warn"> {(refresh.error as Error).message}</span>}
         </p>
       )}

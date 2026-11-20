@@ -127,6 +127,8 @@ export function createGmailClient({ auth, fetchImpl = fetch, now = () => Date.no
       const page = await call(account, 'GET', '/messages', { query: { q, maxResults: max, pageToken } });
       return { ids: (page.messages || []).map((m) => m.id), next: page.nextPageToken || null };
     },
+    /** One attachment's bytes ({ data: base64url }). Read-only. */
+    attachment: (account, id, attachmentId) => call(account, 'GET', `/messages/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`),
     message: (account, id) => call(account, 'GET', `/messages/${encodeURIComponent(id)}`, { query: { format: 'full' } }),
     headers: (account, id, names) => call(account, 'GET', `/messages/${encodeURIComponent(id)}`, { query: { format: 'metadata', metadataHeaders: names } }),
     send: (account, { raw, threadId }) => call(account, 'POST', '/messages/send', { body: { raw: toBase64Url(raw), ...(threadId ? { threadId } : {}) } }),

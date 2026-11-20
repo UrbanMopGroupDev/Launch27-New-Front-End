@@ -320,10 +320,12 @@ describe('OCR', () => {
     assert.equal(ocrMonth(data([]), '2026-10', '2026-11-09').status, 'Provisional');
     assert.equal(ocrMonth(data([]), '2026-10', '2026-11-10').status, 'Final');
   });
-  test('no QBO month: no data, even if Syft has a figure', () => {
-    const r = ocrMonth(data([{ month: '2026-09', ocr_pct: 58 }]), '2026-09', TODAY);
-    assert.equal(r.state, 'no_data');
-    assert.equal(r.value, null);
+  test('no QuickBooks month: the Syft report stated figure is shown, marked as such; neither source is No data', () => {
+    const r = ocrMonth(data([{ month: '2026-09', ocr_pct: 58, income: 200_000, file: 'UM Canada Management Report September 2026.pdf', received_at: '2026-10-09T12:00:00Z' }]), '2026-09', TODAY);
+    assert.deepEqual([r.state, r.basis, r.value, r.den, r.num, r.flagged, r.diff], ['ok', 'syft', 58, 200_000, 116_000, false, null]);
+    assert.equal(ocrMonth(data([]), '2026-10', TODAY).basis, 'qbo');
+    const none = ocrMonth(data([]), '2026-08', TODAY);
+    assert.deepEqual([none.state, none.value], ['no_data', null]);
   });
 });
 
@@ -366,8 +368,14 @@ describe('scorecard', () => {
     const noKustomer = card('kustomer_missing');
     assert.deepEqual([tile(noKustomer, 'complaints').state, tile(noKustomer, 'complaints').value], ['no_data', null]);
     assert.equal(tile(noKustomer, 'churn').state, 'ok');
-    const noQbo = card('qbo_missing');
-    assert.deepEqual([tile(noQbo, 'ocr').state, tile(noQbo, 'ocr').value], ['no_data', null]);
+    // QuickBooks missing: the Syft report's figure stands in, and says so. Both missing: No data.
+    const noQbo = tile(card('qbo_missing'), 'ocr');
+    assert.equal(noQbo.state, 'ok');
+    assert.ok(noQbo.badges.some((b) => /Syft report.*no cross-check/.test(b.text)));
+    assert.ok(noQbo.badges.some((b) => /Whole company/.test(b.text)));
+    const neither = indexDataset({ ...buildSyntheticDataset({ today: TODAY, now: NOW, outage: 'qbo_missing' }), ocr: { qbo: [], syft: [] } });
+    const t = scorecard(neither, { brand, month: '2026-10', now: NOW, today: TODAY }).tiles.find((y) => y.kpi === 'ocr');
+    assert.deepEqual([t.state, t.value], ['no_data', null]);
     // Syft missing: QBO still shows, and says Syft has not arrived.
     const noSyft = tile(card('syft_missing'), 'ocr');
     assert.equal(noSyft.state, 'ok');
@@ -476,6 +484,7 @@ describe('kpi live connectors (production path), run against the synthetic Launc
   const { createMockLaunch27 } = await import('../src/mock/launch27.js');
   const { createSyncBearer } = await import('../src/inbox/lookup.js');
   const { createLaunch27Kpi, createKustomerKpi, createLiveKpiConnectors, normalizeBooking, localStamp } = await import('../src/kpi/live.js');
+  const { createSyftKpi, parseSyftReport } = await import('../src/kpi/syft.js');
   const { addDays: plusDays, localDate } = await import('../src/schedule/rules.js');
   const quiet = { info() {}, warn() {}, error() {} };
   const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
@@ -554,19 +563,74 @@ describe('kpi live connectors (production path), run against the synthetic Launc
     assert.equal((await db.query("SELECT status FROM kpi_refresh_log WHERE source = 'launch27'")).rows[0].status, 'failed');
     await db.close();
   });
-  test('Kustomer complaints come from the complaint tables; unread means not connected', async () => {
+  test('Kustomer complaints come from the complaint tables, with the periods the playbook has read', async () => {
     const db = await openDb({});
     const k = createKustomerKpi({ db, brand });
     assert.equal((await k.pull()).refreshed_at, null);
-    await db.query("INSERT INTO complaint_sync_state (source, last_ok_at) VALUES ('kustomer', now())");
-    await db.query(`INSERT INTO complaint_cases (brand, source, source_id, customer_name, customer_email, l27_customer_id, l27_booking_id, opened_at, channel, category) VALUES
-      ('residential','kustomer','a','Amelia Roy','a@example.com',3,7,'2026-10-06T15:00:00Z','email','Quality'),
-      ('residential','kustomer','b','No Match','b@example.com',NULL,NULL,'2026-10-07T02:00:00Z','voice','Late'),
-      ('commercial','kustomer','c','Other Brand','c@example.com',9,NULL,'2026-10-07T15:00:00Z','email','Quality'),
-      ('residential','launch27_rating','d','A Rating','d@example.com',4,8,'2026-10-07T15:00:00Z','review','Quality')`);
+    // A run that is still going or failed does not count; finished ones do, and touching windows join up.
+    await db.query(`INSERT INTO complaint_runs (window_from, window_to, status, finished_at) VALUES
+      ('2026-08-01','2026-08-31','done','2026-11-18T10:00:00Z'), ('2026-09-01','2026-10-31','partial','2026-11-19T10:00:00Z'),
+      ('2026-01-01','2026-01-31','done','2026-11-17T10:00:00Z'), ('2026-11-01','2026-11-19','running',NULL), ('2026-06-01','2026-06-30','failed','2026-11-19T11:00:00Z')`);
+    await db.query(`INSERT INTO complaint_cases (brand, source, source_id, customer_name, customer_email, l27_customer_id, l27_booking_id, opened_at, channel, category, excluded_at) VALUES
+      ('residential','kustomer','a','Amelia Roy','a@example.com',3,7,'2026-10-06T15:00:00Z','email','Quality',NULL),
+      ('residential','kustomer','b','No Match','b@example.com',NULL,NULL,'2026-10-07T02:00:00Z','voice','Late',NULL),
+      ('commercial','kustomer','c','Other Brand','c@example.com',9,NULL,'2026-10-07T15:00:00Z','email','Quality',NULL),
+      ('residential','launch27_rating','d','A Rating','d@example.com',4,8,'2026-10-07T15:00:00Z','review','Quality',NULL),
+      ('residential','kustomer','e','Marked Not A Complaint','e@example.com',5,NULL,'2026-10-08T15:00:00Z','email','Quality',now())`);
     const got = await k.pull();
-    assert.ok(got.refreshed_at);
+    assert.equal(got.refreshed_at, '2026-11-19T10:00:00.000Z');
+    assert.deepEqual(got.complaintCoverage, [{ from: '2026-01-01', to: '2026-01-31' }, { from: '2026-08-01', to: '2026-10-31' }]);
     assert.deepEqual(got.complaints.map((c) => [c.customer, c.customer_id, c.booking_id, c.date]), [['Amelia Roy', 3, 7, '2026-10-06'], ['No Match', 'email:b@example.com', null, '2026-10-06']]);
+    await db.close();
+  });
+  test('a month the playbook has not read is No data, not zero complaints', () => {
+    const visits = [b(1, 'V', '2026-07-10'), b(1, 'V', '2026-08-10')];
+    const data = ix(visits, { complaintCoverage: [{ from: '2026-08-01', to: '2026-10-31' }] });
+    assert.deepEqual([complaintsMonth(data, '2026-07', TODAY).state, complaintsMonth(data, '2026-07', TODAY).value], ['no_data', null]);
+    assert.deepEqual([complaintsMonth(data, '2026-08', TODAY).state, complaintsMonth(data, '2026-08', TODAY).value], ['ok', 0]);
+    // The current month is covered when the read reaches yesterday.
+    const now2 = ix([b(1, 'V', '2026-11-10')], { complaintCoverage: [{ from: '2026-11-01', to: '2026-11-18' }] });
+    assert.equal(complaintsMonth(now2, '2026-11', TODAY).state, 'ok');
+  });
+  test('Syft report: the stated Operational Cost Ratio and Total Income are read from the scorecard page', () => {
+    // Invented figures in the layout of the report's Financial Health Scorecard page.
+    const page = ['Financial Health Scorecard', '01 August 2026 - 31 August 2026 vs 01 July 2026 - 31 July 2026', 'Aug 2026  Jul 2026  Variance  Variance (%)', 'Revenue', 'Total Income  $100,000  $95,000  $5,000  5%', 'Gross profit margin  40.0%  41.0%  -1.0%  -2.4%', 'Service', 'Operational Cost Ratio  61.5%  60.2%  1.3%  2.2%', 'A/R Ratio  20.0%  19.0%  1.0%  5.3%'];
+    assert.deepEqual(parseSyftReport(page), { month: '2026-08', ocr_pct: 61.5, income: 100000, prev: { month: '2026-07', ocr_pct: 60.2 } });
+    assert.equal(parseSyftReport(['Income Statement', 'Total Income  $1']), null);
+    assert.equal(parseSyftReport(['Aug 2026  Jul 2026  Variance  Variance (%)', 'Operational Cost Ratio  n/a  n/a']), null);
+  });
+  test('Syft connector: reads each report email once, a revision wins, files for other brands are ignored, only GETs', async () => {
+    const db = await openDb({});
+    const calls = [];
+    const pdf = (name, id) => ({ filename: name, body: { attachmentId: id } });
+    const mail = {
+      m1: { internalDate: String(Date.parse('2026-09-11T14:00:00Z')), payload: { parts: [pdf('Luxoclean Management Report August 2026.pdf', 'lux'), pdf('UM Canada Management Report August 2026.pdf', 'aug-v1')] } },
+      m2: { internalDate: String(Date.parse('2026-09-15T14:00:00Z')), payload: { parts: [pdf('UM Canada Management Report August 2026.pdf', 'aug-v2')] } },
+      m3: { internalDate: String(Date.parse('2026-09-12T14:00:00Z')), payload: { parts: [{ filename: 'notes.docx', body: { attachmentId: 'x' } }] } },
+    };
+    const reports = { 'aug-v1': ['Aug 2026  Jul 2026  Variance  Variance (%)', 'Total Income  $100,000  $95,000', 'Operational Cost Ratio  61.5%  60.2%'], 'aug-v2': ['Aug 2026  Jul 2026  Variance  Variance (%)', 'Total Income  $101,000  $95,000', 'Operational Cost Ratio  62.0%  60.2%'] };
+    const gmail = {
+      search: async (account, q) => (calls.push(['search', account, q]), { ids: Object.keys(mail), next: null }),
+      message: async (account, id) => (calls.push(['message', id]), mail[id]),
+      attachment: async (account, id, att) => (calls.push(['attachment', att]), { data: Buffer.from(att).toString('base64url') }),
+    };
+    const syft = createSyftKpi({ db, gmail, mailbox: 'books@example.com', brand, log: quiet, now: () => NOW, readPdf: async (bytes) => reports[bytes.toString()] });
+    assert.equal((await syft.pull()).refreshed_at, null);
+    assert.deepEqual(await syft.job.start(), { months: 2, read: 2 });
+    const got = (await syft.pull()).syft;
+    assert.deepEqual(got.map((r) => [r.month, r.ocr_pct, r.income, !!r.restated]), [['2026-07', 60.2, null, true], ['2026-08', 62, 101000, false]]);
+    assert.ok(!calls.some((c) => c[1] === 'lux'));
+    assert.equal(calls[0][1], 'books@example.com');
+    // Second run: nothing is downloaded again.
+    const before = calls.length;
+    assert.deepEqual(await syft.job.start(), { months: 2, read: 0 });
+    assert.equal(calls.slice(before).filter((c) => c[0] !== 'search').length, 0);
+    assert.deepEqual((await db.query("SELECT status, row_count FROM kpi_refresh_log WHERE source = 'syft'")).rows, [{ status: 'ok', row_count: 2 }]);
+    // On the scorecard: OCR comes from the report, marked as Syft with no cross-check.
+    const kpi = createKpi({ db, config: { ...config, production: true }, log: quiet, now: () => NOW, connectors: [syft] });
+    const tile = (await kpi.scorecard({ month: '2026-08' })).tiles.find((t) => t.kpi === 'ocr');
+    assert.deepEqual([tile.state, tile.value, tile.status.label], ['ok', 62, 'On track']);
+    assert.ok(tile.badges.some((x) => /Syft report.*QuickBooks is not connected/.test(x.text)));
     await db.close();
   });
   test('scorecard on live connectors: Launch27 KPIs have numbers, unconnected sources say No data', async () => {
