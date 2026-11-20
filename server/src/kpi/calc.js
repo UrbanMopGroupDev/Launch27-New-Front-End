@@ -95,6 +95,10 @@ export function indexDataset(ds) {
   return ix;
 }
 
+/** Items from a by-month map whose date falls inside from..to (inclusive). */
+const inWindow = (map, from, to, dateOf) => monthsBetween(monthOf(from), monthOf(to)).flatMap((m) => map.get(m) || []).filter((x) => dateOf(x) >= from && dateOf(x) <= to);
+export const dayLabel = (d) => new Date(`${d}T12:00:00Z`).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+
 // ---------- source freshness ----------
 /** 'ok' | 'stale' | 'missing' for one source. Monthly sources (QBO, Syft) never go stale by age. */
 export function sourceState(source, key, now, rules = KPI_RULES) {
@@ -147,9 +151,12 @@ const lastCleaner = (ix, booking) => {
  * events ÷ active recurring clients at the start of the month. Every cancellation in the
  * month is returned with the rule that counted or excluded it, so the number can be audited.
  */
-export function churnMonth(ix, month, today, rules = KPI_RULES) {
-  const start = monthStart(month);
-  const cancels = [...(ix.cancelsByMonth.get(month) || [])].sort((a, b) => (a.cancellation.at < b.cancellation.at ? -1 : 1));
+export function churnMonth(ix, month, today, rules = KPI_RULES, win = null) {
+  // `win` narrows it to exact dates (a custom range): events dated inside it ÷ clients active at its start.
+  const from = win?.from || monthStart(month);
+  const to = win?.to || monthEnd(month);
+  const start = from;
+  const cancels = [...(win ? inWindow(ix.cancelsByMonth, from, to, (b) => dayOf(b.cancellation.at)) : ix.cancelsByMonth.get(month) || [])].sort((a, b) => (a.cancellation.at < b.cancellation.at ? -1 : 1));
   const counted = new Set();
   const events = cancels.map((b) => {
     const c = b.cancellation;
@@ -177,7 +184,8 @@ export function churnMonth(ix, month, today, rules = KPI_RULES) {
 
   // Base: clients with a recurring visit in the month that was still on the books on the 1st.
   const base = new Map();
-  for (const b of ix.byMonth.get(month) || []) {
+  // For a custom range: a recurring visit booked in the 31 days from its start date.
+  for (const b of win ? inWindow(ix.byMonth, from, addDays(from, 30), (x) => x.date) : ix.byMonth.get(month) || []) {
     if (base.has(b.customer_id) || !isRecurring(b.frequency, rules)) continue;
     if (b.cancellation && dayOf(b.cancellation.at) < start) continue;
     if (isTest(b.customer, null, rules) || isInstitutional(b.customer, rules)) continue;
@@ -262,38 +270,40 @@ export function fulfilmentMonth(ix, month, today, rules = KPI_RULES) {
  * object or a Launch27 bottom rating; the same visit (or the same client within dedupeDays)
  * is counted once.
  */
-export function complaintsMonth(ix, month, today, rules = KPI_RULES) {
+export function complaintsMonth(ix, month, today, rules = KPI_RULES, win = null) {
+  const from = win?.from || monthStart(month);
+  const to = win?.to || monthEnd(month);
   // When the source only covers some periods, a month outside them is "No data", not zero complaints.
   const cover = ix.ds.complaintCoverage;
   if (cover) {
-    const end = monthEnd(month) < today ? monthEnd(month) : addDays(today, -1);
-    if (!cover.some((w) => w.from <= monthStart(month) && w.to >= end)) return { month, state: 'no_data', value: null, num: 0, den: 0, saved: { measurable: false, measurable_on: null, saved: null, total: 0, pct: null }, rows: [], uncovered: true };
+    const end = to < today ? to : addDays(today, -1);
+    if (!cover.some((w) => w.from <= from && w.to >= end)) return { month, state: 'no_data', value: null, num: 0, den: 0, saved: { measurable: false, measurable_on: null, saved: null, total: 0, pct: null }, rows: [], uncovered: true };
   }
   const rows = [];
   const add = (r) => rows.push({ ...r, sources: [r.source], counted: true, outcome: 'Counted' });
   const same = (r, customerId, bookingId, date) => r.customer_id === customerId && ((bookingId && r.booking_id === bookingId) || ((!bookingId || !r.booking_id) && daysApart(r.date, date) <= rules.dedupeDays));
-  for (const c of [...(ix.complaintsByMonth.get(month) || [])].sort((a, b) => (a.date < b.date ? -1 : 1))) {
+  for (const c of [...inWindow(ix.complaintsByMonth, from, to, (x) => x.date)].sort((a, b) => (a.date < b.date ? -1 : 1))) {
     if (isTest(c.customer, c.summary, rules)) continue;
     const dup = rows.find((r) => same(r, c.customer_id, c.booking_id, c.date));
     if (dup) rows.push({ id: `k${c.id}`, customer_id: c.customer_id, customer: c.customer, date: c.date, booking_id: c.booking_id || null, source: 'Kustomer', sources: ['Kustomer'], detail: c.summary || '', counted: false, outcome: 'Duplicate of another complaint for this visit' });
     else add({ id: `k${c.id}`, customer_id: c.customer_id, customer: c.customer, date: c.date, booking_id: c.booking_id || null, source: 'Kustomer', detail: c.summary || '' });
   }
-  for (const b of ix.badRatingsByMonth.get(month) || []) {
+  for (const b of inWindow(ix.badRatingsByMonth, from, to, (x) => x.rated_at)) {
     if (isTest(b.customer, null, rules)) continue;
     const row = { id: `r${b.id}`, customer_id: b.customer_id, customer: b.customer, date: b.rated_at, booking_id: b.id, source: 'Launch27 rating', detail: b.rating_comment || 'Bottom rating' };
     const here = rows.find((r) => r.counted && same(r, b.customer_id, b.id, b.rated_at));
     // The matching Kustomer complaint may sit in a neighbouring month: still one complaint.
-    const elsewhere = !here && (ix.complaintsByCustomer.get(b.customer_id) || []).some((c) => monthOf(c.date) !== month && ((c.booking_id && c.booking_id === b.id) || (!c.booking_id && daysApart(c.date, b.rated_at) <= rules.dedupeDays)));
+    const elsewhere = !here && (ix.complaintsByCustomer.get(b.customer_id) || []).some((c) => (c.date < from || c.date > to) && ((c.booking_id && c.booking_id === b.id) || (!c.booking_id && daysApart(c.date, b.rated_at) <= rules.dedupeDays)));
     if (here) {
       here.sources.push('Launch27 rating');
       rows.push({ ...row, sources: [row.source], counted: false, outcome: 'Same visit as a Kustomer complaint (counted once)' });
     } else if (elsewhere) rows.push({ ...row, sources: [row.source], counted: false, outcome: 'Counted in the month of its Kustomer complaint' });
     else add(row);
   }
-  const visits = (ix.byMonth.get(month) || []).filter((b) => b.completed && !b.cancellation && !isTest(b.customer, null, rules)).length;
+  const visits = inWindow(ix.byMonth, from, to, (x) => x.date).filter((b) => b.completed && !b.cancellation && !isTest(b.customer, null, rules)).length;
   const counted = rows.filter((r) => r.counted);
   // Saved: still booking savedDays after the complaint. Only measurable once that time has passed.
-  const measurableOn = addDays(monthEnd(month), rules.savedDays);
+  const measurableOn = addDays(to, rules.savedDays);
   const measurable = today >= measurableOn && counted.length > 0;
   for (const r of counted) {
     const after = addDays(r.date, rules.savedDays);
@@ -304,9 +314,11 @@ export function complaintsMonth(ix, month, today, rules = KPI_RULES) {
 }
 
 // ---------- 5. Google reviews ----------
-export function reviewsMonth(ix, month, rules = KPI_RULES) {
-  const visits = (ix.byMonth.get(month) || []).filter((b) => b.completed && !b.cancellation && !isTest(b.customer, null, rules)).length;
-  const manual = ix.ds.manualReviews?.[month];
+export function reviewsMonth(ix, month, rules = KPI_RULES, win = null) {
+  const from = win?.from || monthStart(month);
+  const to = win?.to || monthEnd(month);
+  const visits = inWindow(ix.byMonth, from, to, (x) => x.date).filter((b) => b.completed && !b.cancellation && !isTest(b.customer, null, rules)).length;
+  const manual = win ? null : ix.ds.manualReviews?.[month];
   if (manual) {
     return { month, state: 'ok', manual: true, value: manual.new_reviews, num: manual.new_reviews, avg: manual.avg_rating, rating_sum: manual.avg_rating * manual.new_reviews, alltime_avg: manual.alltime_avg, alltime_count: manual.alltime_count, visits, per100: visits ? (manual.new_reviews / visits) * 100 : null, rows: [] };
   }
@@ -314,13 +326,13 @@ export function reviewsMonth(ix, month, rules = KPI_RULES) {
   if (!ix.ds.reviews || !base) return { month, state: 'no_data', value: null, num: 0, rows: [], visits };
   // An export only knows reviews up to its last date: later months are No data, never zero.
   const exp = ix.ds.reviewsExport || null;
-  if (exp && month > monthOf(exp.reviews_to)) return { month, state: 'no_data', value: null, num: 0, rows: [], visits, after_export: true };
-  const rows = ix.reviewsByMonth.get(month) || [];
+  if (exp && from > exp.reviews_to) return { month, state: 'no_data', value: null, num: 0, rows: [], visits, after_export: true };
+  const rows = inWindow(ix.reviewsByMonth, from, to, (x) => x.date);
   const sum = rows.reduce((t, r) => t + r.rating, 0);
   let allCount = base.count;
   let allSum = base.count * base.avg;
-  for (const [m, list] of ix.reviewsByMonth) if (m <= month) for (const r of list) (allCount += 1), (allSum += r.rating);
-  return { month, state: 'ok', manual: false, value: rows.length, num: rows.length, avg: rows.length ? sum / rows.length : null, rating_sum: sum, alltime_avg: allCount ? allSum / allCount : null, alltime_count: allCount, visits, per100: visits ? (rows.length / visits) * 100 : null, rows, export: exp, partial: !!exp && month === monthOf(exp.reviews_to) };
+  for (const [m, list] of ix.reviewsByMonth) if (m <= monthOf(to)) for (const r of list) if (r.date <= to) (allCount += 1), (allSum += r.rating);
+  return { month, state: 'ok', manual: false, value: rows.length, num: rows.length, avg: rows.length ? sum / rows.length : null, rating_sum: sum, alltime_avg: allCount ? allSum / allCount : null, alltime_count: allCount, visits, per100: visits ? (rows.length / visits) * 100 : null, rows, export: exp, partial: !!exp && to > exp.reviews_to };
 }
 
 /** OCR against its target range (lower is better): on track, within 5% of missing it, or more than 5% off. */
@@ -374,11 +386,28 @@ function measure(ix, kpi, months, today, rules) {
  * the selected month, pooled, vs the 12 before.
  * A KPI whose source is missing or stale has no value: state 'no_data' or 'stale'.
  */
-export function scorecard(ix, { brand, month, mode = 'month', now, today, rules = KPI_RULES }) {
+/** One KPI over exact dates (a custom range). OCR is reported by month only. */
+function ranged(ix, kpi, w, today, rules) {
+  const p =
+    kpi === 'ocr' ? { state: 'no_data', value: null, num: 0, den: 0, monthly_only: true }
+    : kpi === 'churn' ? churnMonth(ix, monthOf(w.from), today, rules, w)
+    : kpi === 'fulfilment' ? fulfilmentRange(ix, w.from, w.to, today, rules)
+    : kpi === 'complaints' ? complaintsMonth(ix, monthOf(w.from), today, rules, w)
+    : reviewsMonth(ix, monthOf(w.from), rules, w);
+  return { ...p, parts: [p], missing: 0 };
+}
+
+export function scorecard(ix, { brand, month, mode = 'month', range = null, now, today, rules = KPI_RULES }) {
+  // mode 'range': exact dates (range.from..range.to), compared with the same number of days before.
+  const isRange = mode === 'range' && !!range;
+  if (isRange) month = monthOf(range.to);
+  const days = isRange ? Math.round((ms(range.to) - ms(range.from)) / DAY) + 1 : 0;
+  const prevRange = isRange ? { from: addDays(range.from, -days), to: addDays(range.from, -1) } : null;
+  const inProgress = !isRange && mode !== 't12' && month === monthOf(today);
   const span = mode === 't12' ? 12 : 1;
   const months = monthsBetween(addMonths(month, 1 - span), month).filter((m) => m >= rules.firstMonth);
   const prevMonths = monthsBetween(addMonths(month, 1 - 2 * span), addMonths(month, -span)).filter((m) => m >= rules.firstMonth);
-  const period = span === 1 ? monthLabel(month) : `${monthLabel(months[0])} – ${monthLabel(month)}`;
+  const period = isRange ? (range.from === range.to ? dayLabel(range.from) : `${dayLabel(range.from)} – ${dayLabel(range.to)}`) : span === 1 ? `${monthLabel(month)}${inProgress ? ' to date' : ''}` : `${monthLabel(months[0])} – ${monthLabel(month)}`;
   const formulas = FORMULAS(rules);
   const tiles = brand.kpis.map((kpi) => {
     const tile = { kpi, label: KPI_LABELS[kpi], period, formula: formulas[kpi], unit: UNIT[kpi] || null, value: null, delta: null, status: null, badges: [], details: [], sources: [], refreshed_at: null, target: null, last12: null };
@@ -391,20 +420,22 @@ export function scorecard(ix, { brand, month, mode = 'month', now, today, rules 
     const ocrBlock = () => (sourcesFor(ix, ['qbo'], now, rules).state === 'ok' ? 'ok' : sourcesFor(ix, ['syft'], now, rules).state);
     const blocking = kpi === 'ocr' ? ocrBlock() : src.state;
     if (blocking !== 'ok') return { ...tile, state: blocking, note: src.list.filter((s) => s.state !== 'ok').map((s) => `${s.label}: ${s.state === 'stale' ? `no refresh in over ${rules.staleHours} hours` : s.note || 'not connected'}`).join(' · ') };
-    const cur = measure(ix, kpi, months, today, rules);
-    if (cur.state !== 'ok') return { ...tile, state: 'no_data', note: `No data for ${period}` };
-    const prev = prevMonths.length === span ? measure(ix, kpi, prevMonths, today, rules) : null;
+    const cur = isRange ? ranged(ix, kpi, range, today, rules) : measure(ix, kpi, months, today, rules);
+    if (cur.state !== 'ok') return { ...tile, state: 'no_data', note: cur.monthly_only ? 'Reported by month only. Choose a month to see it.' : `No data for ${period}` };
+    const prev = isRange ? (prevRange.from >= monthStart(rules.firstMonth) ? ranged(ix, kpi, prevRange, today, rules) : null) : prevMonths.length === span ? measure(ix, kpi, prevMonths, today, rules) : null;
     tile.state = 'ok';
     tile.value = round(cur.value, kpi === 'reviews' ? 0 : kpi === 'complaints' ? 2 : 1);
     if (prev?.state === 'ok') {
       const d = round(cur.value - prev.value, kpi === 'reviews' ? 0 : kpi === 'complaints' ? 2 : 1);
-      tile.delta = { value: d, unit: UNIT[kpi] === 'pct' ? 'pp' : UNIT[kpi], better: d === 0 ? null : d < 0 === LOWER_IS_BETTER[kpi], versus: span === 1 ? monthLabel(prevMonths[0]) : 'the 12 months before' };
+      tile.delta = { value: d, unit: UNIT[kpi] === 'pct' ? 'pp' : UNIT[kpi], better: d === 0 ? null : d < 0 === LOWER_IS_BETTER[kpi], versus: isRange ? `the ${days} day${days === 1 ? '' : 's'} before` : span === 1 ? monthLabel(prevMonths[0]) : 'the 12 months before' };
     }
+    if (inProgress) tile.badges.push({ tone: 'neutral', text: 'Month in progress: figures to date' });
     if (cur.missing) tile.badges.push({ tone: 'warning', text: `${cur.missing} of ${months.length} months have no data` });
     tile.details.push({ label: kpi === 'ocr' ? 'Cost ÷ revenue' : kpi === 'churn' ? 'Events ÷ clients' : kpi === 'fulfilment' ? 'Completed ÷ scheduled' : kpi === 'complaints' ? 'Complaints ÷ visits' : 'New reviews', value: kpi === 'ocr' ? `$${Math.round(cur.num).toLocaleString('en-CA')} ÷ $${Math.round(cur.den).toLocaleString('en-CA')}` : kpi === 'reviews' ? String(cur.num) : `${cur.num.toLocaleString('en-CA')} ÷ ${cur.den.toLocaleString('en-CA')}` });
     const one = span === 1 ? cur : null;
     // Baseline: the same measure pooled over the 12 months ending at the selected month.
-    const base12 = span === 1 ? measure(ix, kpi, monthsBetween(addMonths(month, -11), month).filter((m) => m >= rules.firstMonth), today, rules) : null;
+    const lastFull = inProgress || isRange ? addMonths(monthOf(today) < month ? monthOf(today) : month, month === monthOf(today) ? -1 : 0) : month;
+    const base12 = span === 1 ? measure(ix, kpi, monthsBetween(addMonths(lastFull, -11), lastFull).filter((m) => m >= rules.firstMonth), today, rules) : null;
     const baseline = base12?.state === 'ok' ? base12.value : null;
     // The same two reference lines on every tile, in the same words: Target and Last 12 months.
     tile.target = kpi === 'ocr' ? `${rules.ocrTarget[0]}–${rules.ocrTarget[1]}%` : kpi === 'churn' ? `under ${rules.churnTarget}%` : kpi === 'fulfilment' ? `${rules.fulfilmentTarget}% or higher` : null;
@@ -431,7 +462,9 @@ export function scorecard(ix, { brand, month, mode = 'month', now, today, rules 
     }
     if (kpi === 'churn') {
       const band = churnBand(cur.value, rules);
-      tile.status = { label: band.label, tone: band.tone };
+      // The bands and target are monthly rates: they do not apply to a custom range or a month in progress.
+      if (isRange || inProgress) tile.badges.push({ tone: 'neutral', text: 'Monthly bands and target do not apply to a partial period' });
+      else tile.status = { label: band.label, tone: band.tone };
       const flags = cur.parts.reduce((t, p) => t + p.over_cancel.length, 0);
       const pending = cur.parts.reduce((t, p) => t + p.pending, 0);
       if (pending) tile.details.push({ label: `Temporary, inside ${rules.temporaryReturnDays}-day window`, value: `${pending} (not counted yet)` });
@@ -493,19 +526,21 @@ export function scorecard(ix, { brand, month, mode = 'month', now, today, rules 
     });
   }
   const references = { churn: { line: rules.churnTarget, label: `target ${rules.churnTarget}%` }, fulfilment: { line: rules.fulfilmentTarget, label: `target ${rules.fulfilmentTarget}%` }, ocr: { band: rules.ocrTarget, label: `target ${rules.ocrTarget[0]}–${rules.ocrTarget[1]}%` } };
-  return { brand: { key: brand.key, name: brand.name, detail: brand.detail }, month, mode, period, tiles, trends, references };
+  return { brand: { key: brand.key, name: brand.name, detail: brand.detail }, month, mode: isRange ? 'range' : mode, range: isRange ? range : null, period, tiles, trends, references };
 }
 
 // ---------- drill-down ----------
 const col = (key, label, kind) => ({ key, label, kind });
 
 /** The rows behind one tile, each with whether and why it was counted. */
-export function drill(ix, { kpi, month, mode = 'month', today, rules = KPI_RULES }) {
+export function drill(ix, { kpi, month, mode = 'month', range = null, today, rules = KPI_RULES }) {
+  const isRange = mode === 'range' && !!range;
+  if (isRange) month = monthOf(range.to);
   const span = mode === 't12' ? 12 : 1;
   const months = monthsBetween(addMonths(month, 1 - span), month).filter((m) => m >= rules.firstMonth);
-  const parts = months.map((m) => monthly(ix, kpi === 'over_cancel' ? 'churn' : kpi, m, today, rules));
+  const parts = isRange ? ranged(ix, kpi === 'over_cancel' ? 'churn' : kpi, range, today, rules).parts.map((p) => ({ ...p, month: p.month || month, lines: p.lines || [] })) : months.map((m) => monthly(ix, kpi === 'over_cancel' ? 'churn' : kpi, m, today, rules));
   const all = (pick) => parts.flatMap((p) => pick(p) || []);
-  const period = span === 1 ? monthLabel(month) : `${monthLabel(months[0])} – ${monthLabel(month)}`;
+  const period = isRange ? `${dayLabel(range.from)} – ${dayLabel(range.to)}` : span === 1 ? monthLabel(month) : `${monthLabel(months[0])} – ${monthLabel(month)}`;
   if (kpi === 'ocr') {
     const rows = all((p) => p.lines.map((l) => ({ month: p.month, account: l.account, group: l.group, amount: l.amount, counted: l.included, outcome: l.included ? 'Included in operational cost' : 'Excluded' })).concat(p.state === 'ok' ? [{ month: p.month, account: 'Revenue', group: 'Revenue', amount: p.revenue, counted: true, outcome: 'Denominator' }] : []));
     const compare = parts.map((p) => ({ month: p.month, qbo: p.basis === 'syft' ? null : round(p.value), syft: p.syft, diff: round(p.diff), status: p.status, flagged: p.flagged, income: p.syft_income, file: p.syft_file, received: p.syft_received ? dayOf(p.syft_received) : null }));
