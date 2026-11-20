@@ -550,16 +550,20 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
       if (src) upcoming = new Set(src.visits.filter((v) => v.customer_id != null && v.date >= today).map((v) => String(v.customer_id)));
     } catch { /* planner not running: churn unknown */ }
     const byCleaner = new Map();
-    if (!upcoming) return { known: false, byCleaner };
+    // Every recurring client per regular cleaner (the base for churn %): cleaner -> last-clean dates.
+    const book = new Map();
+    if (!upcoming) return { known: false, byCleaner, book };
     for (const [cid, list] of s.byCustomer) {
       const last = list.at(-1);
       if (!last || last.kind === 'one' || list.length < 2) continue;
       if (last.partner_kind === 'homemaking' || last.partner_kind === 'program') continue;
+      const cleaner = mainBefore(list, last.at + 1);
+      if (cleaner == null) continue;
+      if (!book.has(cleaner)) book.set(cleaner, []);
+      book.get(cleaner).push(last.date);
       if (upcoming.has(String(cid))) continue;
       const gap = daysBetween(last.date, today);
       if (gap < CHURN.minGap) continue;
-      const cleaner = mainBefore(list, last.at + 1);
-      if (cleaner == null) continue;
       const churned = gap >= CHURN.days;
       const withThem = list.filter((v) => v.teams.some((t) => t.id === cleaner));
       const recent = list.slice(-6);
@@ -572,7 +576,7 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
       byCleaner.get(cleaner).push(entry);
     }
     for (const l of byCleaner.values()) l.sort((a, b) => (a.last_clean < b.last_clean ? 1 : -1));
-    return { known: true, byCleaner };
+    return { known: true, byCleaner, book };
   }
 
   // Typical hours from the end of a clean to its rating, for ratings in [from, to].
@@ -629,6 +633,9 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
     const rc = (recleans.get(st.id) || []).filter((e) => e.date >= from && e.date <= today).sort((a, b) => (a.date < b.date ? 1 : -1));
     const churnedNow = lost ? lost.filter((c) => c.status === 'churned' && c.churned_on >= from && c.churned_on <= today) : [];
     const atRisk = lost ? lost.filter((c) => c.status === 'at_risk') : [];
+    // Churn %: churned clients ÷ the recurring clients they were the regular cleaner for in the
+    // period (those with a clean in the period, plus those who churned in it).
+    const recurring = lost ? (churn.book.get(st.id) || []).filter((d) => d >= from).length + churnedNow.filter((c) => c.last_clean < from).length : null;
     const fromSheet = sheetReviews(adj.by.get(st.id), from, today);
     const fromApp = (side.reviews.get(st.id) || []).filter((g) => g.date >= from && g.date <= today).map((g) => ({ date: g.date, reviewer: g.reviewer, amount: g.bonus_paid ? 10 : 0, submitted_by: null }));
     const reviews = [...fromSheet, ...fromApp].sort((a, b) => (a.date < b.date ? 1 : -1));
@@ -638,6 +645,8 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
       reclean_rate: row.visits ? Math.round((rc.length / row.visits) * 1000) / 1000 : null,
       engagement: row.visits ? Math.round((row.rated / row.visits) * 1000) / 1000 : null,
       churned: lost ? churnedNow.length : null,
+      recurring_clients: recurring,
+      churn_rate: recurring ? Math.round((churnedNow.length / recurring) * 1000) / 1000 : null,
       at_risk: lost ? atRisk.length : null,
       loyal_left: churnedNow.filter((c) => c.loyal).length,
       moved: (st.lost || []).filter((l) => l.to != null).length,
@@ -718,6 +727,8 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
         feedback_hours: feedbackHours(s, from, to),
         margin: admin ? marginOf(sumStats) : undefined,
         churned: churn.known ? rows.reduce((a, r) => a + (r.churned || 0), 0) : null,
+        recurring_clients: churn.known ? rows.reduce((a, r) => a + (r.recurring_clients || 0), 0) : null,
+        churn_rate: churn.known ? pct(rows.reduce((a, r) => a + (r.churned || 0), 0), rows.reduce((a, r) => a + (r.recurring_clients || 0), 0)) : null,
         at_risk: churn.known ? rows.reduce((a, r) => a + (r.at_risk || 0), 0) : null,
       },
       churn_known: churn.known,

@@ -11,7 +11,7 @@ import { Kpi, NotBuilt, PeriodPicker, ReportStatusLine, Spark, monthYear, weekLa
 const BASE = '/reports/cleaners-2';
 type CleanerRow = CleanerRow2;
 type CleanerReport = CleanerReport2;
-type SortKey = 'name' | 'visits' | 'hours_per_week' | 'hours_filled' | 'on_time' | 'happy' | 'engagement' | 'unhappy' | 'churned' | 'reliability' | 'rel_late' | 'rel_noshow' | 'rel_short' | 'rel_missing' | 'recleans' | 'google_reviews' | 'revenue' | 'earned' | 'margin';
+type SortKey = 'name' | 'visits' | 'hours_per_week' | 'hours_filled' | 'on_time' | 'happy' | 'engagement' | 'unhappy' | 'churned' | 'churn_rate' | 'reliability' | 'rel_late' | 'rel_noshow' | 'rel_short' | 'rel_missing' | 'recleans' | 'google_reviews' | 'revenue' | 'earned' | 'margin';
 // [key, label, one-line definition shown on hover]
 const COLS: [SortKey, string, string][] = [
   ['name', 'Cleaner', ''],
@@ -22,6 +22,7 @@ const COLS: [SortKey, string, string][] = [
   ['happy', 'Happy', 'Share of rated visits rated Happy. Click for the ratings.'],
   ['unhappy', 'Unhappy', 'Unhappy ratings. Click to read them.'],
   ['churned', 'Churn', 'Recurring client, nothing booked, no clean in 60+ days. Click to see who.'],
+  ['churn_rate', 'Churn %', 'Churned clients ÷ the recurring clients they were the regular cleaner for.'],
   ['reliability', 'Reliability', '% of visits with no late cancel, no-show or missing check-in.'],
   ['recleans', 'Re-cleans', 'Launch27 Reclean visits after their clean. Click to see which.'],
   ['google_reviews', 'Google reviews', 'Review bonuses on the pay adjustments sheet. Click to see who.'],
@@ -104,6 +105,12 @@ function Cell({ k, c, admin, onDrill }: { k: SortKey; c: CleanerRow; admin: bool
           {c.churned == null ? '—' : c.churned || c.at_risk ? <Num value={<>{c.churned}{c.at_risk ? <span className="muted small"> · {c.at_risk}</span> : null}</>} onClick={open('churn')} label={`${c.name}: churned clients`} /> : 0}
         </td>
       );
+    case 'churn_rate':
+      return (
+        <td className={`num${c.churn_rate != null && c.churn_rate >= 0.15 && (c.churned || 0) >= 2 ? ' warn' : ''}`}>
+          {c.recurring_clients ? pct(c.churn_rate) : '—'}<div className="muted small">{c.recurring_clients == null ? '' : `${c.churned} of ${c.recurring_clients} recurring`}</div>
+        </td>
+      );
     case 'reliability':
       return (
         <td className={`num${rs.no_shows ? ' rep-bad' : rs.score != null && rs.score < 0.95 ? ' warn' : ''}`}>
@@ -143,6 +150,7 @@ function DrillModal({ c, kind, days, onClose }: { c: CleanerRow; kind: DrillKind
         </div>
         {kind === 'churn' && (
           <>
+            <p className="small"><b>{c.churned} of {c.recurring_clients} recurring clients churned ({pct(c.churn_rate)}).</b></p>
             <p className="muted small">Recurring clients with nothing booked ahead. Churned = no clean for {days}+ days; at risk = under {days} days. Listed under their regular cleaner.</p>
             <div className="table-scroll">
               <table className="rep-mini rep-drill-table">
@@ -271,7 +279,7 @@ export function CleanerReports2Page() {
             <Kpi label="On time, team" value={pct(r.team.on_time, 1)} note={`${r.team.check_ins} check-ins`} />
             <Kpi label="Happy ratings, team" value={pct(r.team.happy)} note="of rated visits" />
             <Kpi label="Flagged" value={`${r.team.flagged} cleaner${r.team.flagged === 1 ? '' : 's'}`} note="worth a conversation" tone={r.team.flagged ? 'warn' : undefined} />
-            <Kpi label="Churned" value={r.churn_known ? `${r.team.churned} client${r.team.churned === 1 ? '' : 's'}` : '—'} note={r.churn_known ? `${r.team.at_risk} more at risk (nothing booked ahead)` : 'needs the scheduling planner'} tone={r.team.churned ? 'warn' : undefined} />
+            <Kpi label="Churned" value={r.churn_known ? `${r.team.churned} client${r.team.churned === 1 ? '' : 's'}` : '—'} note={r.churn_known ? `${pct(r.team.churn_rate, 1)} of ${r.team.recurring_clients} recurring clients · ${r.team.at_risk} more at risk` : 'needs the scheduling planner'} tone={r.team.churned ? 'warn' : undefined} />
             {r.admin && <Kpi label="Paid to cleaners" value={money(r.team.earned)} note={`on ${money(r.team.revenue)} revenue`} />}
             {r.admin && r.team.margin && <Kpi label="Margin" value={money(r.team.margin.dollars)} note={`${pct(r.team.margin.share)} of revenue (homemaking left out)`} />}
             <Kpi label="Engagement rate" value={pct(r.team.engagement, 1)} note={r.team.feedback_hours != null ? `of visits get rated · typically ${r.team.feedback_hours} h after the clean` : 'of visits get rated'} />
