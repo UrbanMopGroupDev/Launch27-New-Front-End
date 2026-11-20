@@ -99,7 +99,12 @@ export interface CleanerReport {
   last40: { date: string; late: number; long: boolean; enroute: boolean; customer: string }[];
 }
 
-export interface ChurnClient { customer_id: number; customer: string; last_clean: string; days_since: number; freq: string | null; cleans: number; status: 'churned' | 'at_risk'; churned_on: string | null }
+export interface RecleanEvent { date: string; customer: string; customer_id?: number | null; original_date: string; original_by: string[]; gap_days: number; how: 'service' | 'free'; by: string[]; visit_id: number | null }
+export interface SheetReview { date: string; reviewer: string; amount: number; submitted_by: string | null }
+export interface RatingRow { date: string; customer: string; r: number; comment: string | null }
+export interface DropRow { date: string; customer: string | null; reason: string | null }
+export interface AdjustmentsInfo { connected: boolean; synced_at: string | null; rows: number | null; error?: string | null; share_with?: string | null; sheet_url?: string; unmatched?: { name: string; rows: number }[] }
+export interface ChurnClient { customer_id: number; customer: string; last_clean: string; last_cleaner: string[]; days_since: number; freq: string | null; cleans: number; total_cleans: number; share: number; together_since: string | null; loyal: boolean; status: 'churned' | 'at_risk'; churned_on: string | null }
 
 // Cleaner reports 2.0: Leslie's report plus engagement, churn, margin, re-cleans and reliability.
 export interface CleanerRow2 {
@@ -146,6 +151,11 @@ export interface CleanerRow2 {
   recleans: number;
   complaints_n: number;
   reliability2: number | null;
+  reliability_score: { score: number | null; issues: number; no_shows: number | null; late_cancels: number | null; short_notice: number | null; missing_checks: number; drops_known: boolean };
+  reclean_rate: number | null;
+  loyal_left: number;
+  review_bonus: number;
+  drill: { churn: ChurnClient[]; ratings: RatingRow[]; recleans: RecleanEvent[]; late_cancels: DropRow[]; no_shows: DropRow[]; reviews: SheetReview[] };
   margin_dollars?: number;
   flags: Flag[];
 }
@@ -158,6 +168,7 @@ export interface CleanersReport2 {
   team: { cleaners: number; median_visits: number | null; max_visits: number; on_time: number | null; check_ins: number; happy: number | null; rated_share: number | null; revenue: number; earned?: number; flagged: number; runs_long_median: number | null; engagement: number | null; feedback_hours: number | null; margin?: { dollars: number; share: number } | null; churned: number | null; at_risk: number | null };
   churn_known: boolean;
   churn_days: number;
+  adjustments: AdjustmentsInfo;
   rows: CleanerRow2[];
 }
 
@@ -167,12 +178,15 @@ export interface CleanerReport2 {
   admin: boolean;
   change_log_start: string;
   cleaner: { id: number; name: string; status: string; status_label: string; area: string | null; color: string; tags: string[]; hours_type: string | null; phone: string | null; weekly_hours: number | null; first_seen: string | null; start_date: string | null; start_known: boolean; stars: number | null; ratings_count: number | null; restrictive: { tag: string; kind: string }[] };
-  stats: Omit<CleanerRow2, 'status' | 'status_label' | 'assignable' | 'area' | 'color' | 'is_new' | 'hours_type' | 'flags' | 'stars' | 'ratings_count' | 'reliability' | 'google_reviews'> & { booked_next4: number | null; capacity_next4: number | null; per_hour?: number | null };
+  stats: Omit<CleanerRow2, 'status' | 'status_label' | 'assignable' | 'area' | 'color' | 'is_new' | 'hours_type' | 'flags' | 'stars' | 'ratings_count' | 'reliability'> & { booked_next4: number | null; capacity_next4: number | null; per_hour?: number | null };
   team: { runs_long_median: number | null };
   reliability: Reliability;
   finished_early: { date: string; customer: string; short_min: number; visit_id: number }[];
   complaints: { id: number; subject: string | null; date: string; outcome: string | null; status: string | null; booking_id: number | null }[];
   google_reviews: GoogleReview[];
+  recleans: RecleanEvent[];
+  sheet_reviews: SheetReview[];
+  adjustments: AdjustmentsInfo;
   churn: { known: boolean; days: number; clients: ChurnClient[] };
   raise?: RaiseReview;
   flags: Flag[];
