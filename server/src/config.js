@@ -120,6 +120,41 @@ export function loadConfig(env = process.env) {
     }
   }
 
+  // SMS set-up problems are also shown on Support settings → Channels, not only in the logs.
+  const smsProblems = [];
+  const smsWarn = (provider, text) => {
+    warnings.push(text);
+    smsProblems.push({ provider, problem: text });
+  };
+  // SMS runs on Twilio only. The RingCentral SMS integration was removed (RingCentral calling,
+  // above, is unaffected); left-over RINGCENTRAL_SMS_* variables are ignored.
+  const leftover = Object.keys(env).filter((k) => /^RINGCENTRAL_SMS_/i.test(k) && env[k]).sort();
+  if (leftover.length) warnings.push(`RingCentral SMS was removed: SMS runs on Twilio only. ${leftover.join(', ')} ${leftover.length === 1 ? 'is' : 'are'} ignored and can be deleted. RingCentral calling is not affected.`);
+
+  // Live SMS through Twilio (docs/sms.md): every business number texts through Twilio.
+  // Production only: Twilio has no separate test data, so dev and QA would read real
+  // customers' texts. They use the sandbox SMS channel instead.
+  let twilioSms = null;
+  if (env.TWILIO_ACCOUNT_SID || env.TWILIO_AUTH_TOKEN) {
+    const numbers = String(env.TWILIO_SMS_NUMBERS || '').split(/[,\s]+/).filter(Boolean);
+    const base = env.TWILIO_WEBHOOK_BASE_URL ? env.TWILIO_WEBHOOK_BASE_URL.replace(/\/+$/, '') : null;
+    if (!isProd) warnings.push(`Twilio SMS settings ignored in ${appEnv}: only production reads and sends real texts. SMS runs in sandbox mode here.`);
+    else if (!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN)) smsWarn('twilio', 'Twilio SMS needs TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN; Twilio is not connected.');
+    else if (!numbers.length) smsWarn('twilio', 'TWILIO_SMS_NUMBERS is empty: list the Twilio numbers to text from; Twilio is not connected.');
+    else if (base && !/^https:\/\//.test(base)) smsWarn('twilio', 'TWILIO_WEBHOOK_BASE_URL must be an https:// address; Twilio is not connected.');
+    else {
+      twilioSms = { accountSid: env.TWILIO_ACCOUNT_SID, authToken: env.TWILIO_AUTH_TOKEN, apiKeySid: env.TWILIO_API_KEY_SID || null, apiKeySecret: env.TWILIO_API_KEY_SECRET || null, numbers, webhookBaseUrl: base };
+      if (!base) smsWarn('twilio', 'Twilio SMS has no TWILIO_WEBHOOK_BASE_URL: incoming texts arrive through the 5-minute check, and delivery status by polling.');
+    }
+  }
+  if (isProd && !(env.TWILIO_ACCOUNT_SID || env.TWILIO_AUTH_TOKEN)) {
+    // Twilio is switched on by TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN. Name (never show the value
+    // of) any other TWILIO_* variable that is set, so a misnamed variable is easy to spot.
+    const other = Object.keys(env).filter((k) => /^TWILIO/i.test(k) && env[k]).sort();
+    if (other.length) smsWarn('twilio', `Twilio is not connected: TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN are not set on this service (found ${other.join(', ')}).`);
+  }
+  if (isProd && !twilioSms) smsWarn(null, 'SMS is not connected: set the TWILIO_* variables (docs/sms.md). Text replies are saved, not sent.');
+
   const placement = parsePlacementTokens(env.PLACEMENT_TOKENS);
   const placementIps = parseIpList(env.PLACEMENT_ALLOWED_IPS);
   if (placement.tokens.size && l27Mode === 'live' && !(env.L27_PLACEMENT_EMAIL && env.L27_PLACEMENT_PASSWORD)) {
@@ -180,6 +215,7 @@ export function loadConfig(env = process.env) {
     sessionSecret: env.SESSION_SECRET || 'dev-only-secret',
     allowWrites,
     notificationsMode,
+    smsProblems,
     gmail,
     // Support workspace
     databaseUrl: env.DATABASE_URL || null,
@@ -193,12 +229,18 @@ export function loadConfig(env = process.env) {
     // narrows it to those logins.
     utilizationEnabled: true,
     utilizationEmails: String(env.UTILIZATION_EMAILS || '').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean),
+    // KPI scorecard (Reports → KPI scorecard). Dev and QA: everyone, synthetic data. Production:
+    // only these logins (comma-separated); empty = nobody.
+    // The one mailbox that receives the monthly Syft management report (read-only, production only).
+    kpiSyftMailbox: isProd ? String(env.KPI_SYFT_MAILBOX || '').trim().toLowerCase() || null : null,
+    kpiEmails: String(env.KPI_EMAILS || '').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean),
     simulator: env.INBOX_SIMULATOR === undefined ? !isProd : truthy(env.INBOX_SIMULATOR),
     // Sample inbox conversations on an empty database. Never in production.
     sampleData: !isProd && truthy(env.SAMPLE_DATA),
     portalName,
     portalLinks,
     ringcentralClientId,
+    twilioSms,
     ringcentralServer,
     ringcentralRecord,
     workerIntervalMs: Number(env.INBOX_WORKER_INTERVAL_MS || 30_000),
@@ -227,6 +269,10 @@ export function loadConfig(env = process.env) {
     // production only, so dev and QA never pull real complaint text. All read-only.
     kustomerApiKey: isProd ? env.KUSTOMER_API_KEY || null : null,
     kustomerComplaintKlass: env.KUSTOMER_COMPLAINT_KLASS || null,
+    // Kustomer migration (docs/kustomer-migration.md): exported records are encrypted with this.
+    // Production must set its own; dev and QA (synthetic Kustomer only) use a fixed test key.
+    kustomerExportKey: isProd ? env.KUSTOMER_EXPORT_KEY || null : env.KUSTOMER_EXPORT_KEY || 'dev-and-qa-only-kustomer-export-key-synthetic-data',
+    kustomerExportRpm: Math.min(1000, Math.max(10, Number(env.KUSTOMER_EXPORT_RPM) || 300)),
     slackBotToken: isProd ? env.SLACK_BOT_TOKEN || null : null,
     slackChannels: parseSlackChannels(env.COMPLAINT_SLACK_CHANNELS),
     // Claude classification of redacted complaint text. Optional; rules-only without it.

@@ -199,16 +199,18 @@ export interface DataCheck {
   read_by: 'sync' | 'person' | null;
   counts: Record<DataFlag, number>;
   labels: Record<DataFlag, string>;
-  cleaners: { cleaner_id: number; name: string; status_label: string | null; taking: boolean; area: string; home_location: boolean; weekly_hours: number | null; weekly_rows: number; dated_rows: number; availability_error: string | null; sent: { weekly: SentRow[]; dated: (SentRow & { date: string })[]; dated_total: number }; available_h: number; booked_h: number; visits: number; flags: { kind: DataFlag; label: string }[] }[];
+  cleaners: { cleaner_id: number; name: string; status_label: string | null; taking: boolean; area: string; home_location: boolean; weekly_hours: number | null; weekly_rows: number; dated_rows: number; availability_error: string | null; sent: { weekly: SentRow[]; dated: (SentRow & { date: string })[]; dated_total: number }; open_h: number; other_brand_h: number; available_h: number; booked_h: number; visits: number; flags: { kind: DataFlag; label: string }[] }[];
 }
 export interface UtilizationReport {
-  taken_at: string | null; today: string; from: string; to: string; max_to: string; avg_leg_min: number;
+  taken_at: string | null; today: string; from: string; to: string; max_to: string; min_from: string; past: boolean; avg_leg_min: number;
   totals: UtilFigures & { cleaners: number; customers: number; customers_recurring: number };
   areas: (UtilFigures & { area: string; cleaners: number; customers: number; customers_recurring: number })[];
-  cleaners: { cleaner_id: number; name: string; area: string; status_label: string | null; visits: number; available_h: number; assigned_h: number; travel_h: number; travel_per_visit_min: number | null; left_h: number; utilization: number | null; if_left: number | null; area_short: boolean }[];
+  cleaners: { cleaner_id: number; name: string; area: string; status_label: string | null; visits: number; open_h: number; other_brand_h: number; available_h: number; assigned_h: number; travel_h: number; travel_per_visit_min: number | null; left_h: number; utilization: number | null; if_left: number | null; area_short: boolean }[];
   by_day: (UtilFigures & { date: string; areas: Record<string, UtilFigures> })[];
   trend: { week: string; total: number | null; areas: Record<string, number | null> }[];
   data_check: DataCheck;
+  history?: { first_recorded: string | null; recorded_days: number; past_days: number };
+  needs_cleaner: { kind: 'unassigned' | 'not_taking'; key: string; booking_id: number | null; projected: boolean; date: string; start: number; hours: number; customer: string | null; area: string; freq: string | null; address: string | null; cleaner: string | null; recommended?: { cleaner_id: number; name: string; score: number; free: boolean; travel: number | null; reasons: { text: string; tone: string }[] }[] }[];
   reconcile: null | {
     capacity: { existing: number; sundays: number; closed: number; other_brand: number; floor: number; result: number; ties: boolean };
     booked: { existing: number; sundays: number; other_brand: number; result: number; ties: boolean };

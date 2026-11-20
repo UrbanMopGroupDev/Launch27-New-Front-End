@@ -114,7 +114,10 @@ export async function autoAssign(q, conv) {
 //   references (email): Message-IDs the message answers (In-Reply-To + References)
 // lookup: optional result of a Launch27 lookup done before the transaction:
 //   { name, roles, l27_customer_id, l27_team_id, identities }
-export async function ingestInbound(q, input, { lookup = null, now = new Date() } = {}) {
+// Options for live channels (SMS): flagUnmatched sends a sender who is no Launch27 customer or
+// cleaner to "Who is this?" (needs_match), and ambiguousCandidates (Launch27 customer ids sharing
+// the number) does the same instead of guessing. Nothing is merged automatically.
+export async function ingestInbound(q, input, { lookup = null, now = new Date(), flagUnmatched = false, ambiguousCandidates = null } = {}) {
   const channel = input.channel;
   if (!['email', 'sms', 'voice', 'chat'].includes(channel)) throw new InboxError(400, `Unknown channel: ${channel}`);
   if (input.external_id) {
@@ -130,7 +133,8 @@ export async function ingestInbound(q, input, { lookup = null, now = new Date() 
   // 1. Who is it?
   let contacts = await contactsByIdentity(q, kind, from);
   let contact = contacts.length === 1 ? contacts[0] : null;
-  const needsMatch = contacts.length > 1;
+  let needsMatch = contacts.length > 1;
+  let matchNote = null;
   // A new address for someone we already know in Launch27 (e.g. they emailed from a second
   // address listed on their customer): add it to that contact rather than making a twin.
   if (!contacts.length && (lookup?.l27_team_id || lookup?.l27_customer_id)) {
@@ -150,6 +154,16 @@ export async function ingestInbound(q, input, { lookup = null, now = new Date() 
       l27_team_id: lookup?.l27_team_id ?? null,
       identities: [{ kind, value: from }, ...(lookup?.identities || [])],
     });
+  }
+
+  if (!needsMatch && contact && !contact.l27_customer_id && !contact.l27_team_id && !(contact.roles || []).length) {
+    if (ambiguousCandidates?.length > 1) {
+      needsMatch = true;
+      matchNote = `This number is on ${ambiguousCandidates.length} Launch27 customers (${ambiguousCandidates.map((c) => `#${c}`).join(', ')}). Link the right one.`;
+    } else if (flagUnmatched) {
+      needsMatch = true;
+      matchNote = `${from} isn't a Launch27 customer or cleaner yet. Link them to Launch27, or keep them as a new contact.`;
+    }
   }
 
   // 2. Which conversation?
@@ -193,7 +207,8 @@ export async function ingestInbound(q, input, { lookup = null, now = new Date() 
       [contact?.id ?? null, needsMatch, channel, to, from, input.subject || null, input.thread_key || null, queue?.id ?? null, Math.min(5, (action.priority || 3) + (queue?.priority_boost || 0)), policy?.id ?? null, ruleName, at],
     );
     await event(q, conv.id, `Routed to ${action.queue || 'fallback'} by "${ruleName}"`, { type: 'routed', rule: ruleName, action });
-    if (needsMatch) await event(q, conv.id, `This ${kind} belongs to ${contacts.length} contacts. Pick the right one.`, { type: 'needs_match', candidates: contacts.map((c) => c.id) });
+    if (needsMatch && matchNote) await event(q, conv.id, matchNote, { type: 'needs_match', candidates: [], l27_candidates: ambiguousCandidates || [] });
+    else if (needsMatch) await event(q, conv.id, `This ${kind} belongs to ${contacts.length} contacts. Pick the right one.`, { type: 'needs_match', candidates: contacts.map((c) => c.id) });
   } else if (reopened) {
     const doneAt = conv.done_at;
     conv = await one(q, "UPDATE conversations SET status = 'open', done_at = NULL, snooze_until = NULL, reopened_count = reopened_count + 1, updated_at = now() WHERE id = $1 RETURNING *", [conv.id]);
@@ -333,9 +348,15 @@ export async function logCall(q, user, call, { lookup = null, now = new Date() }
 
 // ---------- outbound, notes, events ----------
 
-export async function reply(q, user, convId, { body, channel, to, subject, from }, { connectors = {} } = {}) {
+export async function reply(q, user, convId, { body, channel, to, subject, from, idempotency_key }, { connectors = {} } = {}) {
   const conv = await one(q, 'SELECT * FROM conversations WHERE id = $1', [convId]);
   if (!conv) throw new InboxError(404, 'Conversation not found');
+  // The composer sends one key per message: a repeated request returns the first one, unsent again.
+  const key = idempotency_key ? String(idempotency_key).slice(0, 100) : null;
+  if (key) {
+    const earlier = await one(q, "SELECT * FROM messages WHERE conversation_id = $1 AND meta->>'idempotency_key' = $2", [convId, key]);
+    if (earlier) return earlier;
+  }
   if (!body?.trim()) throw new InboxError(400, 'Write a message first');
   const ch = channel || conv.channel;
   if (ch === 'voice') throw new InboxError(400, 'Use the phone to call; replies go by email or text');
@@ -359,12 +380,21 @@ export async function reply(q, user, convId, { body, channel, to, subject, from 
     const base = (conv.subject || '').trim();
     emailSubject = subject?.trim() || (base ? (earlier.length && !/^re:/i.test(base) ? `Re: ${base}` : base) : 'A message from UrbanMop');
   }
+  // Saved first as "sending" (the key's unique index stops a second copy), then handed to the
+  // provider; it only shows as sent once the provider has accepted it.
+  const reserved = await one(
+    q,
+    `INSERT INTO messages (conversation_id, kind, direction, channel, from_addr, to_addr, subject, body, author_id, delivery_state, meta)
+     VALUES ($1,'message','out',$2,$3,$4,$5,$6,$7,'sending',$8::jsonb)
+     ON CONFLICT (conversation_id, (meta->>'idempotency_key')) WHERE meta ? 'idempotency_key' DO NOTHING RETURNING *`,
+    [convId, ch, fromId, target, emailSubject, body, user.id, json(key ? { idempotency_key: key } : {})],
+  );
+  if (!reserved) return one(q, "SELECT * FROM messages WHERE conversation_id = $1 AND meta->>'idempotency_key' = $2", [convId, key]);
   const result = await sendOutbound({ channel: ch, from: fromId, to: target, subject: emailSubject, body, thread }, connectors);
   const msg = await one(
     q,
-    `INSERT INTO messages (conversation_id, kind, direction, channel, from_addr, to_addr, subject, body, author_id, delivery_state, external_id, meta)
-     VALUES ($1,'message','out',$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb) RETURNING *`,
-    [convId, ch, fromId, target, emailSubject, body, user.id, result.state, result.external_id || null, json({ provider: result.provider, note: result.note, message_id: result.message_id || undefined })],
+    `UPDATE messages SET delivery_state = $2, external_id = $3, meta = meta || $4::jsonb WHERE id = $1 RETURNING *`,
+    [reserved.id, result.state, result.external_id || null, json({ provider: result.provider, note: result.note, message_id: result.message_id || undefined })],
   );
   // The first email in a conversation names its subject and Gmail thread, so replies find it.
   if (ch === 'email' && conv.channel === 'email') {

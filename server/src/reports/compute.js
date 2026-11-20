@@ -71,6 +71,15 @@ export function slimReportVisit(booking, tt, fb) {
     location_id: Number(b.location?.id ?? b.location_id ?? booking?.location?.id) || null,
     location_name: b.location?.name ?? booking?.location?.name ?? null,
     kind: frequencyKind(booking?.frequency?.name),
+    // Service type, for the complaint playbook: the service booked and the extras that change
+    // the job (deep clean, move in/out). `reclean` = Launch27's Reclean service.
+    ...(() => {
+      const lines = (booking || b).services || [];
+      const names = lines.map((x) => x.name).filter(Boolean);
+      const extras = lines.flatMap((x) => (x.extras || []).map((e) => e.name)).filter(Boolean);
+      if (!names.length) return {};
+      return { svc: names[0], deep: extras.some((e) => /deep/i.test(e)) || names.some((n) => /deep/i.test(n)), move: extras.some((e) => /move/i.test(e)) || names.some((n) => /move/i.test(n)), reclean: names.some((n) => /re-?clean/i.test(n)) };
+    })(),
     lat: b.address?.latitude ?? null,
     lng: b.address?.longitude ?? null,
     revenue: Number(b.summary?.revenue ?? b.summary?.total) || 0,

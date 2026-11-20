@@ -4,7 +4,7 @@
 // live schedule. Cleaner pay is only returned to admins.
 import { addDays, daysBetween, localDate, mondayOf } from '../schedule/rules.js';
 import { harmonizePartners } from '../commercial/partners.js';
-import { clampRange, utilizationFacts, utilizationReport } from './utilization.js';
+import { clampRange, utilizationFacts, utilizationReport, withRecordedDays } from './utilization.js';
 import { UTILIZATION } from './utilization-config.js';
 import { PERIODS, V2, findRecleans, cleanerRow, cleanerStats, emptyStats, mainBefore, flagsFor, indexVisits, median, outsideArea, pct, periodRange, regularClients, round1, sameCleaner, slimReportVisit, teamLong, timing, weeklySeries } from './compute.js';
 import { CHANGE_LOG_START, CHURN, DROP_REASONS, RAISE_THRESHOLDS } from './raise-config.js';
@@ -781,8 +781,22 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
       throw Object.assign(new Error(err.message), { status: err.status || 409 });
     }
     const maxTo = addDays(src.today, 55);
-    const range = clampRange(src.today, from, to, maxTo);
-    const facts = utilizationFacts({ today: src.today, cleaners: src.cleaners, visits: src.visits, holidays: src.holidays, unavailable: src.unavailable, locations });
+    // Past weeks: back to what the planner keeps (13 weeks), or further where the daily record
+    // has the day (hours as they were then).
+    const liveFrom = src.history_from && src.history_from < src.today ? src.history_from : src.today;
+    const firstRecorded = schedule.firstRecordedDay ? await schedule.firstRecordedDay().catch(() => null) : null;
+    const minFrom = firstRecorded && firstRecorded < liveFrom ? firstRecorded : liveFrom;
+    const range = clampRange(src.today, from, to, maxTo, minFrom);
+    const start = range.from < src.today ? (range.from < liveFrom ? liveFrom : range.from) : src.today;
+    const live = utilizationFacts({ today: src.today, start, cleaners: src.cleaners, visits: src.visits, holidays: src.holidays, unavailable: src.unavailable, locations });
+    // Saved days in the chosen dates (before today; today and later are always live).
+    const yesterday = addDays(src.today, -1);
+    const saved = range.from <= yesterday && schedule.recordedDays ? await schedule.recordedDays(range.from, range.to < yesterday ? range.to : yesterday).catch(() => []) : [];
+    const recorded = saved.map((r) => ({
+      ...utilizationFacts({ today: src.today, start: r.day, until: r.day, cleaners: r.cleaners || [], visits: r.visits || [], holidays: r.holidays || [], unavailable: new Map((r.unavailable || []).map((id) => [Number(id), new Set([r.day])])), locations }),
+      recorded_days: [r.day],
+    }));
+    const facts = withRecordedDays(live, recorded);
     // Scheduling insights' own figures, for "Check the numbers".
     const { ov } = await plannerView(locations);
     let existing = null;
@@ -791,7 +805,17 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
       const w4 = (k) => rows.reduce((m, r) => m + r.weeks.slice(0, 4).reduce((a, x) => a + x[k], 0), 0);
       existing = { capacity4: w4('capacity'), booked4: w4('booked'), unassigned_visits: ov.counts.unassigned_visits, tolerance: Math.max(0.5, rows.length * 4 * 0.05) };
     }
-    return utilizationReport({ facts, ...range, maxTo, cfg: UTILIZATION, existing, takenAt: src.taken_at, cleaners: src.cleaners, source: { full_at: src.full_at, cleaners_by: src.cleaners_by } });
+    const report = utilizationReport({ facts, ...range, maxTo, minFrom, cfg: UTILIZATION, existing, takenAt: src.taken_at, cleaners: src.cleaners, source: { full_at: src.full_at, cleaners_by: src.cleaners_by } });
+    // Recommended cleaners for the bookings with no cleaner yet (upcoming ones; the planner's ranking).
+    const keys = report.needs_cleaner.filter((x) => x.kind === 'unassigned' && x.date >= src.today).slice(0, 150).map((x) => x.key);
+    const recs = keys.length && schedule.recommendFor ? await schedule.recommendFor(keys, 3).catch(() => ({})) : {};
+    for (const x of report.needs_cleaner) x.recommended = recs[x.key] || [];
+    // Where past days come from: the daily record (hours as they were) or rebuilt (current hours).
+    const pastTo = range.to < yesterday ? range.to : yesterday;
+    let pastDays = 0;
+    for (let d = range.from; d <= pastTo; d = addDays(d, 1)) if (new Date(`${d}T12:00:00Z`).getUTCDay() !== 0) pastDays++;
+    report.history = { first_recorded: firstRecorded, recorded_days: (facts.recorded_days || []).filter((d) => new Date(`${d}T12:00:00Z`).getUTCDay() !== 0).length, past_days: pastDays };
+    return report;
   }
 
   // The raw year of visits (for the Commercial area).

@@ -4,16 +4,17 @@
 // assign the office_manager role and pick the 'target' approval preset.
 
 export const RUNGS = [
-  { rung: 'L0', tier: 'Easy', action: 'apology', label: 'Acknowledge, apologise, log it, flag the cleaner' },
-  { rung: 'L1', tier: 'Easy', action: 'credit', amount: 5, label: '$5 off next booking' },
-  { rung: 'L2', tier: 'Easy', action: 'credit', amount: 10, label: '$10 off next booking' },
-  { rung: 'L3', tier: 'Easy–Med', action: 'reclean', label: 'Reclean (spot or full)' },
-  { rung: 'L4', tier: 'Medium', action: 'refund', pct: 15, label: '15% refund' },
-  { rung: 'L5', tier: 'Medium', action: 'refund', pct: 25, label: '25% refund' },
-  { rung: 'L6', tier: 'High', action: 'refund', pct: 50, label: '50% refund' },
-  { rung: 'L7', tier: 'Extreme', action: 'refund', pct: 100, label: 'Full refund (anything above 50%)' },
+  { rung: 'L0', name: 'Apology only', tier: 'Easy', action: 'apology', label: 'Acknowledge, apologise, log it, flag the cleaner' },
+  { rung: 'L1', name: '$5 credit', tier: 'Easy', action: 'credit', amount: 5, label: '$5 off next booking' },
+  { rung: 'L2', name: '$10 credit', tier: 'Easy', action: 'credit', amount: 10, label: '$10 off next booking' },
+  { rung: 'L3', name: 'Reclean', tier: 'Easy–Med', action: 'reclean', label: 'Reclean (spot or full)' },
+  { rung: 'L4', name: 'Small refund (up to ~20%)', tier: 'Medium', action: 'refund', pct: 15, label: '15% refund' },
+  { rung: 'L5', name: 'Partial refund (~25–40%)', tier: 'Medium', action: 'refund', pct: 25, label: '25% refund' },
+  { rung: 'L6', name: 'Half refund', tier: 'High', action: 'refund', pct: 50, label: '50% refund' },
+  { rung: 'L7', name: 'Full refund (over half)', tier: 'Extreme', action: 'refund', pct: 100, label: 'Full refund (anything above 50%)' },
 ];
 const ORDER = RUNGS.map((r) => r.rung);
+export const rungName = (rung) => RUNGS.find((r) => r.rung === rung)?.name || (rung === 'damage' ? 'Damage reimbursement' : rung || 'Apology only');
 
 // Approval roles. 'owner' (Derek) is the only role that can approve above 50%.
 export const APPROVAL_PRESETS = {
@@ -36,6 +37,8 @@ export const DEFAULT_SETTINGS = {
   roles: {},
   hard_route_role: 'office_manager',
   credit_expiry_days: 90,
+  // Automatic updates: daily, plus reading older months until this much history is stored.
+  auto: { enabled: true, history_months: 12 },
   budget: {
     target_pct: null, // null = 20% below the historical average once the baseline is known
     below_average_by: 0.2,
@@ -69,6 +72,7 @@ export function normalizeSettings(input = {}) {
   if (['office_manager', 'gm', 'owner'].includes(src.hard_route_role)) s.hard_route_role = src.hard_route_role;
   const n = (v, lo, hi, d) => (Number.isFinite(Number(v)) && Number(v) >= lo && Number(v) <= hi ? Number(v) : d);
   s.credit_expiry_days = n(src.credit_expiry_days, 7, 730, s.credit_expiry_days);
+  s.auto = { enabled: src.auto?.enabled !== false, history_months: n(src.auto?.history_months, 1, 12, 12) };
   s.pilot_months = n(src.pilot_months, 1, 24, s.pilot_months);
   const b = src.budget || {};
   s.budget.target_pct = b.target_pct == null ? null : n(b.target_pct, 0, 0.2, null);

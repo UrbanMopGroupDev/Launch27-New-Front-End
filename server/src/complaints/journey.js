@@ -92,6 +92,28 @@ export function outcomeAt(list, at, day, { today, upcoming = [], negativeReview 
 }
 
 /**
+ * One-time clients don't have a schedule to keep, so "still booking" is the wrong test. For
+ * them: did they book with us again within `day` days (90 or 120) of the complaint?
+ *   rebooked | not_rebooked | pending (the window hasn't passed yet)
+ * `list` should already exclude recleans and free visits (those aren't a client coming back).
+ */
+export function oneTimeOutcomeAt(list, at, day, { today, upcoming = [], repeatCaseId = null }) {
+  const end = at + day * DAY;
+  const after = [...(list || []), ...upcoming].filter((v) => v.at > at + DAY).sort((a, b) => a.at - b.at);
+  const back = after.find((v) => v.at <= end);
+  return {
+    day,
+    still_booking: back ? true : today >= end ? false : null,
+    next_booking_on: after[0]?.date || null,
+    last_booking_on: (list || []).filter((v) => v.at <= today).slice(-1)[0]?.date || null,
+    public_review_stars: null,
+    public_review_platform: null,
+    repeat_case_id: repeatCaseId,
+    outcome: back ? 'rebooked' : today >= end ? 'not_rebooked' : 'pending',
+  };
+}
+
+/**
  * Real cost of a reclean. Labour = what the cleaner earns for it (hours × their effective
  * hourly pay on recent visits, or the setting's default). Travel = the setting's flat
  * per-visit travel cost. Lost slot = the average gross margin of a residential visit of that

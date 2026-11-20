@@ -9,7 +9,7 @@ import { outcomeAt, journeyAt, recleanCost } from '../src/complaints/journey.js'
 import { normalizeSettings, canApprove, rungForRefund, budgetStatus, DEFAULT_SETTINGS } from '../src/complaints/settings.js';
 import { buildPlaybook } from '../src/complaints/playbook.js';
 import { mapStatus, toCase, discover, createKustomerClient, findListing } from '../src/complaints/sources/kustomer.js';
-import { createComplaints } from '../src/complaints/service.js';
+import { createComplaints, buildReviewStats } from '../src/complaints/service.js';
 import { createReports } from '../src/reports/service.js';
 import { createSchedule } from '../src/schedule/service.js';
 import { createMockLaunch27 } from '../src/mock/launch27.js';
@@ -371,6 +371,293 @@ describe('complaints: info@ email by month', () => {
     assert.ok(msgs.some((m) => /2026\/09\/01.*skipped/.test(m)), 'the bad month is reported');
     assert.ok(msgs.some((m) => /info@ email: [1-9]\d* candidate threads.*1 month\(s\) skipped/.test(m)), msgs.join(' | '));
     assert.ok(searches >= 4, 'the bad month was retried once and the other months still searched');
+    await db.close();
+  });
+});
+
+describe('complaints: cut-off runs', () => {
+  test('a run left running by a restart is marked interrupted; what it saved stays', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await schedule.sync();
+    await reports.sync();
+    const complaints = createComplaints({ db, config, reports, fetchImpl, log: quiet });
+    const snap = await reports.visitsSnapshot();
+    const from = new Date(Date.parse(snap.to) - 182 * 86_400_000).toISOString().slice(0, 10);
+    await complaints.run({ from, to: snap.to });
+    const saved = (await complaints.listCases({ from, to: snap.to })).length;
+    assert.ok(saved > 0);
+    // Simulate a restart mid-run: a run row left 'running'.
+    await db.query("INSERT INTO complaint_runs (window_from, window_to, status, log) VALUES ($1, $2, 'running', '[]')", [from, snap.to]);
+    assert.equal(await complaints.markInterrupted(), 1);
+    const st = await complaints.status();
+    assert.equal(st.last_run.status, 'interrupted');
+    assert.match(st.last_run.log.at(-1).msg, /Interrupted/);
+    assert.equal((await complaints.listCases({ from, to: snap.to })).length, saved, 'saved cases are kept');
+    assert.equal(await complaints.markInterrupted(), 0, 'nothing left to mark');
+    assert.ok((await db.query('SELECT log FROM complaint_runs WHERE id = (SELECT min(id) FROM complaint_runs)')).rows[0].log.some((l) => /Launch27 ratings: \d+ complaint cases? saved/.test(l.msg)), 'each source reports what it saved');
+    await db.close();
+  });
+});
+
+describe('complaints: faster classification', () => {
+  test('info@ is screened by rules before Claude, and Claude calls run several at a time', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await schedule.sync();
+    await reports.sync();
+    const b64 = (s) => Buffer.from(s).toString('base64url');
+    const bodies = { a: 'The kitchen was still dirty and the floors were missed. Unacceptable.', b: 'Hi, can we move Tuesday to Wednesday? Thanks', c: 'Really disappointed, the bathroom was skipped again.' };
+    const client = {
+      async search(account, q) {
+        return /after:2026\/10\/01/.test(q) ? { ids: ['a', 'b', 'c'], next: null } : { ids: [], next: null };
+      },
+      async message(account, id) {
+        return { id, threadId: `t-${id}`, internalDate: String(Date.parse('2026-10-05T12:00:00Z')), payload: { mimeType: 'text/plain', headers: [{ name: 'From', value: `Client ${id} <${id}@example.com>` }, { name: 'Subject', value: 'Cleaning' }], body: { data: b64(bodies[id]) } } };
+      },
+    };
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const seen = [];
+    const classifier = async (text) => {
+      seen.push(text);
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 20));
+      inFlight--;
+      return { is_complaint: true, category: 'quality_missed', tone: 'frustrated', severity: 2, areas: [], hard_route: null, summary: 'x', confidence: 0.9 };
+    };
+    const complaints = createComplaints({ db, config, reports, fetchImpl, gmail: { client, accounts: ['info@example.com'] }, classifier, log: quiet });
+    await complaints.run({ from: '2026-10-01', to: '2026-10-31' });
+    assert.ok(!seen.some((t) => /move Tuesday/.test(t)), 'a scheduling email never reaches Claude');
+    assert.ok(seen.some((t) => /bathroom was skipped/.test(t)));
+    assert.ok(maxInFlight > 1, 'Claude calls overlap');
+    const st = await complaints.status();
+    assert.ok(st.last_run.log.some((l) => /info@ email: 2 complaint cases saved \(1 screened out/.test(l.msg)), st.last_run.log.map((l) => l.msg).join(' | '));
+    await db.close();
+  });
+});
+
+describe('complaints: one-time clients, service type, clients view', () => {
+  const DAY = 86_400_000;
+  const at0 = Date.parse('2026-03-01T15:00:00Z');
+  const V = (d, extra = {}) => ({ id: d + 5000, at: at0 + d * DAY, date: new Date(at0 + d * DAY).toISOString().slice(0, 10), revenue: 250, kind: 'one', teams: [{ id: 7, name: 'C7', hours: 4 }], ...extra });
+  test('one-time client: rebooked within 90/120 days, or not, or too early', async () => {
+    const { oneTimeOutcomeAt } = await import('../src/complaints/journey.js');
+    const today = at0 + 200 * DAY;
+    assert.equal(oneTimeOutcomeAt([V(0), V(70)], at0, 90, { today }).outcome, 'rebooked');
+    assert.equal(oneTimeOutcomeAt([V(0), V(110)], at0, 90, { today }).outcome, 'not_rebooked');
+    assert.equal(oneTimeOutcomeAt([V(0), V(110)], at0, 120, { today }).outcome, 'rebooked');
+    assert.equal(oneTimeOutcomeAt([V(0)], at0, 120, { today }).outcome, 'not_rebooked');
+    assert.equal(oneTimeOutcomeAt([V(0)], at0, 120, { today: at0 + 50 * DAY }).outcome, 'pending');
+  });
+  test('visit snapshot carries service type; deep clean and move in/out come from extras', async () => {
+    const { slimReportVisit } = await import('../src/reports/compute.js');
+    const b = { id: 1, service_date: '2026-10-05T14:00:00Z', frequency: { name: 'One time' }, user: { id: 3, name: 'A' }, summary: { revenue: 300 }, teams: [{ id: 7, title: 'C', hours: 4 }], services: [{ name: 'Three Bedroom Home', extras: [{ name: 'Deep Cleaning' }, { name: 'Inside Oven' }] }] };
+    const v = slimReportVisit(b, null, null);
+    assert.equal(v.svc, 'Three Bedroom Home');
+    assert.equal(v.deep, true);
+    assert.equal(v.move, false);
+    assert.equal(slimReportVisit({ ...b, services: [{ name: 'Reclean', extras: [] }] }, null, null).reclean, true);
+  });
+  test('playbook: one-time clients are measured on rebooking, not Saved/Lost; plain rung names', () => {
+    const cases = [
+      { id: 1, source: 'kustomer', opened_at: '2026-06-10T12:00:00Z', category: 'quality_missed', l27_customer_id: 1, one_time: true },
+      { id: 2, source: 'kustomer', opened_at: '2026-06-10T12:00:00Z', category: 'quality_missed', l27_customer_id: 2, one_time: true },
+      { id: 3, source: 'kustomer', opened_at: '2026-06-10T12:00:00Z', category: 'quality_missed', l27_customer_id: 3 },
+    ];
+    const outcomes = [{ case_id: 1, day: 120, outcome: 'rebooked' }, { case_id: 2, day: 120, outcome: 'not_rebooked' }, { case_id: 3, day: 60, outcome: 'saved' }];
+    const pb = buildPlaybook({ cases, resolutions: [{ case_id: 3, rung: 'L3', action: 'reclean_full' }], costs: [], outcomes, visits: [], from: '2026-05-01', to: '2026-10-31', settings: normalizeSettings({}), today: '2026-11-16' });
+    assert.equal(pb.totals.decided, 1, 'only the recurring client counts toward Saved/Lost');
+    assert.equal(pb.totals.saved, 1);
+    assert.equal(pb.totals.one_time.n, 2);
+    assert.equal(pb.totals.one_time.rebooked_120, 0.5);
+    assert.equal(pb.ladder.find((r) => r.rung === 'L3').name, 'Reclean');
+    assert.equal(pb.ladder.find((r) => r.rung === 'L0').name, 'Apology only');
+    assert.ok(pb.like_for_like.verdict);
+  });
+  test('like for like: only groups with both a reclean and a refund are compared', () => {
+    const cases = [];
+    const resolutions = [];
+    const outcomes = [];
+    let id = 1;
+    const add = (tone, action, outcome) => {
+      cases.push({ id, source: 'kustomer', opened_at: '2026-06-10T12:00:00Z', category: 'quality_missed', tone, tenure_days: 200, l27_customer_id: id });
+      resolutions.push({ case_id: id, rung: action === 'refund' ? 'L5' : 'L3', action: action === 'refund' ? 'refund' : 'reclean_full' });
+      outcomes.push({ case_id: id++, day: 60, outcome });
+    };
+    // Calm clients: recleans only (no refund to compare with). Heated: both.
+    for (let i = 0; i < 8; i++) add('mild', 'reclean', 'saved');
+    for (let i = 0; i < 6; i++) add('angry', 'reclean', i < 2 ? 'saved' : 'lost');
+    for (let i = 0; i < 6; i++) add('angry', 'refund', i < 4 ? 'saved' : 'lost');
+    const pb = buildPlaybook({ cases, resolutions, costs: [], outcomes, visits: [], from: '2026-05-01', to: '2026-10-31', settings: normalizeSettings({}), today: '2026-11-16' });
+    const l = pb.like_for_like;
+    assert.equal(l.groups_compared, 1);
+    assert.equal(l.matched_pairs, 6);
+    assert.equal(l.reclean.saved, 0.333);
+    assert.equal(l.refund.saved, 0.667);
+    assert.match(l.verdict, /Too few comparable cases/);
+  });
+  test('clients view: repeat complainers and at-risk clients, with reasons', async () => {
+    const { buildClients } = await import('../src/complaints/playbook.js');
+    const now = Date.parse('2026-11-16T12:00:00Z');
+    const day = (d) => new Date(now - d * DAY).toISOString();
+    const rows = [
+      { id: 1, l27_customer_id: 10, customer_name: 'A', opened_at: day(200), category: 'quality_missed', tone: 'mild', severity: 1, cost: 5, outcomes: [{ day: 60, outcome: 'saved', next: '2026-06-01' }] },
+      { id: 2, l27_customer_id: 10, customer_name: 'A', opened_at: day(100), category: 'quality_missed', tone: 'mild', severity: 1, cost: 10, outcomes: [{ day: 60, outcome: 'saved', next: '2026-09-01' }] },
+      { id: 3, l27_customer_id: 20, customer_name: 'B', opened_at: day(20), category: 'punctuality', tone: 'threat_leave', severity: 3, cost: 0, cleans_total: 2, outcomes: [{ day: 30, outcome: 'pending', next: null }] },
+      { id: 4, l27_customer_id: 30, customer_name: 'C', opened_at: day(20), category: 'quality_missed', tone: 'mild', severity: 1, cost: 0, cleans_total: 40, outcomes: [{ day: 30, outcome: 'pending', next: '2026-11-20' }] },
+      { id: 5, l27_customer_id: 40, customer_name: 'D', opened_at: day(150), category: 'quality_missed', tone: 'threat_review', severity: 3, cost: 80, outcomes: [{ day: 60, outcome: 'lost', next: null }] },
+    ];
+    const c = buildClients(rows, now);
+    assert.deepEqual(c.repeat.map((x) => x.name), ['A']);
+    assert.equal(c.repeat[0].complaints, 2);
+    assert.equal(c.repeat[0].total_cost, 15);
+    assert.equal(c.repeat[0].still_with_us, true);
+    assert.deepEqual(c.at_risk.map((x) => x.name), ['B'], 'calm long-time client with a booking ahead is not at risk; a lost client is not at risk');
+    assert.ok(c.at_risk[0].reasons.includes('said they may leave'));
+    assert.ok(c.at_risk[0].reasons.includes('nothing booked since the complaint'));
+    assert.deepEqual(c.review_mentions.map((x) => x.name), ['D']);
+    assert.equal(c.google_reviews_connected, false);
+  });
+});
+
+describe('complaints: automatic updates', () => {
+  test('plan: newest unread days first, then older months, then the daily refresh, then nothing', async () => {
+    const { planAuto } = await import('../src/complaints/service.js');
+    const today = '2026-11-19';
+    // Nothing read yet: the most recent month.
+    let j = planAuto({ mined: [], today, historyDays: 365, recentDone: null });
+    assert.deepEqual([j.kind, j.from, j.to], ['history', '2026-10-19', '2026-11-18']);
+    // Aug 15 – Nov 15 read: first catch up the days since.
+    j = planAuto({ mined: [{ from: '2026-08-15', to: '2026-11-15' }], today, historyDays: 365, recentDone: null });
+    assert.deepEqual([j.kind, j.from, j.to], ['history', '2026-11-16', '2026-11-18']);
+    // Caught up: next the month before what's been read.
+    const mined = [{ from: '2026-08-15', to: '2026-11-15' }, { from: '2026-11-16', to: '2026-11-18' }];
+    j = planAuto({ mined, today, historyDays: 365, recentDone: null });
+    assert.deepEqual([j.kind, j.from, j.to], ['history', '2026-07-15', '2026-08-14']);
+    // History target reached: the daily two-week refresh, once.
+    const all = [{ from: '2025-11-19', to: '2026-11-18' }];
+    j = planAuto({ mined: all, today, historyDays: 365, recentDone: '2026-11-18' });
+    assert.deepEqual([j.kind, j.from, j.to, j.refreshFrom], ['recent', '2026-11-05', '2026-11-18', '2026-07-12']);
+    assert.equal(planAuto({ mined: all, today, historyDays: 365, recentDone: today }), null);
+    // The last chunk stops at the history target.
+    j = planAuto({ mined: [{ from: '2025-12-01', to: '2026-11-18' }], today, historyDays: 365, recentDone: today });
+    assert.deepEqual([j.from, j.to], ['2025-11-19', '2025-11-30']);
+  });
+
+  test('runs by itself until history is read, survives a restart, and never re-sends a classified case to Claude', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await schedule.sync();
+    await reports.sync();
+    let calls = 0;
+    const classifier = async () => {
+      calls++;
+      return { is_complaint: true, category: 'quality_missed', tone: 'frustrated', severity: 2, areas: [], hard_route: null, summary: 'x', confidence: 0.9 };
+    };
+    const { createSyncBearer } = await import('../src/inbox/lookup.js');
+    const make = () => createComplaints({ db, config, reports, fetchImpl, classifier, syncBearer: createSyncBearer({ config, fetchImpl }), log: quiet });
+    let complaints = make();
+    await complaints.saveSettings({ auto: { enabled: true, history_months: 3 } });
+    const drain = async (c) => {
+      for (let i = 0; i < 400; i++) {
+        const st = await c.status();
+        if (!st.running && !st.auto.next) return st;
+        if (!st.running) await c.maybeRun();
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      throw new Error('automatic updates never finished');
+    };
+    assert.equal(await complaints.maybeRun(), true, 'starts without anyone clicking');
+    // "Restart" part-way: a run left running is marked interrupted and its dates are read again.
+    await db.query("INSERT INTO complaint_runs (window_from, window_to, status, log) VALUES ('2026-01-01', '2026-01-31', 'running', '[]')");
+    complaints = make();
+    await complaints.markInterrupted();
+    const st = await drain(complaints);
+    assert.equal(st.auto.next, null);
+    assert.ok(st.auto.last_daily_update, 'the daily update ran after the history was read');
+    assert.ok(st.mined.length >= 3, 'history read in monthly pieces');
+    const cases = Number((await db.query('SELECT count(*)::int AS n FROM complaint_cases')).rows[0].n);
+    assert.ok(cases > 0);
+    assert.ok(calls <= cases, `each case classified once (${calls} Claude calls for ${cases} cases)`);
+    // Turned off in settings: nothing more is planned.
+    await complaints.saveSettings({ auto: { enabled: false } });
+    assert.equal(await complaints.maybeRun(), false);
+    await db.close();
+  });
+});
+
+describe('complaints: checking the taxonomy by hand', () => {
+  test('accuracy is measured against what the engine said, and thin samples are flagged', () => {
+    const rows = [
+      ...Array.from({ length: 18 }, () => ({ verdict: 'correct', was_category: 'quality_missed', was_classified_by: 'claude', source: 'kustomer' })),
+      { verdict: 'wrong_category', was_category: 'quality_missed', now_category: 'quality_rushed', was_classified_by: 'claude', source: 'kustomer' },
+      { verdict: 'not_complaint', was_category: 'quality_missed', was_classified_by: 'rules', source: 'gmail' },
+      { verdict: 'not_complaint', was_category: 'other', was_classified_by: 'rules', source: 'gmail' },
+    ];
+    const s = buildReviewStats(rows, [{ category: 'quality_missed', n: 40 }, { category: 'punctuality', n: 7 }]);
+    assert.equal(s.total.checked, 21);
+    const missed = s.by_category.find((c) => c.key === 'quality_missed');
+    assert.equal(missed.accuracy, 0.9);
+    assert.equal(missed.enough, true);
+    assert.equal(missed.waiting, 40);
+    assert.equal(s.by_category.find((c) => c.key === 'other').enough, false, 'one check is not a result');
+    assert.equal(s.by_category.find((c) => c.key === 'punctuality').checked, 0, 'unchecked categories still listed');
+    assert.equal(s.by_source.find((c) => c.key === 'gmail').not_complaint, 2);
+    assert.deepEqual(s.confusions, [{ from: 'quality_missed', to: 'quality_rushed', n: 1 }]);
+    assert.equal(s.waiting, 47);
+  });
+
+  test('a batch, the three verdicts, and what each does to the playbook', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await schedule.sync();
+    await reports.sync();
+    const to = (await reports.visitsSnapshot()).to;
+    const from = new Date(Date.parse(to) - 182 * 86_400_000).toISOString().slice(0, 10);
+    const complaints = createComplaints({ db, config, reports, fetchImpl, log: quiet });
+    await complaints.run({ from, to });
+    const before = (await complaints.listCases({ from, to })).length;
+    const queue = await complaints.reviewQueue({ per: 2 });
+    assert.ok(queue.length >= 3, 'needs three cases to check');
+    const perCat = {};
+    for (const c of queue) perCat[c.category] = (perCat[c.category] || 0) + 1;
+    assert.ok(Object.values(perCat).every((n) => n <= 2), 'at most the asked number per category');
+    assert.ok(queue.every((c) => !('raw' in c) && !('source_id' in c)));
+    assert.ok(queue.every((c) => c.text), 'the rating comment is shown to the reviewer');
+    const [a, b, c] = queue;
+    const other = a.category === 'punctuality' ? 'communication' : 'punctuality';
+    await complaints.reviewCase(a.id, { verdict: 'correct' }, null);
+    await complaints.reviewCase(b.id, { verdict: 'wrong_category', category: other === b.category ? 'scope_booking' : other }, null);
+    await complaints.reviewCase(c.id, { verdict: 'not_complaint' }, null);
+    const stats = await complaints.reviewStats();
+    assert.equal(stats.total.checked, 3);
+    assert.equal(stats.total.correct, 1);
+    assert.equal(stats.total.not_complaint, 1);
+    assert.equal(stats.by_category.find((g) => g.key === b.category).wrong_category >= 1, true, 'counted against the category the engine chose');
+    assert.equal((await complaints.getCase(b.id)).classified_by, 'human');
+    assert.equal((await complaints.listCases({ from, to })).length, before - 1, 'not-a-complaint leaves the case list');
+    assert.equal((await complaints.playbook({ from, to })).totals.cases, before - 1);
+    const again = await complaints.reviewQueue({ per: 100 });
+    assert.ok(![a.id, b.id, c.id].some((id) => again.some((x) => x.id === id)), 'checked cases are not shown again');
+    // A later run must not bring the excluded case back or undo the person's category.
+    await complaints.run({ from, to });
+    assert.equal((await complaints.listCases({ from, to })).length, before - 1);
+    assert.equal((await complaints.getCase(b.id)).classified_by, 'human');
+    await assert.rejects(complaints.reviewCase(999999, { verdict: 'correct' }, null), /Not found/);
     await db.close();
   });
 });

@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import { BrandSwitcher } from '../brands/ui';
 import { useBrand } from '../brands/useBrand';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
@@ -16,7 +15,7 @@ import { PortalSwitcher } from './PortalSwitcher';
 // Sidebar sections. Add a line here for each page rebuilt from docs/API.md.
 // `icon` is a name from components/Icon.tsx.
 // `feature`: shown only to logins the server enables it for (/auth/me features).
-const NAV: { section: string; items: { to: string; label: string; icon: string; feature?: 'utilization'; lead?: true }[] }[] = [
+const NAV: { section: string; items: { to: string; label: string; icon: string; feature?: 'utilization' | 'kpi'; lead?: true }[] }[] = [
   {
     section: 'Support',
     items: [
@@ -60,6 +59,7 @@ const NAV: { section: string; items: { to: string; label: string; icon: string; 
   {
     section: 'Reports',
     items: [
+      { to: '/reports/kpi', label: 'KPI scorecard', icon: 'trend', feature: 'kpi' },
       { to: '/reports/customers', label: 'Customer insights', icon: 'grid' },
       { to: '/reports/scheduling', label: 'Scheduling insights', icon: 'route' },
       { to: '/reports/utilization', label: 'Utilization', icon: 'trend', feature: 'utilization' },
@@ -108,7 +108,7 @@ export function Layout({ email }: { email: string }) {
   const [closed, setClosed] = useState<Record<string, boolean>>(() => loadPref('closed', { Developer: true }));
   const location = useLocation();
   useEffect(() => setMenuOpen(false), [location.pathname]);
-  // The Commercial section belongs to the Commercial brand: hidden while viewing Residential.
+  // The Commercial section is hidden here: Commercial is run from the Luxoclean + Commercial portal.
   const { view: brandView } = useBrand();
   const current = NAV.flatMap((g) => g.items).filter((i) => location.pathname === i.to || location.pathname.startsWith(`${i.to}/`)).sort((a, b) => b.to.length - a.to.length)[0];
   const counts = useCounts();
@@ -162,8 +162,6 @@ export function Layout({ email }: { email: string }) {
             <kbd>{isMac ? '⌘K' : 'Ctrl K'}</kbd>
           </button>
         </div>
-
-        <BrandSwitcher />
 
         <nav>
           {NAV.filter((group) => !(group.section === 'Commercial' && brandView === 'residential')).map((group) => {

@@ -13,7 +13,10 @@ const PAST_DAYS = 91;
 const AHEAD_DAYS = 56;
 // How cleaners' hours are read. Bump when that changes: the next look at the planner then re-reads
 // everyone's hours instead of waiting for the hourly refresh.
-const HOURS_VERSION = 2;
+const HOURS_VERSION = 4; // 3: one-day changes kept HISTORY_DAYS back; 4: 13 weeks back
+// How far back cleaners' one-day changes, closed dates and days marked unavailable are kept, so
+// Utilization can look at past weeks (visits go back PAST_DAYS).
+export const HISTORY_DAYS = 91;
 const AVAIL_CHUNK = 28; // days per availability request (Launch27's calendar asks for 42)
 const NEAR_DAYS = 14; // problems are raised for this many days ahead
 const NEAR_EVERY_MS = 3 * 60_000; // next 14 days of bookings
@@ -153,7 +156,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
   }
 
   async function loadUnavailable() {
-    const rows = (await db.query('SELECT cleaner_id, day FROM schedule_unavailable WHERE day >= $1', [addDays(today(), -1)])).rows;
+    const rows = (await db.query('SELECT cleaner_id, day FROM schedule_unavailable WHERE day >= $1', [addDays(today(), -HISTORY_DAYS)])).rows;
     unavailable = new Map();
     for (const r of rows) {
       const id = Number(r.cleaner_id);
@@ -316,7 +319,9 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     for (const c of next.cleaners) {
       const old = prev.byId?.get(c.id);
       if (!old) continue;
-      const sig = (x) => JSON.stringify((x.availability || []).map((r) => [r.date, r.weekday, r.dayoff, r.start_time, r.end_time]).sort());
+      // Only hours that matter from today on: past one-day changes (kept for Utilization's past
+      // weeks) coming or going is not a change to handle.
+      const sig = (x) => JSON.stringify((x.availability || []).filter((r) => !r.date || String(r.date).slice(0, 10) >= t).map((r) => [r.date, r.weekday, r.dayoff, r.start_time, r.end_time]).sort());
       const statusChanged = old.assignable !== c.assignable;
       if (sig(old) === sig(c) && !statusChanged) continue;
       const affected = next.future.filter((v) => v.team_ids.includes(c.id)).filter((v) => {
@@ -412,7 +417,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     const weekly = (w.rows || old || []).filter((r) => !r.date);
     const end = addDays(t, AHEAD_DAYS);
     const dated = [];
-    for (let from = addDays(t, -7); from <= end; from = addDays(from, AVAIL_CHUNK)) {
+    for (let from = addDays(t, -HISTORY_DAYS); from <= end; from = addDays(from, AVAIL_CHUNK)) {
       const to = addDays(from, AVAIL_CHUNK - 1) < end ? addDays(from, AVAIL_CHUNK - 1) : end;
       const d = await read({ from, to });
       if (d.error) errors.push(`${d.error} (one-day changes ${from} to ${to})`);
@@ -478,7 +483,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       const rows = await pullAll(bearer, '/v1/staff/holidays', { locations: loc }, 20).catch(() => []);
       for (const h of rows) {
         const date = String(h.date || '').slice(0, 10);
-        if (date >= t && date <= addDays(t, AHEAD_DAYS)) out.push({ date, start_time: h.start_time || null, end_time: h.end_time || null, description: h.description || null, location_id: loc });
+        if (date >= addDays(t, -HISTORY_DAYS) && date <= addDays(t, AHEAD_DAYS)) out.push({ date, start_time: h.start_time || null, end_time: h.end_time || null, description: h.description || null, location_id: loc });
       }
     }
     return out;
@@ -531,6 +536,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
         added = await recordChanges(q, found);
       });
       snap = next;
+      await recordDays(next);
       lastRun = (await db.query("UPDATE schedule_runs SET status = 'done', finished_at = now(), visits = $2, cleaners = $3, changes = $4 WHERE id = $1 RETURNING *", [run.id, data.visits.length, data.cleaners.length, added])).rows[0];
       log.info('schedule updated', { trigger, kind: doNear ? 'near' : 'full', visits: data.visits.length, cleaners: data.cleaners.length, changes: added });
       return lastRun;
@@ -1114,6 +1120,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       await q.query('DELETE FROM schedule_snapshots');
       await q.query("UPDATE schedule_changes SET resolved_at = now(), resolution = 'gone' WHERE resolved_at IS NULL");
       await q.query('DELETE FROM schedule_unavailable');
+      await q.query('DELETE FROM utilization_days'); // sample/QA data switched: its history goes too
     });
     snap = null;
   }
@@ -1127,12 +1134,69 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       full_at: s.full_at || s.taken_at,
       cleaners_by: s.cleaners_by || null,
       cleaners: s.cleaners.map((c) => ({ ...cleanerOut(c), availability: c.availability || [], availability_error: c.availability_error || null })),
-      visits: s.future,
+      // From HISTORY_DAYS back, so past weeks can be shown too.
+      history_from: addDays(s.today, -HISTORY_DAYS),
+      visits: s.visits.filter((v) => v.date >= addDays(s.today, -HISTORY_DAYS)),
       holidays: s.holidays || [],
       unavailable,
     };
   }
 
-  return { utilizationSource, reset, dataChanged, cleanerProfile, cleanerForBooking, sync, start, soon, maybeRun, status, overview, plan, gapOptions, unassigned, continuity, changes, resolveChange, findSlots, checkSlot, assign, markUnavailable, cleaners, isRunning: () => !!running, _load: load, _window: windowFor };
+  // ---------- daily history (Utilization) ----------
+  // Today's and yesterday's picture, saved on every refresh and then left alone: the cleaners with
+  // the hours they had set for that day, the day's visits, closed dates and days marked unavailable.
+  // Past weeks in Utilization use these instead of rebuilding from cleaners' current hours.
+  // Never fails a refresh.
+  const VISIT_FIELDS = ['key', 'id', 'date', 'start', 'end', 'duration', 'team_ids', 'team_hours', 'location_id', 'customer_id', 'customer', 'kind', 'freq', 'addr', 'lat', 'lng'];
+  function dayRecord(s, d) {
+    return {
+      v: 1,
+      day: d,
+      cleaners: s.cleaners.map((c) => ({
+        ...cleanerOut(c),
+        rules: { transit: !!c.rules?.transit },
+        availability: (c.availability || []).filter((r) => !r.date || String(r.date).slice(0, 10) === d),
+      })),
+      visits: s.visits.filter((v) => v.date === d).map((v) => Object.fromEntries(VISIT_FIELDS.map((k) => [k, v[k] ?? null]))),
+      holidays: (s.holidays || []).filter((h) => h.date === d),
+      unavailable: [...unavailable].filter(([, days]) => days.has(d)).map(([id]) => id),
+    };
+  }
+  async function recordDays(s) {
+    try {
+      for (const d of [addDays(s.today, -1), s.today]) {
+        await db.query('INSERT INTO utilization_days (day, data, recorded_at) VALUES ($1, $2::jsonb, now()) ON CONFLICT (day) DO UPDATE SET data = EXCLUDED.data, recorded_at = now()', [d, JSON.stringify(dayRecord(s, d))]);
+      }
+    } catch (err) {
+      log.warn('utilization: could not save the daily record', { error: err.message });
+    }
+  }
+  // Saved days between from and to (inclusive), oldest first.
+  async function recordedDays(from, to) {
+    const rows = (await db.query('SELECT day, data FROM utilization_days WHERE day >= $1 AND day <= $2 ORDER BY day', [from, to])).rows;
+    return rows.map((r) => ({ day: dateStr(r.day), ...r.data }));
+  }
+  async function firstRecordedDay() {
+    const row = (await db.query('SELECT min(day) AS d FROM utilization_days')).rows[0];
+    return row?.d ? dateStr(row.d) : null;
+  }
+
+  // Recommended cleaners for unassigned visits (by visit key), the same ranking the planner uses.
+  async function recommendFor(keys = [], limit = 3) {
+    const s = await need();
+    const ctx = ctxFor(s);
+    const byKey = new Map(s.visits.map((v) => [v.key, v]));
+    const out = {};
+    for (const key of keys) {
+      const v = byKey.get(key);
+      if (!v || v.team_ids.length || v.date < s.today) continue;
+      const cust = s.customers.get(v.customer_id);
+      const job = { dates: [v.date], start: v.start, duration: v.duration, place: { lat: v.lat, lng: v.lng }, customerId: v.customer_id, kind: v.kind, services: v.services, prefs: cust?.prefs, mainCleanerId: cust?.main?.id, history: cust?.history, firstDate: v.date };
+      out[key] = rankCleaners(job, s.cleaners, ctx, { limit }).map((c) => ({ cleaner_id: c.cleaner_id, name: c.name, score: c.score, free: c.fits > 0, travel: c.travel, reasons: c.reasons.map((r) => ({ text: r.text, tone: r.tone })) }));
+    }
+    return out;
+  }
+
+  return { utilizationSource, recommendFor, recordedDays, firstRecordedDay, reset, dataChanged, cleanerProfile, cleanerForBooking, sync, start, soon, maybeRun, status, overview, plan, gapOptions, unassigned, continuity, changes, resolveChange, findSlots, checkSlot, assign, markUnavailable, cleaners, isRunning: () => !!running, _load: load, _window: windowFor };
 }
 

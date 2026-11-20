@@ -14,16 +14,21 @@ import { tick } from './inbox/service.js';
 import { createSegments } from './segments/service.js';
 import { createSchedule } from './schedule/service.js';
 import { createReports } from './reports/service.js';
+import { createKpi } from './kpi/service.js';
 import { createWriteLog } from './writes.js';
 import { createCommercial } from './commercial/service.js';
 import { createWorkforce } from './commercial/workforce.js';
 import { createPlacement } from './placement/service.js';
-import { sandboxEmail } from './inbox/channels.js';
+import { sandboxEmail, sandboxSms } from './inbox/channels.js';
 import { createGmailClient, createGmailConnector } from './inbox/email/gmail.js';
+import { createTwilioClient } from './inbox/sms/twilio.js';
+import { createTwilioChannel } from './inbox/sms/twilio-channel.js';
+import { createSmsRouter } from './inbox/sms/core.js';
 import { createEmailSync } from './inbox/email/sync.js';
 import { createL27Client, createSyncBearer } from './inbox/lookup.js';
 import { OUR_IDENTITIES } from './inbox/seed.js';
 import { createComplaints } from './complaints/service.js';
+import { createKustomerMigration } from './kustomer-migration/service.js';
 import { createClassifier } from './complaints/classify.js';
 
 const config = loadConfig();
@@ -90,7 +95,30 @@ if (config.gmail) {
 } else if (!config.production) {
   connectors.email = sandboxEmail();
 }
+// SMS: Twilio only (docs/sms.md); every business number texts through Twilio. Sends outside
+// production are always sandbox records (guardConnectors in app.js). Dev and QA get the
+// sandbox SMS channel.
+const smsProviders = {};
+if (config.twilioSms) {
+  const smsL27 = createL27Client({ baseUrl: config.l27BaseUrl, fetchImpl });
+  const smsBearer = createSyncBearer({ config, fetchImpl });
+  const identify = async (phone) => smsL27.match(await smsBearer(), 'phone', phone);
+  smsProviders.twilio = createTwilioChannel({
+    db,
+    client: createTwilioClient(config.twilioSms),
+    smsConfig: { numbers: config.twilioSms.numbers, webhookBaseUrl: config.twilioSms.webhookBaseUrl, authToken: config.twilioSms.authToken },
+    identify,
+    log,
+  });
+  log.info('sms connected (Twilio)', { numbers: config.twilioSms.numbers.length, webhook: !!config.twilioSms.webhookBaseUrl });
+  connectors.sms = createSmsRouter(Object.values(smsProviders).map((p) => ({ name: p.provider, connector: p.connector, numbers: p.numbers })));
+  for (const p of Object.values(smsProviders)) p.start().catch((err) => log.error('sms start failed', { provider: p.provider, error: err.message }));
+} else if (!config.production) {
+  connectors.sms = sandboxSms();
+}
 // Complaint Resolution Engine (Phase 1: history miner + playbook). Read-only on every source.
+// KPI scorecard. In production it reads the Syft report with the same read-only Gmail client.
+const kpi = createKpi({ db, config, log, fetchImpl, syncBearer: createSyncBearer({ config, fetchImpl }), gmail: gmailForComplaints?.client || null });
 const complaints = createComplaints({
   db,
   config,
@@ -102,7 +130,26 @@ const complaints = createComplaints({
   syncBearer: createSyncBearer({ config, fetchImpl }),
   log,
 });
-const app = createApp(config, { db, sessions, fetchImpl, log, jobs, connectors, qa: { store: qaStore, sender: qaSender }, segments, schedule, reports, writes, commercial, placement, commercialPlan, complaints });
+await complaints.markInterrupted().then((n) => n && log.warn('complaints: marked runs cut off by the restart as interrupted', { runs: n })).catch(() => {});
+// Kustomer historical migration: export (read-only) and dry run only; the import isn't enabled.
+// Production reads Kustomer with KUSTOMER_API_KEY; dev and QA read a synthetic Kustomer.
+const migrationL27 = createL27Client({ baseUrl: config.l27BaseUrl, fetchImpl });
+const migrationBearer = createSyncBearer({ config, fetchImpl });
+const kustomerMigration = createKustomerMigration({
+  db,
+  config,
+  fetchImpl,
+  log,
+  ourDomains: [...new Set(OUR_IDENTITIES.email.map((e) => e.split('@')[1]))],
+  async l27Directory() {
+    const bearer = await migrationBearer();
+    if (!bearer) throw new Error('No Launch27 login for matching customers: set L27_SYNC_EMAIL and L27_SYNC_PASSWORD');
+    const [customers, teams] = await Promise.all([migrationL27.allCustomers(bearer), migrationL27.teams(bearer)]);
+    return { customers, teams };
+  },
+});
+await kustomerMigration.recover();
+const app = createApp(config, { db, sessions, fetchImpl, log, jobs, connectors, qa: { store: qaStore, sender: qaSender }, segments, schedule, reports, writes, commercial, placement, commercialPlan, complaints, smsProviders, kustomerMigration, kpi });
 if (config.sampleData && config.l27Mode === 'mock') {
   await loadSampleInbox(db, { fetchImpl, baseUrl: config.l27BaseUrl, log: (level, msg, fields) => log[level](msg, fields) }).catch((err) => log.error('sample inbox failed', { error: err.message }));
 }
@@ -121,10 +168,13 @@ const worker = setInterval(async () => {
   try {
     await db.tx((q) => tick(q));
     emailSync?.maybeRun()?.catch((err) => log.error('email sync failed', { error: err.message }));
+    for (const p of Object.values(smsProviders)) await p.tick();
     await sessions.purgeExpired();
     await segments.maybeRun();
     await schedule.maybeRun();
     await reports.maybeRun();
+    await kpi.maybeRun();
+    complaints.maybeRun().catch((err) => log.error('complaints automatic update failed', { error: err.message }));
     await reports.raiseDigest().catch((err) => log.error('monthly raise check failed', { error: err.message }));
     await placement.purge();
     if (jobs.consecutiveFailures) log.info('worker recovered', { after: jobs.consecutiveFailures });

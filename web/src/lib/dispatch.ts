@@ -3,6 +3,8 @@
 
 import { TIMEZONE } from '../format';
 
+type BookedItem = { id?: number; name?: string; quantity?: number };
+
 export interface DispatchBooking {
   // Projected visits of a recurring series (future dates) have no id yet, only this.
   id?: number;
@@ -11,11 +13,12 @@ export interface DispatchBooking {
   arrival_window?: number | string;
   duration?: number; // minutes
   active?: boolean;
-  user?: { id?: number; name?: string; email?: string };
+  user?: { id?: number; name?: string; email?: string; is_new_customer?: boolean; tags_info?: { id: number; name: string }[] | null };
   phone?: string;
   address?: { full_address?: string; street?: string; city?: string; latitude?: number | null; longitude?: number | null };
   location?: { id?: number; name?: string };
-  services?: { id: number; name: string }[];
+  services?: { id: number; name: string; extras?: BookedItem[]; pricing_parameters?: BookedItem[] }[];
+  custom_fields?: { title?: string; values?: { label?: string; name?: string; value?: string; other?: string | null }[] }[];
   frequency?: { name?: string };
   teams?: { id: number; title?: string; hours?: number; share?: number; bg_color?: string }[];
   time_tracking?: { team?: { id: number }; enroute_started_at?: string | null; checkin_at?: string | null; checkout_at?: string | null }[];

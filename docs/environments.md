@@ -9,8 +9,9 @@
 | Launch27 | synthetic (`L27_MODE=mock`) | synthetic (`L27_MODE=mock`) | live |
 | Launch27 writes | to the in-memory fake only | to the in-memory fake only | only if `L27_ALLOW_WRITES=true` |
 | SMS / email / notifications | sandbox (never sent) | sandbox (never sent) | `NOTIFICATIONS_MODE` |
+| SMS (Twilio) | ignored (`TWILIO_*` not read) | ignored (`TWILIO_*` not read) | sent and received (docs/sms.md) |
 | Email mailboxes (Gmail) | never read (`GMAIL_*` ignored) | never read (`GMAIL_*` ignored) | read every minute (docs/email.md) |
-| RingCentral | sandbox server only | sandbox server only | production server |
+| RingCentral (calling) | sandbox server only | sandbox server only | production server |
 | Channel simulator | on | on | off |
 | Deploys | every push to `develop` after CI | every merge to `staging` after CI | merge to `main` after CI + QA approval |
 | Banner | blue "DEVELOPMENT" | yellow "QA / STAGING" | none |
@@ -35,8 +36,8 @@ These hold even if someone sets the wrong variable in Railway:
   Launch27 is read-only; `L27_ALLOW_WRITES` is ignored.
 - **No real messages outside production.** `NOTIFICATIONS_MODE=live` is overridden to
   `sandbox`; every channel connector is replaced by a stand-in that records the message
-  as "sandbox: not sent to customer". RingCentral is disabled unless it points at the
-  RingCentral sandbox.
+  as "sandbox: not sent to customer". RingCentral calling is disabled unless it points at
+  the RingCentral sandbox.
 - **Production won't start half-configured.** Missing `DATABASE_URL`, a short
   `SESSION_SECRET`, mock Launch27 or the simulator switched on all stop the process at
   boot; Railway keeps the previous deployment running.

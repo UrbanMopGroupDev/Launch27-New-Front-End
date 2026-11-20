@@ -2,7 +2,9 @@
 // as the rest of the app); the agent's Launch27 token is used for lookups so Launch27
 // keeps enforcing their permissions.
 import { canSeeUtilization } from '../config.js';
+import { canSeeKpi } from '../kpi/service.js';
 import { registerComplaintRoutes } from '../complaints/api.js';
+import { registerKustomerRoutes } from '../kustomer-migration/api.js';
 import express from 'express';
 import { json as toJson } from '../db/index.js';
 import { lintRules, route } from './routing.js';
@@ -27,7 +29,7 @@ export function diffRules(before, after) {
 }
 const many = async (q, sql, p) => (await q.query(sql, p)).rows;
 
-export function createInboxRouter({ db, sessions, cookieName, config, l27, connectors = {}, log = (lvl, msg, f) => console.error(msg, f), qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, complaints = null }) {
+export function createInboxRouter({ db, sessions, cookieName, config, l27, connectors = {}, log = (lvl, msg, f) => console.error(msg, f), qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, complaints = null, smsProviders = {}, kustomerMigration = null, kpi = null }) {
   const r = express.Router();
   r.use(express.json({ limit: '1mb' }));
 
@@ -169,9 +171,35 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     return {
       // state: how mail is read (live Gmail, sandbox, or not connected). read_only: sending is off.
       email: !email ? { state: 'not_connected', provider: null, accounts: [], read_only: !EMAIL_SENDING_ENABLED } : { state: email.sandbox ? 'sandbox' : 'live', provider: email.name, send_from: email.identities || OUR_IDENTITIES.email, accounts, read_only: !EMAIL_SENDING_ENABLED },
-      sms: !connectors.sms ? { state: 'not_connected', provider: null } : { state: connectors.sms.sandbox ? 'sandbox' : 'live', provider: connectors.sms.name },
+      // problems: why a provider's settings were turned down at start-up (variable names, never values).
+      sms: { ...(!connectors.sms ? { state: 'not_connected', provider: null, providers: [] } : { state: connectors.sms.sandbox ? 'sandbox' : 'live', provider: connectors.sms.name, providers: await Promise.all(Object.values(smsProviders).map(smsDetail)) }), problems: config.smsProblems || [] },
     };
   }
+
+  // Each SMS provider: connection, numbers and the queue each number's texts go to (from the
+  // routing rules, so the screen always matches what really happens).
+  async function smsDetail(provider) {
+    const st = await provider.status();
+    const rules = await many(db, 'SELECT * FROM routing_rules');
+    const queues = new Map((await many(db, 'SELECT slug, name FROM queues')).map((q) => [q.slug, q.name]));
+    const numbers = [...new Set([...(st.health?.sms_numbers || []), ...st.configured_numbers])];
+    return {
+      ...st,
+      numbers: numbers.map((n) => {
+        const slug = route(rules, { channel: 'sms', to: n, from: '+10000000000', subject: '', body: '', roles: [] }).action.queue || 'fallback';
+        return { number: n, can_send: (st.health?.sms_numbers || []).includes(n), queue: queues.get(slug) || slug };
+      }),
+    };
+  }
+  // Admins: check, disconnect or reconnect one provider (credentials stay in Railway).
+  r.post('/admin/sms/:provider/:action', needRole('admin'), wrap(async (req, res) => {
+    const provider = Object.hasOwn(smsProviders, req.params.provider) ? smsProviders[req.params.provider] : null;
+    const actions = { check: 'check', disconnect: 'disconnect', connect: 'connect' };
+    if (!provider || !Object.hasOwn(actions, req.params.action)) throw new svc.InboxError(404, 'Unknown SMS provider or action');
+    await provider[actions[req.params.action]]();
+    await svc.audit(db, req.user.id, `sms.${req.params.action}`, 'channel', `sms:${req.params.provider}`, {});
+    res.json(await channelStatus());
+  }));
 
   r.get('/channels', wrap(async (req, res) => res.json(await channelStatus())));
 
@@ -183,7 +211,7 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       dispositions: DISPOSITIONS,
       canned: await many(db, 'SELECT * FROM canned_responses ORDER BY shortcut'),
       // Only addresses the email connector can really send from (all of ours when sandboxed).
-      identities: { ...OUR_IDENTITIES, email: sendableIdentities(connectors, 'email') || OUR_IDENTITIES.email },
+      identities: { ...OUR_IDENTITIES, email: sendableIdentities(connectors, 'email') || OUR_IDENTITIES.email, sms: sendableIdentities(connectors, 'sms')?.length ? sendableIdentities(connectors, 'sms') : OUR_IDENTITIES.sms },
       connected_channels: connectedChannels(connectors),
       channels: await channelStatus(),
       portal: { name: config.portalName || 'UrbanMop', links: config.portalLinks || [] },
@@ -438,6 +466,8 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     const updated = await db.tx(async (q) => {
       const row = await one(q, `UPDATE contacts SET ${sets.join(', ')}, updated_at = now() WHERE id = $1 RETURNING *`, params);
       if (!row) throw new svc.InboxError(404, 'Contact not found');
+      // Linked to Launch27: their conversations leave "Who is this?".
+      if (row.l27_customer_id || row.l27_team_id) await q.query('UPDATE conversations SET needs_match = false, updated_at = now() WHERE contact_id = $1 AND needs_match', [row.id]);
       await svc.audit(q, req.user.id, 'contact.updated', 'contact', req.params.id, req.body);
       return row;
     });
@@ -1194,6 +1224,27 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
   }
 
   if (complaints) registerComplaintRoutes(r, { complaints, needRole, wrap });
+  if (kustomerMigration) registerKustomerRoutes(r, { migration: kustomerMigration, needRole, wrap });
+
+  // ---------- KPI scorecard (read-only; docs/kpi.md) ----------
+  if (kpi) {
+    const k = (fn) => wrap(async (req, res) => {
+      if (!canSeeKpi(config, req.user.email)) return res.status(404).json({ error: 'Not found' });
+      try {
+        res.json(await fn(req));
+      } catch (err) {
+        if (err.status) return res.status(err.status).json({ error: err.message });
+        throw err;
+      }
+    });
+    const q = (req) => ({ brand: req.query.brand ? String(req.query.brand) : null, month: req.query.month ? String(req.query.month) : null, mode: String(req.query.mode || 'month'), outage: req.query.outage ? String(req.query.outage) : null });
+    r.get('/kpi/scorecard', k((req) => kpi.scorecard(q(req))));
+    r.get('/kpi/drill', k((req) => kpi.drill({ ...q(req), kpi: String(req.query.kpi || '') })));
+    r.post('/kpi/refresh', k((req) => kpi.refresh({ bearer: req.bearer })));
+    // Manual Google review entry: the service refuses it in production.
+    r.put('/kpi/reviews/:month', k((req) => kpi.saveManualReviews({ brand: req.body?.brand, month: req.params.month, entry: req.body, email: req.user.email })));
+    r.delete('/kpi/reviews/:month', k((req) => kpi.clearManualReviews({ brand: req.query.brand ? String(req.query.brand) : null, month: req.params.month })));
+  }
 
   return r;
 }

@@ -1,7 +1,7 @@
 // Client for the Complaint Resolution Engine (/api/complaints on our own server).
 import { ApiError, describeErrors } from '../api';
 
-export type Outcome = 'saved' | 'partial_save' | 'lost' | 'pending';
+export type Outcome = 'saved' | 'partial_save' | 'lost' | 'pending' | 'rebooked' | 'not_rebooked';
 export type Confidence = 'good' | 'fair' | 'thin' | 'none';
 
 export interface OutcomeStats {
@@ -13,9 +13,10 @@ export interface OutcomeStats {
   avg_cost: number | null;
   median_cost: number | null;
   confidence: Confidence;
+  one_time: { n: number; decided: number; rebooked_90: number | null; rebooked_120: number | null; confidence: Confidence };
 }
 
-export interface Rung { rung: string; tier: string; action: string; label: string; amount?: number; pct?: number }
+export interface Rung { rung: string; name: string; tier: string; action: string; label: string; amount?: number; pct?: number }
 
 export interface Playbook {
   window: { from: string; to: string };
@@ -26,12 +27,22 @@ export interface Playbook {
     share: number | null;
     hard_routed: number;
     typical_rung: string | null;
+    typical_name: string | null;
     tones: Record<string, number>;
-    by_rung: (OutcomeStats & { rung: string })[];
-    cheapest_that_works: { rung: string; saved: number; avg_cost: number | null; n: number } | null;
+    by_rung: (OutcomeStats & { rung: string; name: string })[];
+    cheapest_that_works: { rung: string; name: string; saved: number; avg_cost: number | null; n: number } | null;
   })[];
   ladder: (Rung & OutcomeStats)[];
   reclean_vs_refund: { key: string; label: string; reclean: OutcomeStats; refund: OutcomeStats; neither: OutcomeStats; verdict: string }[];
+  reclean_vs_refund_total: { reclean: OutcomeStats; refund: OutcomeStats; neither: OutcomeStats };
+  like_for_like: {
+    groups_compared: number;
+    matched_pairs: number;
+    reclean: { saved: number; avg_cost: number | null; n: number } | null;
+    refund: { saved: number; avg_cost: number | null; n: number } | null;
+    confidence: Confidence;
+    verdict: string;
+  };
   root_causes: null | {
     base_rate_per_100: number;
     visits: number;
@@ -71,6 +82,9 @@ export interface CaseRow {
   total_cost: string | number;
   rungs: string | null;
   outcome_60: Outcome | null;
+  outcome_120: Outcome | null;
+  client_type: 'one_time' | 'recurring' | null;
+  service: string | null;
   tenure_days: number | null;
   cleaner_name: string | null;
 }
@@ -95,13 +109,68 @@ export interface Settings {
   budget: { target_pct: number | null; below_average_by: number; amber_at: number; red_at: number; alert_slack_user: string | null; qbo_tolerance: number };
   costs: { cleaner_hourly_default: number; margin_per_hour_default: number; travel_per_visit: number; reclean_default_hours: number; reclean_spot_share: number };
   pilot_months: number;
+  auto: { enabled: boolean; history_months: number };
 }
 
 export interface Status {
   running: boolean;
   sources: Record<string, string>;
   window: { from: string; to: string };
+  auto: { enabled: boolean; history_months: number; next: null | { kind: 'history' | 'recent'; from: string; to: string; label: string }; last_daily_update: string | null; overnight: boolean };
+  mined: { window_from: string; window_to: string; finished_at: string | null; status: string }[];
   last_run: null | { id: number; started_at: string; finished_at: string | null; status: string; window_from: string; window_to: string; log: { at: string; level: string; msg: string }[] };
+}
+
+export interface ClientRow {
+  l27_customer_id: number;
+  name: string | null;
+  complaints: number;
+  last_complaint: string;
+  last_category: string;
+  total_cost: number;
+  avg_severity: number;
+  status: Outcome;
+  case_id: number;
+}
+export interface Clients {
+  repeat: (ClientRow & { low_severity: boolean; still_with_us: boolean })[];
+  at_risk: (ClientRow & { score: number; reasons: string[]; next_booking_on: string | null })[];
+  review_mentions: (ClientRow & { mentioned_on: string })[];
+  google_reviews_connected: boolean;
+  clients_with_complaints: number;
+}
+
+export type Verdict = 'correct' | 'wrong_category' | 'not_complaint';
+export interface ReviewItem {
+  id: number;
+  source: string;
+  opened_at: string;
+  service_date: string | null;
+  customer_name: string | null;
+  category: string;
+  tone: string | null;
+  severity: number | null;
+  hard_route: string | null;
+  summary: string | null;
+  source_status: string | null;
+  classified_by: string;
+  areas_cited: string[];
+  rungs: string | null;
+  title: string | null;
+  text: string | null;
+  resolution_text: string | null;
+  rating: number | null;
+  original_url: string | null;
+}
+export interface ReviewTally { key: string; checked: number; correct: number; wrong_category: number; not_complaint: number; accuracy: number | null; enough: boolean }
+export interface ReviewStats {
+  total: Omit<ReviewTally, 'key'>;
+  by_category: (ReviewTally & { waiting: number })[];
+  by_source: ReviewTally[];
+  by_classifier: ReviewTally[];
+  confusions: { from: string; to: string; n: number }[];
+  min_checks: number;
+  waiting: number;
 }
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -114,8 +183,8 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   return res.json();
 }
 
-const qs = (w?: { from?: string; to?: string; category?: string }) => {
-  const p = new URLSearchParams(Object.entries(w || {}).filter(([, v]) => v) as [string, string][]).toString();
+const qs = (w?: Record<string, string | number | undefined>) => {
+  const p = new URLSearchParams(Object.entries(w || {}).filter(([, v]) => v) .map(([k, v]) => [k, String(v)])).toString();
   return p ? `?${p}` : '';
 };
 
@@ -123,13 +192,22 @@ export const complaintsApi = {
   status: () => call<Status>('GET', '/status'),
   playbook: (w?: { from?: string; to?: string }) => call<Playbook>('GET', `/playbook${qs(w)}`),
   cases: (w?: { from?: string; to?: string; category?: string }) => call<CaseRow[]>('GET', `/cases${qs(w)}`),
+  clients: () => call<Clients>('GET', '/clients'),
   case: (id: number) => call<CaseDetail>('GET', `/cases/${id}`),
   reclassify: (id: number, patch: { category?: string; hard_route?: string | null }) => call<CaseDetail>('PATCH', `/cases/${id}`, patch),
   run: (w?: { from?: string; to?: string }) => call<{ started: boolean }>('POST', '/run', w || {}),
+  review: (w?: { category?: string; source?: string; per?: number }) => call<{ queue: ReviewItem[]; stats: ReviewStats }>('GET', `/review${qs(w)}`),
+  submitReview: (id: number, body: { verdict: Verdict; category?: string }) => call<{ ok: boolean; stats: ReviewStats }>('POST', `/cases/${id}/review`, body),
   settings: () => call<{ settings: Settings; rungs: Rung[]; presets: Record<string, { label: string }>; categories: string[]; hard_routes: Record<string, string> }>('GET', '/settings'),
   saveSettings: (s: Settings) => call<{ settings: Settings }>('PUT', '/settings', s),
 };
 
-export const OUTCOME_LABEL: Record<string, string> = { saved: 'Saved', partial_save: 'Partial save', lost: 'Lost', pending: 'Too early' };
+export const OUTCOME_LABEL: Record<string, string> = { saved: 'Saved', partial_save: 'Partial save', lost: 'Lost', pending: 'Too early', rebooked: 'Booked again', not_rebooked: "Didn't book again" };
+// Plain names for what we did. The L-codes stay behind the scenes (approval limits).
+export const RUNG_NAME: Record<string, string> = {
+  L0: 'Apology only', L1: '$5 credit', L2: '$10 credit', L3: 'Reclean', L4: 'Small refund (up to ~20%)', L5: 'Partial refund (~25–40%)', L6: 'Half refund', L7: 'Full refund (over half)',
+  damage_reimbursement: 'Damage reimbursement', damage: 'Damage reimbursement', refund: 'Refund', credit: 'Credit', reclean_full: 'Reclean', reclean_spot: 'Spot reclean', apology: 'Apology only',
+};
+export const whatWeDid = (rungs: string | null) => (rungs ? [...new Set(rungs.split(', ').map((r) => RUNG_NAME[r] || r))].join(', ') : 'Apology only');
 export const TONE_LABEL: Record<string, string> = { mild: 'Mild', frustrated: 'Frustrated', angry: 'Angry', threat_leave: 'Threatens to leave', threat_review: 'Threatens a review' };
 export const SOURCE_LABEL: Record<string, string> = { kustomer: 'Kustomer', gmail: 'info@ email', slack: 'Slack refund post', launch27_rating: 'Launch27 rating', ops_inbox: 'Ops inbox', manual: 'Manual' };

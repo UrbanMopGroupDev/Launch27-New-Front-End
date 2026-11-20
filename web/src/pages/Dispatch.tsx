@@ -1,11 +1,13 @@
 import { DragEvent, useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { l27, l27All, l27Write } from '../api';
 import { useBrand } from '../brands/useBrand';
+import { CustomerTags } from '../components/CustomerTags';
 import { useActiveTeams, useCanWrite, useLocations } from '../hooks';
 import { fmtMoney, todayISO } from '../format';
 import {
+  blockMinutes,
   bookingKey,
   buildBoard,
   fmtClock,
@@ -74,11 +76,29 @@ type DropAsk = { booking: DispatchBooking; teamId: number; verb: string; run: ()
 export function DispatchPage() {
   const canWrite = useCanWrite();
   const queryClient = useQueryClient();
-  const [date, setDate] = useState(todayISO());
-  const [locationId, setLocationId] = useState<number | 'all' | null>(null);
+  // The day, location and open booking live in the address (?date=…&loc=…&open=…), so coming
+  // back from a booking (or reloading, or sharing the link) lands on the same view, not on today.
+  // Each day change is its own history entry, so the browser's Back button steps back through
+  // the days you looked at; opening a booking or switching location just updates the current one.
+  const [params, setParams] = useSearchParams();
+  const setUrl = (patch: Record<string, string | null>, push = false) => {
+    const next = new URLSearchParams(params);
+    for (const [k, v] of Object.entries(patch)) if (v) next.set(k, v); else next.delete(k);
+    if (next.toString() === params.toString()) return;
+    setParams(next, { replace: !push });
+  };
+  const today = todayISO();
+  const dateParam = params.get('date') || '';
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(dateParam) && !Number.isNaN(new Date(`${dateParam}T12:00:00`).getTime()) ? dateParam : today;
+  const setDate = (d: string) => setUrl({ date: d && d !== today ? d : null, open: null, team: null }, true);
+  const locParam = params.get('loc');
+  const locationId: number | 'all' | null = locParam === 'all' ? 'all' : locParam && Number.isInteger(Number(locParam)) ? Number(locParam) : null;
+  const setLocationId = (l: number | 'all' | null) => setUrl({ loc: l === null ? null : String(l) });
+  const openKey = params.get('open');
+  const selected = useMemo(() => (openKey ? { key: openKey, teamId: params.get('team') ? Number(params.get('team')) : null } : null), [openKey, params]);
+  const setSelected = (sel: { key: string; teamId: number | null } | null) => setUrl({ open: sel?.key ?? null, team: sel?.teamId != null ? String(sel.teamId) : null });
   const [search, setSearch] = useState('');
   const [showAll, setShowAll] = useState(false);
-  const [selected, setSelected] = useState<{ key: string; teamId: number | null } | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [dropAsk, setDropAsk] = useState<DropAsk | null>(null);
   const [busy, setBusy] = useState(false);
@@ -105,6 +125,7 @@ export function DispatchPage() {
   useEffect(() => {
     if (locationId !== null && locationId !== 'all' && !brandLocations.some((l) => l.id === locationId)) setLocationId(null);
     else if (locationId === null && brandLocations.length) setLocationId(brand.view === 'both' ? (brandLocations.find((l) => l.default) || brandLocations[0]).id : brandLocations.length > 1 ? 'all' : brandLocations[0].id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- setLocationId only writes the address
   }, [brandLocations, locationId, brand.view]);
 
   const bookingsQ = useQuery({
@@ -186,7 +207,7 @@ export function DispatchPage() {
     };
   }, [board, rows, bookings]);
 
-  const isToday = date === todayISO();
+  const isToday = date === today;
   const nowMin = (() => {
     const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(new Date(now));
     return (Number(parts.find((p) => p.type === 'hour')?.value) % 24) * 60 + Number(parts.find((p) => p.type === 'minute')?.value);
@@ -290,7 +311,7 @@ export function DispatchPage() {
               ›
             </button>
             {!isToday && (
-              <button className="secondary" onClick={() => setDate(todayISO())}>
+              <button className="secondary" onClick={() => setDate(today)}>
                 Today
               </button>
             )}
@@ -511,6 +532,11 @@ export function DispatchPage() {
   );
 }
 
+const fmtDur = (min: number) => {
+  const m = Math.round(min);
+  return `${Math.floor(m / 60)}h${m % 60 ? ` ${String(m % 60).padStart(2, '0')}m` : ''}`;
+};
+
 function localStart(b: DispatchBooking) {
   const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(new Date(b.service_date));
   return (Number(parts.find((p) => p.type === 'hour')?.value) % 24) * 60 + Number(parts.find((p) => p.type === 'minute')?.value);
@@ -560,7 +586,7 @@ function BookingDrawer({
   onUnassign: (teamId: number) => void;
 }) {
   const [showAll, setShowAll] = useState(false);
-  const blocks = [...board.values()].flat().filter((x) => x.booking.id === b.id);
+  const blocks = [...board.values()].flat().filter((x) => bookingKey(x.booking) === bookingKey(b));
   const start = blocks[0]?.start ?? localStart(b);
   // Don't suggest accounts that aren't working cleaners (hiring/test placeholders, on hold).
   const suggestable = useMemo(() => teams.filter((t) => !/hiring|do not archive|\btest\b|on hold/i.test(t.title)), [teams]);
@@ -571,33 +597,102 @@ function BookingDrawer({
   canWrite = canWrite && !projected;
   const teamPhone = (id: number) => teams.find((t) => t.id === id)?.phone;
   const mapUrl = b.address?.full_address ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(b.address.full_address)}` : null;
+  // When the visit finishes: the latest block end (cleaners can have different hours).
+  const end = blocks.length ? Math.max(...blocks.map((x) => x.end)) : start + blockMinutes(b, null);
+  const onSite = end - start;
+  const crew = Math.max(1, b.teams?.length || 0);
+  const totalMin = b.duration && b.duration > 0 ? Math.round(b.duration) : onSite * crew;
+  const windowMin = Number(b.arrival_window) || 0;
+  const head = blocks.find((x) => x.teamId === focusTeamId) || blocks[0];
+  // What's booked beyond the main service: rooms, bathrooms and extras.
+  const items = (b.services || []).flatMap((svc) => [...(svc.pricing_parameters || []), ...(svc.extras || [])]).filter((i) => i.name && (i.quantity ?? 1) > 0).map((i) => `${i.name}${(i.quantity ?? 1) > 1 ? ` × ${i.quantity}` : ''}`);
+  const access = (b.custom_fields || [])
+    .map((cf) => ({ title: cf.title?.replace(/\?$/, ''), value: (cf.values || []).map((v) => v.other || v.label || v.name || v.value).filter(Boolean).join(', ') }))
+    .filter((cf) => cf.title && cf.value);
 
   return (
     <aside className="drawer dispatch-drawer">
       <div className="drawer-header">
-        <h2>
-          {fmtClock(start)} · {b.user?.name}
-        </h2>
+        <div className="chips">
+          {head && <span className={`chip ${STATUS[head.status].cls}`}>{STATUS[head.status].label}</span>}
+          {head?.conflict && <span className="chip conflict">double-booked</span>}
+          {b.user?.is_new_customer && <span className="chip accent">First clean</span>}
+          {projected && <span className="chip">Projected</span>}
+        </div>
         <button className="link" onClick={onClose}>
           Close
         </button>
       </div>
-      <div className="small muted">
-        {b.services?.map((s) => s.name).join(', ')} · {b.frequency?.name} · {fmtMoney(b.summary?.total)} · window {b.arrival_window ? `${b.arrival_window} min` : 'exact'}
+      <div className="dd-time">
+        {fmtClock(start)} <span className="dd-time-to">– {fmtClock(end)}</span>
       </div>
-      <div className="drawer-links">
-        {mapUrl && (
-          <a href={mapUrl} target="_blank" rel="noreferrer" className="button secondary-link">
-            📍 Map
-          </a>
+      <h2 className="dd-name">{b.user?.name}</h2>
+      {b.address?.full_address && (
+        <div className="dd-address">
+          {mapUrl ? (
+            <a href={mapUrl} target="_blank" rel="noreferrer">
+              📍 {b.address.full_address}
+            </a>
+          ) : (
+            b.address.full_address
+          )}
+        </div>
+      )}
+
+      <dl className="dd-facts">
+        <div>
+          <dt>Duration</dt>
+          <dd>
+            {fmtDur(totalMin)}
+            {crew > 1 && <span className="muted small"> · {crew} cleaners × {fmtDur(onSite)}</span>}
+          </dd>
+        </div>
+        <div>
+          <dt>Finishes</dt>
+          <dd>~{fmtClock(end)}</dd>
+        </div>
+        <div>
+          <dt>Arrival</dt>
+          <dd>{windowMin ? `${fmtClock(start)}–${fmtClock(start + windowMin)}` : 'Exact time'}</dd>
+        </div>
+        <div>
+          <dt>Price</dt>
+          <dd>{fmtMoney(b.summary?.total)}</dd>
+        </div>
+      </dl>
+      <div className="small dd-service">
+        <strong>{b.services?.map((s) => s.name).join(', ')}</strong>
+        {b.frequency?.name && <span className="muted"> · {b.frequency.name}</span>}
+        {items.length > 0 && <div className="muted">{items.join(' · ')}</div>}
+      </div>
+
+      <div className="dd-notes small">
+        <div>
+          <div className="eyebrow">Staff notes</div>
+          {b.staff_notes ? <p className="pre">{b.staff_notes}</p> : <p className="muted">None</p>}
+        </div>
+        {b.customer_notes && (
+          <div>
+            <div className="eyebrow">From the customer</div>
+            <p className="pre">{b.customer_notes}</p>
+          </div>
         )}
+        {access.length > 0 && (
+          <div>
+            <div className="eyebrow">Access</div>
+            <p>{access.map((a) => `${a.title}: ${a.value}`).join(' · ')}</p>
+          </div>
+        )}
+      </div>
+
+      <div className="drawer-links">
         {b.phone && (
           <a href={`tel:${b.phone}`} className="button secondary-link">
             📞 Call customer
           </a>
         )}
         {b.id && (
-          <Link to={`/bookings/${b.id}`} className="button secondary-link">
+          <Link to={`/bookings/${b.id}`} state={{ from: 'dispatch' }} className="button secondary-link">
             Open booking
           </Link>
         )}
@@ -608,21 +703,7 @@ function BookingDrawer({
           <Link to={`/bookings/${b.forecasted_from_booking!.id}`}>series' current booking</Link>.
         </p>
       )}
-      <p className="small">{b.address?.full_address}</p>
-      {(b.staff_notes || b.customer_notes) && (
-        <div className="drawer-notes small">
-          {b.staff_notes && (
-            <p>
-              <strong>Staff notes:</strong> {b.staff_notes}
-            </p>
-          )}
-          {b.customer_notes && (
-            <p>
-              <strong>Customer notes:</strong> {b.customer_notes}
-            </p>
-          )}
-        </div>
-      )}
+      <CustomerTags customerId={b.user?.id} fallback={b.user?.tags_info} />
 
       <h3>Cleaners on this job</h3>
       {!hasTeam && <p className="warn small">Nobody assigned yet.</p>}

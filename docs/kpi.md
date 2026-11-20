@@ -1,0 +1,108 @@
+# KPI scorecard
+
+**Reports → KPI scorecard** (`/reports/kpi`) is the monthly scorecard for UrbanMop (Ottawa
+Residential). It is read-only: it never writes to Launch27, QuickBooks, Kustomer, Google or
+Gmail, and it has no "edit data" controls.
+
+**Status.** Development and QA run on synthetic data. Production reads Launch27 (churn,
+fulfilment, visit counts), the Kustomer complaints the Complaint playbook already collects, and
+the monthly Syft management report from Gmail (OCR). QuickBooks and Google Business Profile are
+not connected yet: OCR shows the Syft report's stated figure with no cross-check, and Google
+reviews read "No data".
+
+## Where the code is
+
+| Part | Code |
+| --- | --- |
+| Brands, rule lists, thresholds | `server/src/kpi/config.js` |
+| Every formula and exclusion rule | `server/src/kpi/calc.js` (pure; tests in `server/test/kpi.test.js`) |
+| One read-only connector per source | `server/src/kpi/connectors.js` |
+| Synthetic data for dev and QA | `server/src/kpi/synthetic.js` |
+| Live connectors (production) | `server/src/kpi/live.js`, `server/src/kpi/syft.js` |
+| Service and API (`/api/kpi/*`) | `server/src/kpi/service.js`, routes at the end of `server/src/inbox/api.js` |
+| Page | `web/src/pages/KpiScorecard.tsx`, `web/src/kpi/api.ts` |
+| Tables | `server/migrations/0029_kpi.sql` (`kpi_refresh_log`, `kpi_manual_reviews`), `server/migrations/0030_kpi_snapshots.sql` (`kpi_snapshots`) |
+
+## Definitions
+
+Every tile shows its value, status, change, **Target** and **Last 12 months** (the same two lines, in
+the same words, on every tile), plus period, source, last refresh and an "i" button with the formula.
+The page opens on **Summary**; **Detailed** (or a tile's "Details") adds the breakdowns, and "View rows"
+goes down to the individual bookings and clients.
+If a source is missing or has not refreshed in 48 hours, the tile says "No data" or "Stale"
+and shows no number. A month with no data is a gap in the trend, never a zero.
+
+| KPI | Formula | Sources |
+| --- | --- | --- |
+| Operational Cost Ratio | Operational delivery cost ÷ revenue. Included: cleaner wages (contractor + employee), payroll taxes / EI / CPP / workers' comp on cleaners, supplies, field vehicle costs, ops/office staff, ops software, recruitment ads. Excluded: office rent, general business insurance. Syft's figure is shown beside it, flagged when they differ by more than 1.0 percentage point. Provisional until the 10th of the following month. Status against the 63–68% target: On track at or under 68%, Warning within 5% above, Off track beyond | QuickBooks Online (source of truth), Syft report |
+| Recurring client churn | Permanent churn events in the calendar month ÷ active recurring clients at the start of the month. Bands: ≤7% Excellent, 7–10% Healthy, 10–12% Elevated, over 12% High. Target under 6.8% | Launch27 |
+| Service fulfilment | Bookings completed ÷ bookings on the books 48 hours before the visit (the ones we could have fulfilled); the same ratio over all scheduled bookings is shown beside it. A completed visit is fulfilled even when we arrived late (late arrivals over 30 minutes are counted separately). Anything not completed is not fulfilled, split into ours, client-related and unclear. Monthly and by week | Launch27 |
+| Complaint rate | Complaints ÷ completed visits × 100. Complaint = Kustomer complaint object or Launch27 bottom rating, the same visit counted once. "Saved" = still booking 60+ days later | Kustomer, Launch27 |
+| Google reviews | New reviews, average rating (month and all time), reviews per 100 completed visits | Google Business Profile, Launch27 |
+| Billing cash conversion | Not built. Placeholder tile | — |
+
+Churn rules, in the order they are applied to each cancellation in the month:
+
+1. Test entry (listed names, or the word "test" in the name or reason): out.
+2. Institutional client (carefor, owcs, bruyere, homemaking, mft, metis, digirealty, spark lifecare, corretto): out.
+3. Not recurring (frequency has no weekly / biweekly / triweekly / monthly / prepaid, or is a one-time): out.
+4. Reason is a LuxoClean transfer or an admin error: out.
+   Temporary reasons (travel, hold/pause, renovation, Airbnb, postpartum): out if the client is back
+   on a recurring plan within 90 days (shown as back within 30, 60 or 90); counted as churn in the
+   cancellation month once 90 days pass with no return; pending, and not counted, until then.
+5. The client has a later active recurring booking ("came back"): out.
+6. A second event for the same client in the month: out.
+
+Test and institutional clients are also left out of the base. The event is dated by the
+cancellation date, and the last cleaner is the one on the client's last completed visit.
+
+## Refresh schedule
+
+Dev and QA: synthetic data is generated in memory, the same for everyone on a given day.
+
+Production:
+
+- **Launch27**: once a day after 5 am Toronto (and at start-up if it has never run), using the
+  read-only sync login (`L27_SYNC_EMAIL` / `L27_SYNC_PASSWORD`). The first run and one run a week
+  read the whole history from January 2024; the others read bookings from 120 days back to 60
+  days ahead and merge them in. Only the login and GET requests are ever sent. The result is one
+  slimmed snapshot in `kpi_snapshots`; review comments and contact details are not copied.
+  "Refresh now" under Sources starts a run by hand, using the signed-in person's own
+  Launch27 login. Without the sync login set, that button is the only way it refreshes.
+- **Kustomer**: no extra calls. Complaints are read from `complaint_cases` (source `kustomer`,
+  Residential, not merged, not marked "not a complaint"), which the Complaint playbook keeps up to
+  date. Freshness is the playbook's last finished run; a month outside the periods it has read
+  shows "No data" rather than zero complaints.
+- **Syft report (OCR)**: once a day the mailbox in `KPI_SYFT_MAILBOX` is searched, read-only, for
+  the bookkeeper's management-report emails. Each UrbanMop report PDF (file names have varied; the
+  company on the cover is checked and the month is taken from the report itself) is read once
+  and the Operational Cost Ratio and Total Income printed on its Financial Health Scorecard page
+  are stored; the most recently received report that gives a month's figure wins (a revision, or the next
+  month's report restating it in its previous-month column). The figure is for
+  the whole company (Residential and Commercial), and it is Syft's own calculation, not the
+  account-by-account definition above, until QuickBooks is connected.
+- A failed refresh keeps the previous snapshot; the affected tiles turn "Stale" after 48 hours.
+- Every refresh writes one row per source per day to `kpi_refresh_log` (updated in place).
+- Only bookings at the Ottawa location count for UrbanMop Residential (`locations` in `KPI_BRANDS`).
+
+Not built yet: QuickBooks and Google connectors, the email alert when a refresh fails or
+a source is stale, and per-brand roles for office managers.
+
+## Who sees it
+
+Dev and QA: everyone who can sign in. Production: only the logins in `KPI_EMAILS`
+(comma-separated; empty means nobody), because it carries financial figures.
+
+## Dev and QA extras
+
+- **Preview a source outage** (Sources card): shows how tiles behave when a source is stale
+  or not connected.
+- **Enter Google reviews by hand**: a manual monthly entry while the Google Business Profile
+  API is not connected. The service refuses it in production.
+
+## Adding a brand
+
+1. Add the brand to `KPI_BRANDS` in `server/src/kpi/config.js` with the KPIs that apply.
+2. Make each connector in `connectors.js` return that brand's data in the normalized shape
+   described at the top of that file (for example MaidCentral, or a CSV upload, for Clean Bee).
+3. Nothing changes in the calc module or the page: the brand toggle appears once there are two.

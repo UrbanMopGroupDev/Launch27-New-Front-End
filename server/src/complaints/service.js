@@ -10,16 +10,17 @@
 // Sources that aren't configured are skipped and reported, never faked.
 import { many, one, json } from '../db/index.js';
 import { indexVisits } from '../reports/compute.js';
+import { frequencyKind } from '../schedule/rules.js';
 import { normalizeEmail, normalizePhone } from '../inbox/normalize.js';
 import { parseGmailMessage } from '../inbox/email/mime.js';
 import { classifyRules, mergeClassification, amountsIn } from './taxonomy.js';
 import { redact } from './redact.js';
-import { journeyAt, outcomeAt, cleanerStatsIndex, recleanCost, unitEconomics } from './journey.js';
+import { journeyAt, outcomeAt, oneTimeOutcomeAt, cleanerStatsIndex, recleanCost, unitEconomics } from './journey.js';
 import { normalizeSettings, rungForRefund } from './settings.js';
 import { parseRefundPost } from './slackRefunds.js';
 import { createKustomerClient, discover, listComplaints, toCase as kustomerToCase, customer as kustomerCustomer, conversationsAround } from './sources/kustomer.js';
 import { createSlackClient, DEFAULT_CHANNELS } from './sources/slack.js';
-import { buildPlaybook } from './playbook.js';
+import { buildPlaybook, buildClients } from './playbook.js';
 
 const DAY = 86_400_000;
 const isoDay = (ms) => new Date(ms).toISOString().slice(0, 10);
@@ -27,6 +28,16 @@ const nameKey = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[
 const SOURCE_RANK = { kustomer: 0, ops_inbox: 1, gmail: 2, launch27_rating: 3, slack: 4, manual: 5 };
 const RECLEAN_RE = /\b(re-?clean|return (clean|visit)|come back|send (someone|a cleaner|the team) back|redo)\b/i;
 const CREDIT_RE = /\$\s?(\d{1,3})(?:\.\d{2})?\s*(?:off|credit|discount)\b|\bcredit(?:ed)?\s*(?:of\s*)?\$\s?(\d{1,3})/i;
+
+const CLASSIFY_CONCURRENCY = 6;
+// Run fn over items with at most n in flight.
+async function pool(items, n, fn) {
+  let i = 0;
+  const workers = Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (i < items.length) await fn(items[i++]);
+  });
+  await Promise.all(workers);
+}
 
 const suggestBrand = (name) => {
   const n = String(name || '').toLowerCase();
@@ -65,7 +76,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
   // ---------- the run ----------
   // bearer: the Launch27 login of the admin who started the run. Used when there's no
   // L27_SYNC_EMAIL service login (production today), the same way "Refresh now" works.
-  async function run({ from, to, userId = null, bearer = null }) {
+  async function run({ from, to, userId = null, bearer = null, label = null, refreshFrom = null }) {
     const runRow = await one(db, 'INSERT INTO complaint_runs (started_by, window_from, window_to) VALUES ($1,$2,$3) RETURNING id', [userId, from, to]);
     const runLog = [];
     const note = (level, msg, extra = {}) => {
@@ -75,11 +86,10 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       log[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info'](`complaints: ${msg}`, extra);
     };
     try {
+      if (label) note('info', label);
       const settings = await getSettings();
       const ctx = await loadContext(note, bearer);
       const staffNames = (await many(db, 'SELECT name FROM users WHERE name IS NOT NULL')).map((r) => r.name);
-      const cases = [];
-
       const guarded = async (label, fn) => {
         try {
           return await fn();
@@ -88,35 +98,66 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
           return [];
         }
       };
-      if (config.kustomerApiKey) cases.push(...(await guarded('Kustomer', () => fromKustomer(from, to, ctx, note))));
-      else note('warn', 'Kustomer skipped: KUSTOMER_API_KEY is not set');
-      cases.push(...fromRatings(from, to, ctx));
-      note('info', `Launch27 unhappy ratings: ${cases.filter((c) => c.source === 'launch27_rating').length}`);
-      if (gmail) cases.push(...(await guarded('info@ email', () => fromGmail(from, to, ctx, note))));
-      else note('warn', 'info@ email skipped: Gmail is not connected in this environment');
+      // Each source is classified and saved as soon as it's read, so a run that's cut off
+      // (a release restarts the app) keeps every source it finished.
+      let saved = 0;
+      const save = async (label, cases) => {
+        // info@ is mostly not complaints: the free keyword rules screen it first, and only
+        // emails that read as a complaint go to Claude.
+        // Already read on an earlier run? Reuse what Claude (or a person) decided then, and skip
+        // emails already judged not to be complaints. Daily updates re-read the last two weeks,
+        // so this is what keeps them quick and cheap.
+        const ids = cases.map((c) => c.source_id);
+        const src = cases[0]?.source;
+        const known = new Map(!ids.length ? [] : (await many(db, "SELECT source_id, category, tone, severity, areas_cited, hard_route, summary, classified_by, classifier_confidence FROM complaint_cases WHERE source = $1 AND source_id = ANY($2::text[]) AND classified_by IN ('claude', 'human')", [src, ids])).map((r) => [r.source_id, r]));
+        const notComplaints = new Set(!ids.length ? [] : (await many(db, "SELECT source_id FROM complaint_source_items WHERE source = $1 AND source_id = ANY($2::text[]) AND kind = 'not_complaint'", [src, ids])).map((r) => r.source_id));
+        const fresh = cases.filter((c) => !notComplaints.has(c.source_id));
+        const work = fresh
+          .map((c) => ({ c, rules: classifyRules(c.text, { claimAmount: c.claim_amount }) }))
+          .filter(({ c, rules }) => known.has(c.source_id) || c.source !== 'gmail' || rules.category !== 'other' || rules.tone !== 'mild');
+        const screened = cases.length - work.length;
+        let reused = 0;
+        // Classify several at a time (Claude calls are the slow part), then save in order.
+        await pool(work, CLASSIFY_CONCURRENCY, async (w) => {
+          const k = known.get(w.c.source_id);
+          if (k) {
+            reused++;
+            w.c.cls = { category: k.category, tone: k.tone, severity: k.severity, areas: k.areas_cited || [], hard_route: k.hard_route || w.rules.hard_route, summary: k.summary, classified_by: k.classified_by, confidence: k.classifier_confidence };
+            return;
+          }
+          const model = classifier && w.c.text ? await classifier(redact(w.c.text, { names: [w.c.customer_name, ...(w.c.cleaner_names || []), ...staffNames] })) : null;
+          w.c.cls = mergeClassification(w.rules, model);
+          w.skip = w.c.source === 'gmail' && ((model && model.is_complaint === false) || (!model && (w.c.cls.category === 'other' || w.c.cls.tone === 'mild')));
+          // Remember emails Claude read and found not to be complaints, so they aren't sent again.
+          if (w.skip && model) await db.query("INSERT INTO complaint_source_items (source, source_id, occurred_at, kind) VALUES ($1, $2, $3, 'not_complaint') ON CONFLICT (source, source_id) DO NOTHING", [w.c.source, w.c.source_id, w.c.opened_at]).catch(() => {});
+        });
+        let kept = 0;
+        for (const w of work) {
+          if (w.skip) continue;
+          w.c.id = await upsertCase(w.c);
+          kept++;
+        }
+        saved += kept;
+        note('info', `${label}: ${kept} complaint case${kept === 1 ? '' : 's'} saved${screened ? ` (${screened} screened out as not complaints)` : ''}${reused ? `, ${reused} already classified` : ''}`);
+      };
 
-      // Classify and store cases, then attach Slack refunds (which need the cases to match).
-      for (const c of cases) {
-        const rules = classifyRules(c.text, { claimAmount: c.claim_amount });
-        let model = null;
-        if (classifier && c.text) model = await classifier(redact(c.text, { names: [c.customer_name, ...(c.cleaner_names || []), ...staffNames] }));
-        c.cls = mergeClassification(rules, model);
-        if (c.source === 'gmail' && model && model.is_complaint === false) c.skip = true;
-        if (c.source === 'gmail' && !model && (rules.category === 'other' || rules.tone === 'mild')) c.skip = true;
-      }
-      const kept = cases.filter((c) => !c.skip);
-      note('info', `cases found: ${kept.length} (${Object.entries(countBy(kept, 'source')).map(([k, v]) => `${k} ${v}`).join(', ')})`);
-      for (const c of kept) c.id = await upsertCase(c);
+      if (config.kustomerApiKey) await save('Kustomer', await guarded('Kustomer', () => fromKustomer(from, to, ctx, note)));
+      else note('warn', 'Kustomer skipped: KUSTOMER_API_KEY is not set');
+      const ratings = fromRatings(from, to, ctx);
+      note('info', `Launch27 unhappy ratings: ${ratings.length}`);
+      await save('Launch27 ratings', ratings);
+      if (gmail) await save('info@ email', await guarded('info@ email', () => fromGmail(from, to, ctx, note)));
+      else note('warn', 'info@ email skipped: Gmail is not connected in this environment');
       await markDuplicates();
 
       if (config.slackBotToken) await guarded('Slack', () => fromSlack(from, to, ctx, note));
       else note('warn', 'Slack refund history skipped: SLACK_BOT_TOKEN is not set');
 
-      await enrich(from, to, ctx, settings, note);
+      await enrich(refreshFrom && refreshFrom < from ? refreshFrom : from, to, ctx, settings, note);
       // 'partial': it finished, but a source failed (shown on the page with the reason).
       const status = runLog.some((l) => l.level === 'error') ? 'partial' : 'done';
       await db.query('UPDATE complaint_runs SET finished_at = now(), status = $3, log = $2::jsonb WHERE id = $1', [runRow.id, json(runLog), status]);
-      return { run_id: Number(runRow.id), cases: kept.length };
+      return { run_id: Number(runRow.id), cases: saved };
     } catch (err) {
       note('error', `run failed: ${err.message}`);
       await db.query("UPDATE complaint_runs SET finished_at = now(), status = 'failed', log = $2::jsonb WHERE id = $1", [runRow.id, json(runLog)]);
@@ -451,7 +492,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
 
       // Reclean: a $0 visit for the same client within 14 days after the complaint, or the
       // Kustomer status / our reply says so.
-      const free = list.find((v) => v.at > at && v.at < at + 14 * DAY && (v.revenue || 0) === 0);
+      const free = list.find((v) => v.at > at && v.at < at + 14 * DAY && (v.reclean || (v.revenue || 0) === 0));
       const mentioned = c.source_status && /reclean/i.test(c.source_status) || RECLEAN_RE.test(c.raw?.resolution_text || '') || RECLEAN_RE.test(c.raw?.our_replies_excerpt || '');
       if (free || mentioned) {
         recleans++;
@@ -504,8 +545,15 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
           [c.id, j.tenure_days, j.frequency, j.cleans_total, j.spend_12m, j.price_change_pct, j.distinct_cleaners_90d, j.cleaner_changed_last_visit, j.prior_complaints, j.prior_unhappy_ratings, j.days_since_last_clean, j.cleaner_id, j.cleaner_name, j.cleaner_visits_before, j.cleaner_unhappy_rate_90d, j.data_from],
         );
         const repeat = allCases.find((x) => Number(x.l27_customer_id) === Number(c.l27_customer_id) && x.id !== c.id && new Date(x.opened_at) > new Date(c.opened_at) && new Date(x.opened_at) - new Date(c.opened_at) <= 90 * DAY);
-        for (const day of [30, 60, 90]) {
-          const o = outcomeAt(list, at, day, { today: todayMs, repeatCaseId: repeat?.id || null });
+        // Recurring clients: still booking at 30/60/90 days. One-time clients: did they book
+        // again within 90/120 days. Recleans and free visits don't count as coming back.
+        const paid = list.filter((v) => !v.reclean && (v.revenue || 0) > 0);
+        const kindVisit = visit || list.filter((v) => v.at < at).slice(-1)[0] || null;
+        const oneTime = kindVisit ? kindVisit.kind === 'one' : false;
+        const days = oneTime ? [90, 120] : [30, 60, 90];
+        await db.query('DELETE FROM complaint_outcomes WHERE case_id = $1 AND NOT (day = ANY($2::int[]))', [c.id, days]);
+        for (const day of days) {
+          const o = oneTime ? oneTimeOutcomeAt(paid, at, day, { today: todayMs, repeatCaseId: repeat?.id || null }) : outcomeAt(paid, at, day, { today: todayMs, repeatCaseId: repeat?.id || null });
           await db.query(
             `INSERT INTO complaint_outcomes (case_id, day, still_booking, next_booking_on, last_booking_on, public_review_stars, public_review_platform, repeat_case_id, outcome, checked_at)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
@@ -528,34 +576,127 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
   // ---------- reads for the UI ----------
   function start({ from, to, userId, bearer = null }) {
     if (running) throw Object.assign(new Error('A run is already going'), { status: 409 });
-    running = run({ from, to, userId, bearer }).catch((err) => ({ error: err.message })).finally(() => (running = null));
+    running = run({ from, to, userId, bearer }).catch((err) => ({ error: err.message })).finally(() => {
+      running = null;
+      chain(bearer);
+    });
     return { started: true };
+  }
+
+  // ---------- automatic updates ----------
+  // Nobody should have to click. Every day the engine re-reads the last two weeks (new
+  // complaints, late refunds) and refreshes outcomes; until the history target is reached it
+  // also reads one older month after another. State lives in the database (finished runs =
+  // what's been read), so a release that restarts the app just means the next trigger picks
+  // up where it stopped. It needs a Launch27 login: the L27_SYNC_EMAIL service login when
+  // set (then the worker runs it overnight), otherwise the login of a supervisor or admin
+  // who opens the Complaint playbook (then it runs the first time someone opens it each day).
+  let heldBearer = null;
+  let lastAutoAttempt = 0;
+  const torontoDay = (ms) => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Toronto' }).format(new Date(ms));
+  async function nextAuto() {
+    const settings = await getSettings();
+    if (!settings.auto.enabled) return null;
+    const today = torontoDay(now());
+    const mined = await many(db, "SELECT window_from::text AS f, window_to::text AS t FROM complaint_runs WHERE status IN ('done', 'partial')");
+    const recent = await one(db, "SELECT cursor FROM complaint_sync_state WHERE source = 'auto_recent'");
+    return planAuto({ mined: mined.map((m) => ({ from: m.f.slice(0, 10), to: m.t.slice(0, 10) })), today, historyDays: Math.round(settings.auto.history_months * 30.44), recentDone: recent?.cursor || null });
+  }
+  async function maybeRun({ bearer = null } = {}) {
+    if (running) return false;
+    if (now() - lastAutoAttempt < 60_000) return false;
+    const login = bearer || heldBearer || (syncBearer ? await syncBearer().catch(() => null) : null);
+    if (!login) return false;
+    const job = await nextAuto();
+    if (!job) return false;
+    // A job that keeps failing (not interrupted: failed) waits half an hour between tries.
+    const lastFail = await one(db, "SELECT finished_at FROM complaint_runs WHERE status = 'failed' ORDER BY id DESC LIMIT 1");
+    if (lastFail?.finished_at && now() - new Date(lastFail.finished_at).getTime() < 30 * 60_000) return false;
+    if (running) return false;
+    lastAutoAttempt = now();
+    heldBearer = login;
+    running = run({ from: job.from, to: job.to, bearer: login, label: job.label, refreshFrom: job.refreshFrom })
+      .then(async (r) => {
+        if (job.kind === 'recent') await db.query("INSERT INTO complaint_sync_state (source, cursor, last_run_at, last_ok_at) VALUES ('auto_recent', $1, now(), now()) ON CONFLICT (source) DO UPDATE SET cursor = EXCLUDED.cursor, last_run_at = now(), last_ok_at = now()", [torontoDay(now())]);
+        return r;
+      })
+      .catch((err) => ({ error: err.message }))
+      .finally(() => {
+        running = null;
+        chain(login);
+      });
+    return true;
+  }
+  // After any run, look for the next piece of work a few seconds later (older history, or today's update).
+  function chain(bearer) {
+    if (bearer) heldBearer = bearer;
+    const t = setTimeout(() => {
+      lastAutoAttempt = 0;
+      maybeRun().catch(() => {});
+    }, 5_000);
+    t.unref?.();
+  }
+
+  // A run lives in this process: a restart (every release) ends it. Called at startup, so a
+  // run that was cut off shows as interrupted instead of running forever. Everything it saved stays.
+  async function markInterrupted() {
+    const r = await db.query("UPDATE complaint_runs SET status = 'interrupted', finished_at = now(), log = log || $1::jsonb WHERE status = 'running' RETURNING id", [json([{ at: new Date(now()).toISOString(), level: 'warn', msg: 'Interrupted: the app restarted (a release) before the run finished. Cases saved before then are kept; run again for the rest.' }])]);
+    return r.rows.length;
   }
 
   async function status() {
     const last = await one(db, 'SELECT id, started_at, finished_at, status, window_from, window_to, log FROM complaint_runs ORDER BY id DESC LIMIT 1');
-    return { running: !!running, sources: sources(), last_run: last };
+    // Which periods have been mined (finished runs), so the page can say what a date range covers.
+    const mined = await many(db, "SELECT window_from, window_to, finished_at, status FROM complaint_runs WHERE status IN ('done', 'partial') ORDER BY window_from");
+    const settings = await getSettings();
+    const next = await nextAuto().catch(() => null);
+    const recent = await one(db, "SELECT cursor, last_ok_at FROM complaint_sync_state WHERE source = 'auto_recent'");
+    const hasSyncLogin = config.l27Mode === 'mock' || !!(config.l27SyncEmail && config.l27SyncPassword);
+    const auto = { enabled: settings.auto.enabled, history_months: settings.auto.history_months, next, last_daily_update: recent?.last_ok_at || null, overnight: hasSyncLogin };
+    return { running: !!running, sources: sources(), last_run: last, mined, auto };
   }
 
   async function listCases({ from, to, category, limit = 500 }) {
     const params = [from || '2000-01-01', to || '2999-12-31'];
-    let where = 'c.merged_into IS NULL AND c.opened_at >= $1 AND c.opened_at < $2::date + 1';
+    let where = 'c.merged_into IS NULL AND c.excluded_at IS NULL AND c.opened_at >= $1 AND c.opened_at < $2::date + 1';
     if (category) {
       params.push(category);
       where += ` AND c.category = $${params.length}`;
     }
     params.push(Math.min(2000, Number(limit) || 500));
-    return many(
+    const rows = await many(
       db,
       `SELECT c.id, c.source, c.opened_at, c.service_date, c.customer_name, c.l27_customer_id, c.l27_booking_id, c.category, c.tone, c.severity, c.hard_route, c.summary, c.status, c.source_status, c.classified_by,
               (SELECT coalesce(sum(amount), 0) FROM complaint_costs k WHERE k.case_id = c.id) AS total_cost,
               (SELECT string_agg(DISTINCT coalesce(r.rung, r.action), ', ') FROM complaint_resolutions r WHERE r.case_id = c.id) AS rungs,
               (SELECT outcome FROM complaint_outcomes o WHERE o.case_id = c.id AND o.day = 60) AS outcome_60,
-              j.tenure_days, j.cleaner_name
+              (SELECT outcome FROM complaint_outcomes o WHERE o.case_id = c.id AND o.day = 120) AS outcome_120,
+              j.tenure_days, j.cleaner_name, j.frequency
          FROM complaint_cases c LEFT JOIN complaint_journeys j ON j.case_id = c.id
         WHERE ${where} ORDER BY c.opened_at DESC LIMIT $${params.length}`,
       params,
     );
+    const byId = await visitIndex();
+    return rows.map((r) => ({ ...r, ...visitInfo(byId.get(Number(r.l27_booking_id)), r.frequency) }));
+  }
+
+  // Service type and client type of the visit complained about, from the Launch27 snapshot.
+  let visitCache = null;
+  async function visitIndex() {
+    try {
+      const snap = await reports.visitsSnapshot();
+      if (!visitCache || visitCache.taken_at !== snap.taken_at) visitCache = { taken_at: snap.taken_at, byId: new Map(snap.visits.map((v) => [Number(v.id), v])) };
+      return visitCache.byId;
+    } catch {
+      return new Map();
+    }
+  }
+  function visitInfo(v, frequency = null) {
+    const kind = v?.kind || (frequency ? frequencyKind(frequency) : null);
+    return {
+      client_type: kind == null ? null : kind === 'one' ? 'one_time' : 'recurring',
+      service: v?.svc ? [v.svc, v.deep && 'Deep cleaning', v.move && 'Move in/out', v.reclean && 'Reclean'].filter(Boolean).join(' · ') : null,
+    };
   }
 
   async function getCase(id) {
@@ -568,7 +709,8 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       many(db, 'SELECT * FROM complaint_outcomes WHERE case_id = $1 ORDER BY day', [id]),
       many(db, 'SELECT id, source, opened_at FROM complaint_cases WHERE merged_into = $1', [id]),
     ]);
-    return { ...c, journey, resolutions, costs, outcomes, also_seen_in: dupes };
+    const byId = await visitIndex();
+    return { ...c, ...visitInfo(byId.get(Number(c.l27_booking_id)), journey?.frequency), journey, resolutions, costs, outcomes, also_seen_in: dupes };
   }
 
   async function setCategory(id, { category, hard_route }, userId) {
@@ -580,7 +722,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     const settings = await getSettings();
     const cases = await many(db, `SELECT j.*, c.id, c.source, c.opened_at, c.category, c.tone, c.severity, c.hard_route, c.first_response_at, c.exchanges, c.handled_by, c.l27_customer_id, c.l27_booking_id, c.classified_by
       FROM complaint_cases c LEFT JOIN complaint_journeys j ON j.case_id = c.id
-      WHERE c.merged_into IS NULL AND c.opened_at >= $1 AND c.opened_at < $2::date + 1`, [from, to]);
+      WHERE c.merged_into IS NULL AND c.excluded_at IS NULL AND c.opened_at >= $1 AND c.opened_at < $2::date + 1`, [from, to]);
     const ids = cases.map((c) => c.id);
     const [resolutions, costs, outcomes] = ids.length
       ? await Promise.all([
@@ -596,14 +738,161 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     } catch {
       // Reports not built yet: the playbook still renders, without per-visit rates.
     }
+    const byId = await visitIndex();
+    for (const c of cases) c.one_time = visitInfo(byId.get(Number(c.l27_booking_id)), c.frequency).client_type === 'one_time';
     return buildPlaybook({ cases, resolutions, costs, outcomes, visits, from, to, settings, today: isoDay(now()) });
   }
 
-  return { getSettings, saveSettings, kustomerDiscover, start, run, status, listCases, getCase, setCategory, playbook, sources };
+  // Clients view: who complains repeatedly, and who looks at risk of leaving right now.
+  async function clients() {
+    const since = new Date(now() - 365 * DAY).toISOString();
+    const rows = await many(db, `SELECT c.id, c.l27_customer_id, c.customer_name, c.opened_at, c.category, c.tone, c.severity, c.hard_route,
+        (SELECT coalesce(sum(amount), 0) FROM complaint_costs k WHERE k.case_id = c.id) AS cost,
+        (SELECT json_agg(json_build_object('day', o.day, 'outcome', o.outcome, 'next', o.next_booking_on)) FROM complaint_outcomes o WHERE o.case_id = c.id) AS outcomes,
+        j.cleans_total, j.cleaner_changed_last_visit, j.price_change_pct, j.frequency, j.tenure_days
+      FROM complaint_cases c LEFT JOIN complaint_journeys j ON j.case_id = c.id
+      WHERE c.merged_into IS NULL AND c.excluded_at IS NULL AND c.l27_customer_id IS NOT NULL AND c.opened_at >= $1 ORDER BY c.opened_at`, [since]);
+    return buildClients(rows, now());
+  }
+
+
+  // ---- Checking the taxonomy by hand ----
+  // A random sample per category of cases nobody has checked yet. Message bodies aren't
+  // stored, so the reviewer sees the one-line summary, the subject or title, the source's own
+  // status and what we did, plus a link to the original where there is one.
+  async function reviewQueue({ per = 20, category = null, source = null } = {}) {
+    const rows = await many(
+      db,
+      `SELECT * FROM (
+         SELECT c.id, c.source, c.source_id, c.l27_booking_id, c.opened_at, c.service_date, c.customer_name, c.category, c.tone, c.severity, c.hard_route, c.summary,
+                c.source_status, c.classified_by, c.classifier_confidence, c.areas_cited, c.raw,
+                (SELECT string_agg(DISTINCT coalesce(r.rung, r.action), ', ') FROM complaint_resolutions r WHERE r.case_id = c.id) AS rungs,
+                row_number() OVER (PARTITION BY c.category ORDER BY random()) AS pick
+           FROM complaint_cases c
+          WHERE c.merged_into IS NULL AND c.excluded_at IS NULL AND c.classified_by <> 'human'
+            AND NOT EXISTS (SELECT 1 FROM complaint_reviews v WHERE v.case_id = c.id)
+            AND ($2::text IS NULL OR c.category = $2) AND ($3::text IS NULL OR c.source = $3)
+       ) q WHERE pick <= $1 ORDER BY category, pick`,
+      [Math.max(1, Math.min(100, Number(per) || 20)), category, source],
+    );
+    const byId = await visitIndex();
+    return rows.map(({ raw, source_id, l27_booking_id, pick: _pick, ...c }) => ({
+      ...c,
+      // The client's own words where we already hold them: the Launch27 rating comment, or the
+      // longest text field on the Kustomer complaint. Emails are opened from the link instead.
+      text: (c.source === 'launch27_rating' ? byId.get(Number(l27_booking_id))?.rating?.comment : c.source === 'kustomer' ? longestText(raw?.custom) : null) || null,
+      title: raw?.subject || raw?.title || null,
+      resolution_text: raw?.resolution_text || null,
+      rating: raw?.rating ?? null,
+      original_url: gmailUrl(c.source, source_id),
+    }));
+  }
+
+  async function reviewCase(id, { verdict, category = null, note = null }, userId) {
+    const c = await one(db, 'SELECT id, category, classified_by FROM complaint_cases WHERE id = $1', [id]);
+    if (!c) throw Object.assign(new Error('Not found'), { status: 404 });
+    if (verdict === 'wrong_category' && category === c.category) verdict = 'correct';
+    // Keep what the engine said the first time; a second look only changes the verdict.
+    await db.query(
+      `INSERT INTO complaint_reviews (case_id, reviewer_id, verdict, was_category, was_classified_by, now_category, note)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT (case_id) DO UPDATE SET reviewer_id = EXCLUDED.reviewer_id, verdict = EXCLUDED.verdict, now_category = EXCLUDED.now_category, note = EXCLUDED.note, reviewed_at = now()`,
+      [id, userId, verdict, c.category, c.classified_by, verdict === 'wrong_category' ? category : null, note ? String(note).slice(0, 500) : null],
+    );
+    if (verdict === 'wrong_category') await db.query("UPDATE complaint_cases SET category = $2, classified_by = 'human', excluded_at = NULL, updated_at = now() WHERE id = $1", [id, category]);
+    else if (verdict === 'not_complaint') await db.query("UPDATE complaint_cases SET excluded_at = now(), classified_by = 'human', updated_at = now() WHERE id = $1", [id]);
+    else await db.query("UPDATE complaint_cases SET classified_by = 'human', excluded_at = NULL, updated_at = now() WHERE id = $1", [id]);
+    await db.query("INSERT INTO audit_log (actor_id, action, object_type, object_id, detail) VALUES ($1, 'complaint.reviewed', 'complaint_case', $2, $3::jsonb)", [userId, String(id), json({ verdict, category })]);
+  }
+
+  async function reviewStats() {
+    const rows = await many(db, `SELECT v.verdict, v.was_category, v.was_classified_by, v.now_category, c.source
+      FROM complaint_reviews v JOIN complaint_cases c ON c.id = v.case_id`);
+    const waiting = await many(db, `SELECT category, count(*)::int AS n FROM complaint_cases c
+      WHERE c.merged_into IS NULL AND c.excluded_at IS NULL AND c.classified_by <> 'human' AND NOT EXISTS (SELECT 1 FROM complaint_reviews v WHERE v.case_id = c.id) GROUP BY category`);
+    return buildReviewStats(rows, waiting);
+  }
+
+  return { getSettings, saveSettings, kustomerDiscover, start, run, status, markInterrupted, maybeRun, listCases, getCase, setCategory, playbook, clients, sources, reviewQueue, reviewCase, reviewStats };
 }
 
-function countBy(list, key) {
-  const m = {};
-  for (const x of list) m[x[key]] = (m[x[key]] || 0) + 1;
-  return m;
+// Measured accuracy from hand checks: of the cases the engine put in a category, how many a
+// person agreed with. Under REVIEW_MIN checks a number is shown as thin, not as a result.
+function gmailUrl(source, sourceId) {
+  const [account, thread] = String(sourceId).split(':');
+  if (source !== 'gmail' || !/^[0-9a-f]{8,}$/i.test(thread || '')) return null;
+  return `https://mail.google.com/mail/?authuser=${encodeURIComponent(account)}#all/${thread}`;
+}
+
+function longestText(custom) {
+  const texts = Object.values(custom || {}).filter((v) => typeof v === 'string' && v.trim().length > 20);
+  return texts.sort((a, b) => b.length - a.length)[0]?.slice(0, 1500) || null;
+}
+
+export const REVIEW_MIN = 20;
+export function buildReviewStats(rows, waiting = []) {
+  const tally = (list) => {
+    const n = list.length;
+    const correct = list.filter((r) => r.verdict === 'correct').length;
+    return { checked: n, correct, wrong_category: list.filter((r) => r.verdict === 'wrong_category').length, not_complaint: list.filter((r) => r.verdict === 'not_complaint').length, accuracy: n ? correct / n : null, enough: n >= REVIEW_MIN };
+  };
+  const group = (key) => {
+    const m = new Map();
+    for (const r of rows) m.set(r[key] || 'unknown', [...(m.get(r[key] || 'unknown') || []), r]);
+    return [...m].map(([k, list]) => ({ key: k, ...tally(list) })).sort((a, b) => b.checked - a.checked);
+  };
+  const left = new Map(waiting.map((w) => [w.category || 'unknown', Number(w.n)]));
+  const by_category = group('was_category').map((g) => ({ ...g, waiting: left.get(g.key) || 0 }));
+  for (const [k, n] of left) if (!by_category.some((g) => g.key === k)) by_category.push({ key: k, ...tally([]), waiting: n });
+  const moves = new Map();
+  for (const r of rows) if (r.verdict === 'wrong_category') moves.set(`${r.was_category}>${r.now_category}`, (moves.get(`${r.was_category}>${r.now_category}`) || 0) + 1);
+  return {
+    total: tally(rows),
+    by_category,
+    by_source: group('source'),
+    by_classifier: group('was_classified_by'),
+    confusions: [...moves].map(([k, n]) => ({ from: k.split('>')[0], to: k.split('>')[1], n })).sort((a, b) => b.n - a.n).slice(0, 15),
+    min_checks: REVIEW_MIN,
+    waiting: [...left.values()].reduce((a, b) => a + b, 0),
+  };
+}
+
+
+/**
+ * What should an automatic update read next? Pure.
+ *   mined: finished runs' windows [{from, to}] (YYYY-MM-DD); today: local date;
+ *   historyDays: how far back to keep history; recentDone: the day the daily update last ran.
+ * 1. The newest stretch of days (up to a month) that hasn't been read, back to the history target.
+ * 2. Otherwise, once a day: the last two weeks again, refreshing outcomes for ~4 months.
+ */
+export function planAuto({ mined, today, historyDays, recentDone }) {
+  const add = (d, n) => {
+    const x = new Date(`${d}T12:00:00Z`);
+    x.setUTCDate(x.getUTCDate() + n);
+    return x.toISOString().slice(0, 10);
+  };
+  const yesterday = add(today, -1);
+  const target = add(today, -historyDays);
+  // Walk back from yesterday through everything already read.
+  let p = yesterday;
+  for (let moved = true; moved && p >= target; ) {
+    moved = false;
+    for (const m of mined) {
+      if (m.from <= p && m.to >= p) {
+        p = add(m.from, -1);
+        moved = true;
+      }
+    }
+  }
+  if (p >= target) {
+    // Unread days end at p. Start a month earlier, but not before anything already read or the target.
+    const readBelow = mined.filter((m) => m.to < p).map((m) => m.to).sort().pop();
+    let from = add(p, -30);
+    if (readBelow && add(readBelow, 1) > from) from = add(readBelow, 1);
+    if (from < target) from = target;
+    const catchUp = p === yesterday;
+    return { kind: 'history', from, to: p, refreshFrom: null, label: catchUp ? 'Automatic update: reading the days since the last update' : 'Automatic update: reading older history' };
+  }
+  if (recentDone !== today) return { kind: 'recent', from: add(today, -14), to: yesterday, refreshFrom: add(today, -130), label: 'Automatic daily update: the last two weeks, and outcomes for the last four months' };
+  return null;
 }
