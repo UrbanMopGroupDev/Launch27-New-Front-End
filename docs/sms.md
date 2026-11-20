@@ -121,6 +121,13 @@ entirely, delete its `RINGCENTRAL_SMS_*` or `TWILIO_*` variables.
 
 ## When something is wrong
 
+- *No Twilio (or RingCentral) section on the Channels screen* → its variables were turned down
+  when the server started. The screen lists the reason under **Text messages: set-up problems**
+  (for example *TWILIO_SMS_NUMBERS is empty*, a number also listed for RingCentral, or
+  `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` missing or misnamed: the screen names the `TWILIO_*`
+  variables it found, never their values). Fix the variable on the production service and
+  redeploy. `NOTIFICATIONS_MODE` doesn't decide whether a provider appears, only whether replies
+  are really sent.
 - *Needs attention: the RingCentral app is missing permissions* → add them to the app in the
   developer console (they take effect at the next sign-in, within 30 minutes or on **Check connection**).
 - *Can send: No* for a number → it lacks the SMS feature on that extension, or it isn't that

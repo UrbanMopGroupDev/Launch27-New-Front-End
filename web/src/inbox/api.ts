@@ -422,7 +422,7 @@ export interface KustomerPlanConversation { kustomer_conversation_id: string; l2
 
 export interface ChannelStatus {
   email: { state: ChannelState; provider: string | null; send_from?: string[]; accounts: ChannelAccount[]; read_only: boolean };
-  sms: { state: ChannelState; provider: string | null; providers: SmsProviderStatus[] };
+  sms: { state: ChannelState; provider: string | null; providers: SmsProviderStatus[]; problems?: { provider: 'ringcentral' | 'twilio' | null; problem: string }[] };
 }
 
 export interface Meta {

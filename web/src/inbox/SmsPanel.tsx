@@ -9,9 +9,29 @@ const LABEL = { ringcentral: 'RingCentral', twilio: 'Twilio' } as const;
 const when = (iso: string | null | undefined) => (iso ? ago(iso) : 'never');
 const day = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleString('en-CA', { timeZone: 'America/Toronto', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—');
 
+// Why a provider's Railway variables were turned down when the server started (names, never values).
+function SetupProblems({ sms }: { sms: ChannelStatus['sms'] }) {
+  const connected = new Set((sms.providers || []).map((p) => p.provider));
+  const rows = (sms.problems || []).filter((x) => !x.provider || !connected.has(x.provider));
+  if (!rows.length) return null;
+  return (
+    <section className="channel-block">
+      <h3>Text messages: set-up problems</h3>
+      <p className="small">These SMS providers were not connected when the server last started. Fix the Railway variables and redeploy.</p>
+      <ul className="small">
+        {rows.map((x) => (
+          <li key={x.problem}><b>{x.provider ? LABEL[x.provider] : 'SMS'}:</b> <span className="error">{x.problem}</span></li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export function SmsPanel({ sms, isAdmin }: { sms: ChannelStatus['sms']; isAdmin: boolean }) {
   if (!sms.providers?.length) {
     return (
+      <>
+      <SetupProblems sms={sms} />
       <section className="channel-block">
         <h3>Text messages</h3>
         <p className="small">
@@ -22,10 +42,12 @@ export function SmsPanel({ sms, isAdmin }: { sms: ChannelStatus['sms']; isAdmin:
           )}
         </p>
       </section>
+      </>
     );
   }
   return (
     <>
+      <SetupProblems sms={sms} />
       {sms.providers.length > 1 && <p className="muted small">Each business number belongs to one provider; replies go out through the provider that owns the conversation's number.</p>}
       {sms.providers.map((p) => (
         <ProviderPanel key={p.provider} p={p} sandbox={sms.state === 'sandbox'} isAdmin={isAdmin} />

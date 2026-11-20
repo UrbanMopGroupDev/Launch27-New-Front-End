@@ -171,7 +171,8 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     return {
       // state: how mail is read (live Gmail, sandbox, or not connected). read_only: sending is off.
       email: !email ? { state: 'not_connected', provider: null, accounts: [], read_only: !EMAIL_SENDING_ENABLED } : { state: email.sandbox ? 'sandbox' : 'live', provider: email.name, send_from: email.identities || OUR_IDENTITIES.email, accounts, read_only: !EMAIL_SENDING_ENABLED },
-      sms: !connectors.sms ? { state: 'not_connected', provider: null, providers: [] } : { state: connectors.sms.sandbox ? 'sandbox' : 'live', provider: connectors.sms.name, providers: await Promise.all(Object.values(smsProviders).map(smsDetail)) },
+      // problems: why a provider's settings were turned down at start-up (variable names, never values).
+      sms: { ...(!connectors.sms ? { state: 'not_connected', provider: null, providers: [] } : { state: connectors.sms.sandbox ? 'sandbox' : 'live', provider: connectors.sms.name, providers: await Promise.all(Object.values(smsProviders).map(smsDetail)) }), problems: config.smsProblems || [] },
     };
   }
 

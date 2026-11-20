@@ -124,6 +124,12 @@ export function loadConfig(env = process.env) {
   // from the calling widget above. Production must use the production platform; development
   // and QA may only use the RingCentral sandbox, and their sends are always sandboxed anyway
   // (NOTIFICATIONS_MODE is forced to sandbox outside production).
+  // SMS set-up problems are also shown on Support settings → Channels, not only in the logs.
+  const smsProblems = [];
+  const smsWarn = (provider, text) => {
+    warnings.push(text);
+    smsProblems.push({ provider, problem: text });
+  };
   let ringcentralSms = null;
   const smsSet = !!(env.RINGCENTRAL_SMS_CLIENT_ID || env.RINGCENTRAL_SMS_JWT);
   if (smsSet) {
@@ -132,14 +138,14 @@ export function loadConfig(env = process.env) {
     const numbers = String(env.RINGCENTRAL_SMS_NUMBERS || '').split(/[,\s]+/).filter(Boolean);
     const webhookUrl = env.RINGCENTRAL_SMS_WEBHOOK_URL || null;
     const webhookToken = env.RINGCENTRAL_SMS_WEBHOOK_TOKEN || null;
-    if (!(env.RINGCENTRAL_SMS_CLIENT_ID && env.RINGCENTRAL_SMS_CLIENT_SECRET && env.RINGCENTRAL_SMS_JWT)) warnings.push('RingCentral SMS needs RINGCENTRAL_SMS_CLIENT_ID, RINGCENTRAL_SMS_CLIENT_SECRET and RINGCENTRAL_SMS_JWT; SMS is not connected.');
-    else if (!isProd && !sandboxServer) warnings.push(`RingCentral SMS disabled in ${appEnv}: only the RingCentral sandbox (platform.devtest.ringcentral.com) is allowed outside production.`);
-    else if (isProd && sandboxServer) warnings.push('RingCentral SMS disabled: production must use the production platform (platform.ringcentral.com), not the sandbox.');
-    else if (webhookUrl && !/^https:\/\//.test(webhookUrl)) warnings.push('RINGCENTRAL_SMS_WEBHOOK_URL must be an https:// address; SMS is not connected.');
-    else if (webhookUrl && (!webhookToken || webhookToken.length < 16 || webhookToken.length > 64)) warnings.push('RINGCENTRAL_SMS_WEBHOOK_TOKEN must be 16-64 random characters when a webhook address is set; SMS is not connected.');
+    if (!(env.RINGCENTRAL_SMS_CLIENT_ID && env.RINGCENTRAL_SMS_CLIENT_SECRET && env.RINGCENTRAL_SMS_JWT)) smsWarn('ringcentral', 'RingCentral SMS needs RINGCENTRAL_SMS_CLIENT_ID, RINGCENTRAL_SMS_CLIENT_SECRET and RINGCENTRAL_SMS_JWT; SMS is not connected.');
+    else if (!isProd && !sandboxServer) smsWarn('ringcentral', `RingCentral SMS disabled in ${appEnv}: only the RingCentral sandbox (platform.devtest.ringcentral.com) is allowed outside production.`);
+    else if (isProd && sandboxServer) smsWarn('ringcentral', 'RingCentral SMS disabled: production must use the production platform (platform.ringcentral.com), not the sandbox.');
+    else if (webhookUrl && !/^https:\/\//.test(webhookUrl)) smsWarn('ringcentral', 'RINGCENTRAL_SMS_WEBHOOK_URL must be an https:// address; SMS is not connected.');
+    else if (webhookUrl && (!webhookToken || webhookToken.length < 16 || webhookToken.length > 64)) smsWarn('ringcentral', 'RINGCENTRAL_SMS_WEBHOOK_TOKEN must be 16-64 random characters when a webhook address is set; SMS is not connected.');
     else {
       ringcentralSms = { server, clientId: env.RINGCENTRAL_SMS_CLIENT_ID, clientSecret: env.RINGCENTRAL_SMS_CLIENT_SECRET, jwt: env.RINGCENTRAL_SMS_JWT, numbers, webhookUrl, webhookToken: webhookUrl ? webhookToken : null };
-      if (!webhookUrl) warnings.push('RingCentral SMS has no RINGCENTRAL_SMS_WEBHOOK_URL: incoming texts arrive through the Message Store check (every 5 minutes) instead of instantly.');
+      if (!webhookUrl) smsWarn('ringcentral', 'RingCentral SMS has no RINGCENTRAL_SMS_WEBHOOK_URL: incoming texts arrive through the Message Store check (every 5 minutes) instead of instantly.');
     }
   }
 
@@ -153,16 +159,22 @@ export function loadConfig(env = process.env) {
     const overlap = numbers.filter((n) => rcNumbers.has(n.replace(/[^\d+]/g, '')));
     const base = env.TWILIO_WEBHOOK_BASE_URL ? env.TWILIO_WEBHOOK_BASE_URL.replace(/\/+$/, '') : null;
     if (!isProd) warnings.push(`Twilio SMS settings ignored in ${appEnv}: only production reads and sends real texts. SMS runs in sandbox mode here.`);
-    else if (!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN)) warnings.push('Twilio SMS needs TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN; Twilio is not connected.');
-    else if (!numbers.length) warnings.push('TWILIO_SMS_NUMBERS is empty: list the Twilio numbers to text from; Twilio is not connected.');
-    else if (overlap.length) warnings.push(`A number can belong to only one SMS provider: ${overlap.join(', ')} is set for both RingCentral and Twilio. Twilio is not connected.`);
-    else if (base && !/^https:\/\//.test(base)) warnings.push('TWILIO_WEBHOOK_BASE_URL must be an https:// address; Twilio is not connected.');
+    else if (!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN)) smsWarn('twilio', 'Twilio SMS needs TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN; Twilio is not connected.');
+    else if (!numbers.length) smsWarn('twilio', 'TWILIO_SMS_NUMBERS is empty: list the Twilio numbers to text from; Twilio is not connected.');
+    else if (overlap.length) smsWarn('twilio', `A number can belong to only one SMS provider: ${overlap.join(', ')} is set for both RingCentral and Twilio. Twilio is not connected.`);
+    else if (base && !/^https:\/\//.test(base)) smsWarn('twilio', 'TWILIO_WEBHOOK_BASE_URL must be an https:// address; Twilio is not connected.');
     else {
       twilioSms = { accountSid: env.TWILIO_ACCOUNT_SID, authToken: env.TWILIO_AUTH_TOKEN, apiKeySid: env.TWILIO_API_KEY_SID || null, apiKeySecret: env.TWILIO_API_KEY_SECRET || null, numbers, webhookBaseUrl: base };
-      if (!base) warnings.push('Twilio SMS has no TWILIO_WEBHOOK_BASE_URL: incoming texts arrive through the 5-minute check, and delivery status by polling.');
+      if (!base) smsWarn('twilio', 'Twilio SMS has no TWILIO_WEBHOOK_BASE_URL: incoming texts arrive through the 5-minute check, and delivery status by polling.');
     }
   }
-  if (isProd && !ringcentralSms && !twilioSms) warnings.push('SMS is not connected: set the RINGCENTRAL_SMS_* or TWILIO_* variables (docs/sms.md). Text replies are saved, not sent.');
+  if (isProd && !(env.TWILIO_ACCOUNT_SID || env.TWILIO_AUTH_TOKEN)) {
+    // Twilio is switched on by TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN. Name (never show the value
+    // of) any other TWILIO_* variable that is set, so a misnamed variable is easy to spot.
+    const other = Object.keys(env).filter((k) => /^TWILIO/i.test(k) && env[k]).sort();
+    if (other.length) smsWarn('twilio', `Twilio is not connected: TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN are not set on this service (found ${other.join(', ')}).`);
+  }
+  if (isProd && !ringcentralSms && !twilioSms) smsWarn(null, 'SMS is not connected: set the RINGCENTRAL_SMS_* or TWILIO_* variables (docs/sms.md). Text replies are saved, not sent.');
 
   const placement = parsePlacementTokens(env.PLACEMENT_TOKENS);
   const placementIps = parseIpList(env.PLACEMENT_ALLOWED_IPS);
@@ -224,6 +236,7 @@ export function loadConfig(env = process.env) {
     sessionSecret: env.SESSION_SECRET || 'dev-only-secret',
     allowWrites,
     notificationsMode,
+    smsProblems,
     gmail,
     // Support workspace
     databaseUrl: env.DATABASE_URL || null,

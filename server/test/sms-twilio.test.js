@@ -145,6 +145,7 @@ describe('Twilio SMS', () => {
     assert.equal(t.webhook_url, `${BASE}/webhooks/twilio/sms`);
     assert.deepEqual(t.numbers.map((n) => [n.number, n.can_send, n.queue]), [[HIRING, true, 'Hiring'], [T2, true, 'Fallback'], [T3, false, 'Fallback']]);
     assert.ok(!JSON.stringify(ch).includes(AUTH) && !JSON.stringify(ch).includes(SID));
+    assert.deepEqual(ch.problems, []); // nothing was turned down at start-up
     const meta = (await api('/api/meta')).body;
     assert.deepEqual(meta.identities.sms, [OTTAWA, HIRING, T2, T3]);
   });
@@ -316,6 +317,15 @@ describe('Twilio outside production', () => {
     assert.ok(both.ringcentralSms);
     assert.equal(both.twilioSms, null);
     assert.ok(both.warnings.some((w) => /only one SMS provider/.test(w)));
+    assert.ok(both.smsProblems.some((x) => x.provider === 'twilio' && /only one SMS provider/.test(x.problem)));
+    // Why Twilio is missing is kept for the Channels page: no numbers, or misnamed variables.
+    assert.ok(loadConfig({ ...creds, APP_ENV: 'production', TWILIO_SMS_NUMBERS: '' }).smsProblems.some((x) => x.provider === 'twilio' && /TWILIO_SMS_NUMBERS is empty/.test(x.problem)));
+    const misnamed = loadConfig({ APP_ENV: 'production', TWILIO_SID: 'x', TWILIO_TOKEN: 'secret-value', TWILIO_SMS_NUMBERS: HIRING });
+    const p = misnamed.smsProblems.find((x) => x.provider === 'twilio');
+    assert.match(p.problem, /TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN are not set.*TWILIO_SID, TWILIO_SMS_NUMBERS, TWILIO_TOKEN/);
+    assert.ok(!p.problem.includes('secret-value')); // names only, never values
+    assert.deepEqual(loadConfig({ APP_ENV: 'production' }).smsProblems.filter((x) => x.provider === 'twilio'), []); // Twilio not used: nothing to report
+    assert.deepEqual(qa.smsProblems, []); // dev and QA: ignoring Twilio is expected, not a problem
   });
 
   test('sandboxed (dev, QA, or NOTIFICATIONS_MODE=sandbox): Twilio is never called', async () => {
