@@ -140,6 +140,9 @@ function walk(part, out) {
   const type = (part.mimeType || '').toLowerCase();
   if (part.filename && (part.body?.attachmentId || part.body?.size)) {
     out.attachments.push({ filename: part.filename, type, size: part.body?.size || 0 });
+    // Where the bytes are, for fetching the file later. Not stored: Gmail's attachment ids
+    // change from one read of a message to the next.
+    out.files?.push({ filename: part.filename, type, size: part.body?.size || 0, attachmentId: part.body?.attachmentId || null, data: part.body?.data || null });
   } else if (type === 'text/plain' && out.text == null) {
     out.text = decodePart(part);
   } else if (type === 'text/html' && out.html == null) {
@@ -150,6 +153,9 @@ function walk(part, out) {
 }
 
 const ids = (value) => (String(value || '').match(/<[^>]+>/g) || []).map((s) => s.trim());
+
+/** The files on a Gmail API message (format=full), in the same order as parseGmailMessage's attachments. */
+export const attachmentParts = (msg) => walk(msg.payload, { text: null, html: null, attachments: [], files: [] }).files;
 
 /** A Gmail API message (format=full) as the fields the inbox stores. */
 export function parseGmailMessage(msg) {

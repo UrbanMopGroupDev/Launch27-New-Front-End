@@ -42,13 +42,15 @@ function useCustomerData(cid: number, contactId: number) {
 
 type Address = { id: number; address: string; city: string; state?: string; zip: string; preferred: boolean };
 
+// Letters only: a contact known just by "(613) 866-1998" or an address shows "#", not "(8".
 const initials = (name?: string | null) =>
-  (name || '?')
-    .split(/\s+/)
+  (name || '')
+    .split(/[\s@._-]+/)
+    .map((w) => w.match(/\p{L}/u)?.[0])
     .filter(Boolean)
     .slice(0, 2)
-    .map((w) => w[0]?.toUpperCase())
-    .join('');
+    .map((c) => c!.toUpperCase())
+    .join('') || '#';
 const AVATAR = ['#FDE68A:#78350F', '#FECACA:#7F1D1D', '#DDD6FE:#4C1D95', '#BBF7D0:#14532D', '#FBCFE8:#831843', '#BAE6FD:#0C4A6E', '#FED7AA:#7C2D12'];
 export function Avatar({ name, size = 36 }: { name?: string | null; size?: number }) {
   const [bg, fg] = AVATAR[[...(name || '')].reduce((s, c) => s + c.charCodeAt(0), 0) % AVATAR.length].split(':');
