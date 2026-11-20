@@ -153,6 +153,8 @@ export interface CleanerRow2 {
   reliability2: number | null;
   reliability_score: { score: number | null; issues: number; no_shows: number | null; late_cancels: number | null; short_notice: number | null; missing_checks: number; drops_known: boolean };
   reclean_rate: number | null;
+  recurring_clients: number | null;
+  churn_rate: number | null;
   loyal_left: number;
   review_bonus: number;
   drill: { churn: ChurnClient[]; ratings: RatingRow[]; recleans: RecleanEvent[]; late_cancels: DropRow[]; no_shows: DropRow[]; reviews: SheetReview[] };
@@ -165,7 +167,7 @@ export interface CleanersReport2 {
   period: Period;
   admin: boolean;
   change_log_start: string;
-  team: { cleaners: number; median_visits: number | null; max_visits: number; on_time: number | null; check_ins: number; happy: number | null; rated_share: number | null; revenue: number; earned?: number; flagged: number; runs_long_median: number | null; engagement: number | null; feedback_hours: number | null; margin?: { dollars: number; share: number } | null; churned: number | null; at_risk: number | null };
+  team: { cleaners: number; median_visits: number | null; max_visits: number; on_time: number | null; check_ins: number; happy: number | null; rated_share: number | null; revenue: number; earned?: number; flagged: number; runs_long_median: number | null; engagement: number | null; feedback_hours: number | null; margin?: { dollars: number; share: number } | null; churned: number | null; at_risk: number | null; recurring_clients: number | null; churn_rate: number | null };
   churn_known: boolean;
   churn_days: number;
   adjustments: AdjustmentsInfo;
