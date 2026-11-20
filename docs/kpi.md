@@ -74,9 +74,11 @@ Production:
   date. Freshness is the playbook's last finished run; a month outside the periods it has read
   shows "No data" rather than zero complaints.
 - **Syft report (OCR)**: once a day the mailbox in `KPI_SYFT_MAILBOX` is searched, read-only, for
-  "Management Report as at …" emails. Each "UM Canada Management Report <Month>.pdf" is read once
+  the bookkeeper's management-report emails. Each UrbanMop report PDF (file names have varied; the
+  company on the cover is checked and the month is taken from the report itself) is read once
   and the Operational Cost Ratio and Total Income printed on its Financial Health Scorecard page
-  are stored; a revised report in the same thread replaces the earlier figure. The figure is for
+  are stored; the most recently received report that gives a month's figure wins (a revision, or the next
+  month's report restating it in its previous-month column). The figure is for
   the whole company (Residential and Commercial), and it is Syft's own calculation, not the
   account-by-account definition above, until QuickBooks is connected.
 - A failed refresh keeps the previous snapshot; the affected tiles turn "Stale" after 48 hours.
