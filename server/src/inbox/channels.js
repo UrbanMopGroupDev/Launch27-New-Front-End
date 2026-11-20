@@ -1,6 +1,6 @@
 // Channel connectors. Each channel that can send has one:
 //
-//   connectors.email = { name: 'gmail',  identities: [...], send: async ({ from, to, subject, body, thread }) => ({ id, thread_key, message_id }) }
+//   connectors.email = { name: 'gmail',  identities: [...], send: async ({ from, to, subject, body, thread, attachments }) => ({ id, thread_key, message_id, mailbox }) }
 //   connectors.sms   = { name: 'twilio', send: async ({ from, to, body }) => ({ id }) }
 //
 // Email is Gmail (server/src/inbox/email/), connected in production when GMAIL_* is set; its
@@ -9,12 +9,12 @@
 // connected yet: replies are saved and shown as "not sent", and inbound texts come from the
 // simulator (POST /api/simulate/inbound).
 
-// EMAIL IS READ-ONLY. Email can be read (the Gmail sync brings customers' mail into the inbox)
-// but nothing can be sent to anyone from this platform, in any environment. This is a code
-// constant on purpose: turning sending on needs an approved code change, not a setting.
-// Also enforced in service.js (replies refused), api.js (no new email conversations) and
-// gmail.js (only Gmail's read-only permission is requested, so Google would refuse a send).
-export const EMAIL_SENDING_ENABLED = false;
+// Email can be read and sent (replies, new email conversations, attached files). Production
+// sends through Gmail; development and QA record every email as a sandbox message and send
+// nothing (guardConnectors). This is a code constant on purpose: making email read-only again
+// is an approved code change, not a setting. When false, replies and new email conversations
+// are refused (service.js, api.js) and the connector the app gets cannot send.
+export const EMAIL_SENDING_ENABLED = true;
 export const EMAIL_READ_ONLY_MESSAGE = "Email is read-only: emails can't be sent from this platform. Reply by text, or add an internal note.";
 
 // Outside production, connectors are wrapped so nothing reaches a real customer: the
@@ -36,7 +36,7 @@ export async function sendOutbound(message, connectors = {}) {
     // A provider may report its own status (e.g. Twilio: queued, sent, delivered).
     // A router (several SMS providers) says which one sent it.
     const provider = res?.provider || connector.name;
-    return { state: res?.state || 'sent', provider, external_id: res?.id ? `${provider}:${res.id}` : null, thread_key: res?.thread_key || null, message_id: res?.message_id || null };
+    return { state: res?.state || 'sent', provider, provider_id: res?.id || null, external_id: res?.id ? `${provider}:${res.id}` : null, thread_key: res?.thread_key || null, message_id: res?.message_id || null, mailbox: res?.mailbox || null };
   } catch (err) {
     return { state: 'failed', provider: connector.name, note: err.message };
   }

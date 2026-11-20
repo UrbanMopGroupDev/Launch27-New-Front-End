@@ -1,7 +1,7 @@
 // The conversation view and work list brought over from the BookingKoala front end: list sort
 // and time range, agent-started conversations that only count once something is written, the
 // whole-person timeline, Select → mark done, suggested people, and email files downloaded
-// from Gmail (read-only: nothing is ever sent).
+// from Gmail.
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { openDb } from '../src/db/index.js';
@@ -159,7 +159,7 @@ describe('conversation view: work list, drafts, whole history, bulk done', () =>
   });
 });
 
-describe('email files: downloaded from Gmail on request, never sent', () => {
+describe('email files: downloaded from Gmail on request', () => {
   let db;
   let server;
   let base;
@@ -208,12 +208,10 @@ describe('email files: downloaded from Gmail on request, never sent', () => {
     assert.match((await api(`/api/messages/${message.id}/attachments/1`)).body.error, /test message/);
   });
 
-  test('read-only email keeps file downloads in production, and never sends', async () => {
+  test('production keeps file downloads; dev and QA read no real mailbox', async () => {
     const live = { email: { name: 'gmail', identities: [UM.info], send: async () => ({ id: 'x' }), attachment: async () => ({}) } };
-    const guarded = guardConnectors(live, 'live');
-    assert.equal(typeof guarded.email.attachment, 'function');
-    await assert.rejects(guarded.email.send({}), /read-only/i);
-    assert.equal(guardConnectors(live, 'sandbox').email.attachment, undefined); // dev and QA read no real mailbox
+    assert.equal(typeof guardConnectors(live, 'live').email.attachment, 'function');
+    assert.equal(guardConnectors(live, 'sandbox').email.attachment, undefined);
   });
 
   test('the files on a Gmail message are found in the order the inbox lists them', () => {

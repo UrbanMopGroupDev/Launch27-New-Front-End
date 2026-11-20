@@ -38,7 +38,11 @@ export const newMessageId = (from) => `<${randomUUID()}@${(normalizeEmail(from) 
  * An RFC 5322 plain-text message, ready for Gmail's `raw` field (base64url).
  * thread: { inReplyTo, references[] } keeps it in the customer's existing email thread.
  */
-export function buildMessage({ from, fromName, to, subject, body, messageId = newMessageId(from), inReplyTo = null, references = [], date = new Date() }) {
+// html: an HTML version of the same message (e.g. a signature with bold and links); the
+// email is then multipart/alternative, the plain text first for mail apps without HTML.
+// attachments: [{ filename, type, data: Buffer }]; the message is then multipart/mixed with
+// the text first and each file after it.
+export function buildMessage({ from, fromName, to, subject, body, html = null, attachments = [], messageId = newMessageId(from), inReplyTo = null, references = [], date = new Date() }) {
   const refs = [...new Set([...(references || []), inReplyTo].filter(Boolean).map(clean))].slice(-20);
   const lines = [
     `From: ${formatAddress(from, fromName)}`,
@@ -49,13 +53,36 @@ export function buildMessage({ from, fromName, to, subject, body, messageId = ne
     inReplyTo && `In-Reply-To: ${clean(inReplyTo)}`,
     refs.length && `References: ${refs.join(' ')}`,
     'MIME-Version: 1.0',
-    'Content-Type: text/plain; charset=UTF-8',
-    'Content-Transfer-Encoding: base64',
   ].filter(Boolean);
-  const encoded = Buffer.from(String(body ?? '').replace(/\r?\n/g, '\r\n'), 'utf8').toString('base64').replace(/.{76}/g, '$&\r\n');
-  const raw = `${lines.join('\r\n')}\r\n\r\n${encoded}\r\n`;
+  const b64 = (s) => Buffer.from(String(s ?? '').replace(/\r?\n/g, '\r\n'), 'utf8').toString('base64').replace(/.{76}/g, '$&\r\n');
+  // The text itself: plain, or plain + HTML as alternatives.
+  let textHeaders;
+  let textBody;
+  if (!html) {
+    textHeaders = ['Content-Type: text/plain; charset=UTF-8', 'Content-Transfer-Encoding: base64'];
+    textBody = `${b64(body)}\r\n`;
+  } else {
+    const boundary = `alt-${randomUUID()}`;
+    const part = (type, content) => `--${boundary}\r\nContent-Type: ${type}; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n${b64(content)}\r\n`;
+    textHeaders = [`Content-Type: multipart/alternative; boundary="${boundary}"`];
+    textBody = `${part('text/plain', body)}${part('text/html', html)}--${boundary}--\r\n`;
+  }
+  const files = (attachments || []).filter((f) => f?.data?.length);
+  if (!files.length) return { raw: `${[...lines, ...textHeaders].join('\r\n')}\r\n\r\n${textBody}`, messageId: clean(messageId) };
+  const mixed = `mix-${randomUUID()}`;
+  const fileParts = files.map((f) => {
+    const name = attachmentName(f.filename);
+    // The name twice: plain for old mail apps, RFC 2231 (UTF-8) for accents and the like.
+    const named = `filename="${name.replace(/[^\x20-\x7E]/g, '_').replace(/["\\]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+    return `--${mixed}\r\nContent-Type: ${attachmentType(f.type)}\r\nContent-Transfer-Encoding: base64\r\nContent-Disposition: attachment; ${named}\r\n\r\n${Buffer.from(f.data).toString('base64').replace(/.{76}/g, '$&\r\n')}\r\n`;
+  });
+  const raw = `${[...lines, `Content-Type: multipart/mixed; boundary="${mixed}"`].join('\r\n')}\r\n\r\n--${mixed}\r\n${textHeaders.join('\r\n')}\r\n\r\n${textBody}${fileParts.join('')}--${mixed}--\r\n`;
   return { raw, messageId: clean(messageId) };
 }
+
+// A file name safe to put in a header and to save under: no path, no control characters.
+export const attachmentName = (name) => ([...clean(name).replace(/[\\/]/g, '_')].filter((ch) => ch.charCodeAt(0) >= 32 && ch.charCodeAt(0) !== 127).join('').slice(0, 150) || 'attachment');
+const attachmentType = (type) => (/^[\w.+-]+\/[\w.+-]+$/.test(String(type || '')) ? String(type).toLowerCase() : 'application/octet-stream');
 
 export const toBase64Url = (s) => Buffer.from(s, 'utf8').toString('base64url');
 

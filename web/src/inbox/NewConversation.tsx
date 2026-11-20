@@ -1,7 +1,7 @@
 // "New conversation": find the person (or add them), pick Text or Email, start writing.
 // One box to type in. People already in the inbox come first, then customers and cleaners
-// from Launch27; a phone number or email nobody knows offers a new contact. Email is
-// read-only on this platform, so only Text can start a conversation while it is.
+// from Launch27; a phone number or email nobody knows offers a new contact. If email is ever
+// made read-only again (channels.js), only Text can start a conversation.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
@@ -58,7 +58,7 @@ function useDebounced<T>(value: T, ms: number) {
 export function NewConversation({ onClose }: { onClose: () => void }) {
   const navigate = useNavigate();
   const meta = useMeta();
-  // Email can't be sent from this platform while it is read-only (Support settings → Channels).
+  // Email can't be started while it is read-only (Support settings → Channels says so).
   const emailLocked = meta.data?.channels?.email?.read_only !== false;
   const [q, setQ] = useState('');
   const term = useDebounced(q.trim(), 200);

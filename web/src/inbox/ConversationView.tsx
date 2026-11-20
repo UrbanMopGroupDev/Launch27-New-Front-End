@@ -292,12 +292,12 @@ export const fileKind = (name: string) => {
   return hit ? { label: hit[1], cls: hit[2] } : { label: (name.split('.').pop() || 'FILE').slice(0, 4).toUpperCase(), cls: 'other' };
 };
 
-// A file shown as a small card: what kind it is, its name and size.
-function FileCard({ name, size, note, action }: { name: string; size: number; note?: string | null; action?: React.ReactNode }) {
+// A file shown as a small card: what kind it is (or a thumbnail), its name and size.
+function FileCard({ name, size, thumb, note, action }: { name: string; size: number; thumb?: string | null; note?: string | null; action?: React.ReactNode }) {
   const kind = fileKind(name);
   return (
     <span className="file-card" title={name}>
-      <span className={`file-badge ${kind.cls}`} aria-hidden="true">{kind.label}</span>
+      {thumb ? <img className="file-thumb" src={thumb} alt="" /> : <span className={`file-badge ${kind.cls}`} aria-hidden="true">{kind.label}</span>}
       <span className="file-text">
         <span className="file-name">{name}</span>
         <span className="file-size">{note || fileSize(size)}</span>
@@ -342,6 +342,18 @@ function FileChip({ messageId, index, file, canGet }: { messageId: number; index
   );
 }
 
+// A file picked for an email that has not been sent yet. Pictures show as a thumbnail.
+function PickedFile({ file, onRemove }: { file: File; onRemove: () => void }) {
+  const [thumb, setThumb] = useState<string | null>(null);
+  useEffect(() => {
+    if (!file.type.startsWith('image/') || file.size > 12 * 1024 * 1024) return undefined;
+    const url = URL.createObjectURL(file);
+    setThumb(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+  return <FileCard name={file.name} size={file.size} thumb={thumb} action={<button type="button" className="file-remove" aria-label={`Remove ${file.name}`} title="Remove" onClick={onRemove}><Icon name="close" size={14} /></button>} />;
+}
+
 function EmailExtras({ m }: { m: Message }) {
   const [open, setOpen] = useState(false);
   const cc = Array.isArray(m.meta?.cc) ? (m.meta.cc as string[]) : [];
@@ -367,6 +379,17 @@ function EmailExtras({ m }: { m: Message }) {
   );
 }
 
+const MAX_FILES = 10;
+const MAX_FILES_BYTES = 18 * 1024 * 1024;
+// A picked file as the server takes it: its name, kind and bytes (base64).
+const toAttachment = (f: File) =>
+  new Promise<{ filename: string; type: string; data: string }>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`Could not read ${f.name}`));
+    reader.onload = () => resolve({ filename: f.name, type: f.type || 'application/octet-stream', data: String(reader.result).split(',')[1] || '' });
+    reader.readAsDataURL(f);
+  });
+
 const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: boolean; onSent: () => void }>(function Composer({ detail, onSent }, ref) {
   const c = detail.conversation;
   const meta = useMeta();
@@ -384,6 +407,34 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const sendKey = useRef<string | null>(null);
+  // Files to go with an email. Kept in the page until sent; about 18 MB fits in one email.
+  const [files, setFiles] = useState<File[]>([]);
+  const picker = useRef<HTMLInputElement>(null);
+  // Dragging a file over the reply box shows where to drop it.
+  const [dragging, setDragging] = useState(false);
+  const dragDepth = useRef(0);
+  // Said once when files moved the reply from Text to Email.
+  const [switched, setSwitched] = useState(false);
+  const filesBytes = files.reduce((n, f) => n + f.size, 0);
+  const tooBig = filesBytes > MAX_FILES_BYTES;
+  const [fileNote, setFileNote] = useState<string | null>(null);
+  const addFiles = (list: FileList | File[] | null) => {
+    const add = [...(list || [])].filter((f) => f.size > 0);
+    if (!add.length) return;
+    sendKey.current = null; // different files: a new message
+    if (mode !== 'reply') setMode('reply');
+    if (channel !== 'email') { setChannel('email'); setTo(''); setFrom(''); setSwitched(true); }
+    setFiles((cur) => {
+      const next = [...cur, ...add.filter((f) => !cur.some((x) => x.name === f.name && x.size === f.size))];
+      setFileNote(next.length > MAX_FILES ? `One email takes up to ${MAX_FILES} files; the first ${MAX_FILES} were kept.` : null);
+      return next.slice(0, MAX_FILES);
+    });
+  };
+  const removeFile = (i: number) => {
+    sendKey.current = null;
+    setFiles((cur) => cur.filter((_, j) => j !== i));
+  };
+  const hasFiles = (e: React.DragEvent) => [...(e.dataTransfer?.types || [])].includes('Files');
   const area = useRef<HTMLTextAreaElement>(null);
 
   // A conversation just started from "New conversation": the cursor is already in the reply box.
@@ -421,8 +472,10 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
   const sender = from || (channel === c.channel ? c.our_identity : fromOptions?.[0]) || '';
   const connected = meta.data?.connected_channels.includes(channel);
   const sandboxed = meta.data?.channels?.[channel === 'email' ? 'email' : 'sms']?.state === 'sandbox';
-  // Email is read-only on this platform: nothing can be sent. Locked until the server says otherwise.
+  // If email is made read-only (channels.js), nothing can be sent by email: locked until the server says it can.
   const emailLocked = mode === 'reply' && channel === 'email' && meta.data?.channels?.email?.read_only !== false;
+  // Files go by email, so they can't be added while email can't be sent.
+  const attachLocked = meta.data?.channels?.email?.read_only !== false;
   // A new email (or a conversation started without one) needs a subject line.
   const needsSubject = channel === 'email' && (channel !== c.channel || !c.subject);
 
@@ -448,10 +501,14 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
         // One key per message: if this request is repeated (double click, retry after a network
         // error), the server returns the first one instead of texting the customer twice.
         sendKey.current ||= crypto.randomUUID();
-        await inbox.reply(c.id, { body: text, channel, to: target, from: sender, subject: channel === 'email' && subject ? subject : undefined, idempotency_key: sendKey.current });
+        const attachments = channel === 'email' && files.length ? await Promise.all(files.map(toAttachment)) : undefined;
+        await inbox.reply(c.id, { body: text, channel, to: target, from: sender, subject: channel === 'email' && subject ? subject : undefined, idempotency_key: sendKey.current, attachments });
         sendKey.current = null;
       }
       setText('');
+      setFiles([]);
+      setFileNote(null);
+      setSwitched(false);
       drafts.set(key, '');
       onSent();
     } catch (err) {
@@ -465,7 +522,13 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
   const segments = channel === 'sms' ? Math.max(1, Math.ceil(text.length / (/[^\x00-\x7F]/.test(text) ? 67 : 153))) : 0;
 
   return (
-    <div className={mode === 'note' ? 'composer note-mode' : 'composer'}>
+    <div
+      className={`composer${mode === 'note' ? ' note-mode' : ''}${dragging ? ' dragging' : ''}`}
+      onDragEnter={(e) => { if (!hasFiles(e) || attachLocked) return; e.preventDefault(); dragDepth.current += 1; setDragging(true); }}
+      onDragOver={(e) => { if (hasFiles(e) && !attachLocked) e.preventDefault(); }}
+      onDragLeave={(e) => { if (!hasFiles(e)) return; dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDragging(false); }}
+      onDrop={(e) => { if (!hasFiles(e) || attachLocked) return; e.preventDefault(); dragDepth.current = 0; setDragging(false); addFiles(e.dataTransfer.files); }}
+    >
       <div className="composer-tabs">
         {(['sms', 'email'] as const).map((ch) => (
           <button key={ch} type="button" role="tab" aria-selected={mode === 'reply' && channel === ch} className={mode === 'reply' && channel === ch ? 'tab active' : 'tab'} onClick={() => { setMode('reply'); if (channel !== ch) { setChannel(ch); setTo(''); setFrom(''); } }}>
@@ -505,6 +568,11 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
             sendKey.current = null; // edited: a new message
             setText(e.target.value);
           }}
+          onPaste={(e) => {
+            // A pasted screenshot or copied file becomes an attachment; pasted text stays text.
+            const pasted = [...(e.clipboardData?.files || [])];
+            if (pasted.length && !attachLocked && mode === 'reply') { e.preventDefault(); addFiles(pasted.map((f) => (f.name === 'image.png' ? new File([f], `Screenshot ${new Date().toLocaleString('en-CA', { hour12: false }).replace(/[/:,]/g, '-').replace(/\s+/g, ' ')}.png`, { type: f.type }) : f))); }
+          }}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && text.trim() && !busy && !optedOut && !emailLocked) send();
           }}
@@ -521,16 +589,43 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
       </div>
       {error && <div className="error small">{error}</div>}
       {optedOut && <div className="error small">This number replied STOP. Texts are blocked until they text START.</div>}
+      <input ref={picker} type="file" multiple hidden onChange={(e) => { addFiles(e.target.files); e.target.value = ''; }} />
+      {mode === 'reply' && files.length > 0 && (
+        <div className="composer-files">
+          <div className="composer-files-head">
+            <b>{files.length} file{files.length === 1 ? '' : 's'} attached</b>
+            <span className={tooBig ? 'file-meter over' : 'file-meter'} title={`${fileSize(filesBytes)} of about 18 MB`}><span style={{ width: `${Math.min(100, (filesBytes / MAX_FILES_BYTES) * 100)}%` }} /></span>
+            <span className={tooBig ? 'error small' : 'muted small'}>{fileSize(filesBytes)} of 18 MB</span>
+            <button type="button" className="link small" onClick={() => { sendKey.current = null; setFiles([]); setFileNote(null); }}>Remove all</button>
+          </div>
+          <div className="file-grid">
+            {files.map((f, i) => <PickedFile key={`${f.name}-${f.size}`} file={f} onRemove={() => removeFile(i)} />)}
+            {files.length < MAX_FILES && <button type="button" className="file-add" onClick={() => picker.current?.click()}><Icon name="clip" size={15} /> Add more</button>}
+          </div>
+          {tooBig && <div className="error small">Too large to send: one email carries about 18 MB. Remove a file, or send a link to it instead.</div>}
+          {fileNote && <div className="muted small">{fileNote}</div>}
+          {switched && <div className="muted small">Files can't go by text, so this reply will be sent as an email.</div>}
+          {channel !== 'email' && <div className="error small">Files can only be sent by email: switch to Email to send them, or they stay here.</div>}
+        </div>
+      )}
+      {dragging && <div className="composer-drop" aria-hidden="true"><Icon name="clip" size={22} /><b>Drop to attach</b><span>{channel === 'email' ? 'Up to 10 files, 18 MB together' : 'The reply will be sent as an email'}</span></div>}
       <div className="composer-foot">
+        {mode === 'reply' && !attachLocked && (
+          <button type="button" className="composer-attach" onClick={() => picker.current?.click()} title="Attach files (or drop them here, or paste a screenshot)" aria-label="Attach files">
+            <Icon name="clip" size={18} />
+            <span className="composer-attach-label">Attach</span>
+            {files.length > 0 && <span className="composer-attach-count">{files.length}</span>}
+          </button>
+        )}
         <span className="muted small composer-hint">
           {mode === 'reply' && !connected && `${CHANNEL_LABEL[channel]} isn't connected yet: replies are saved, not sent.`}
           {mode === 'reply' && connected && sandboxed && !emailLocked && 'Sandbox: replies are recorded here, not sent to the customer.'}
           {mode === 'reply' && channel === 'sms' && text && <span className="mono"> {text.length} chars · {segments} text{segments === 1 ? '' : 's'}</span>}
           {!text && <span className="composer-keys"> Type <span className="kbd">/</span> for saved replies · <span className="kbd">Ctrl</span>+<span className="kbd">Enter</span> to send</span>}
         </span>
-        <button disabled={busy || !text.trim() || !!optedOut || emailLocked || (mode === 'reply' && needsSubject && !subject.trim())} title={emailLocked ? 'Email is read-only' : mode === 'reply' && needsSubject && !subject.trim() ? 'Add a subject first' : undefined} className={mode === 'note' ? 'note-btn' : ''} onClick={send}>
+        <button disabled={busy || !text.trim() || !!optedOut || emailLocked || (mode === 'reply' && channel === 'email' && tooBig) || (mode === 'reply' && needsSubject && !subject.trim())} title={emailLocked ? 'Email is read-only' : mode === 'reply' && needsSubject && !subject.trim() ? 'Add a subject first' : undefined} className={mode === 'note' ? 'note-btn' : ''} onClick={send}>
           {mode !== 'note' && <Icon name="send" />}
-          {busy ? 'Saving…' : mode === 'note' ? 'Add note' : 'Send'}
+          {busy ? (mode === 'reply' && channel === 'email' && files.length ? `Sending ${files.length} file${files.length === 1 ? '' : 's'}…` : 'Saving…') : mode === 'note' ? 'Add note' : 'Send'}
         </button>
       </div>
     </div>

@@ -31,6 +31,8 @@ const many = async (q, sql, p) => (await q.query(sql, p)).rows;
 
 export function createInboxRouter({ db, sessions, cookieName, config, l27, connectors = {}, log = (lvl, msg, f) => console.error(msg, f), qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, complaints = null, smsProviders = {}, kustomerMigration = null, kpi = null }) {
   const r = express.Router();
+  // A reply can carry email files (about 18 MB, a third more as base64); everything else is small.
+  r.post('/conversations/:id/messages', express.json({ limit: '26mb' }));
   r.use(express.json({ limit: '1mb' }));
 
   const roleFor = (email, isFirst) => {
