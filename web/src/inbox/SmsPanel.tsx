@@ -1,13 +1,12 @@
-// Support settings → Channels → Text messages: each SMS provider (RingCentral, Twilio).
+// Support settings → Channels → Text messages: Twilio, the SMS provider.
 // Credentials live in Railway (never on this screen); admins can check, disconnect and reconnect.
 import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { inbox, type ChannelStatus, type SmsProviderStatus } from './api';
 import { ago, displayIdentity } from './util';
 
-const LABEL = { ringcentral: 'RingCentral', twilio: 'Twilio' } as const;
+const LABEL = { twilio: 'Twilio' } as const;
 const when = (iso: string | null | undefined) => (iso ? ago(iso) : 'never');
-const day = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleString('en-CA', { timeZone: 'America/Toronto', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—');
 
 // Why a provider's Railway variables were turned down when the server started (names, never values).
 function SetupProblems({ sms }: { sms: ChannelStatus['sms'] }) {
@@ -38,7 +37,7 @@ export function SmsPanel({ sms, isAdmin }: { sms: ChannelStatus['sms']; isAdmin:
           {sms.state === 'sandbox' ? (
             <><span className="wl-pill wl-refused">Sandbox</span> This is a test environment: texts are recorded on the conversation but never sent. Use the Channel simulator for incoming texts.</>
           ) : (
-            <><span className="wl-pill wl-blocked">Not connected</span> SMS isn't set up here: replies are saved, not sent. An admin sets the RingCentral or Twilio variables in Railway (docs/sms.md).</>
+            <><span className="wl-pill wl-blocked">Not connected</span> SMS isn't set up here: replies are saved, not sent. An admin sets the Twilio variables in Railway (docs/sms.md).</>
           )}
         </p>
       </section>
@@ -48,7 +47,6 @@ export function SmsPanel({ sms, isAdmin }: { sms: ChannelStatus['sms']; isAdmin:
   return (
     <>
       <SetupProblems sms={sms} />
-      {sms.providers.length > 1 && <p className="muted small">Each business number belongs to one provider; replies go out through the provider that owns the conversation's number.</p>}
       {sms.providers.map((p) => (
         <ProviderPanel key={p.provider} p={p} sandbox={sms.state === 'sandbox'} isAdmin={isAdmin} />
       ))}
@@ -88,9 +86,6 @@ function ProviderPanel({ p, sandbox, isAdmin }: { p: SmsProviderStatus; sandbox:
               ? 'Agents can send and receive texts from the numbers below.'
               : `${name} is set up but not ready to send. See the problem below.`}
       </p>
-      {h?.extension && (
-        <p className="muted small">Extension {h.extension.number || h.extension.id}{h.extension.name ? ` (${h.extension.name})` : ''}{h.account_id ? ` · account ${h.account_id}` : ''} · checked {when(p.last_health_at)}</p>
-      )}
       {h?.account && (
         <p className="muted small">Account {h.account.name || ''} ({h.account.sid}) · {h.account.status}{h.account.type ? ` · ${h.account.type}` : ''} · checked {when(p.last_health_at)}</p>
       )}
@@ -106,12 +101,10 @@ function ProviderPanel({ p, sandbox, isAdmin }: { p: SmsProviderStatus; sandbox:
           ))}
         </tbody>
       </table>
-      {h?.missing_scopes?.length ? <p className="error small">The RingCentral app is missing permissions: {h.missing_scopes.join(', ')}. Add them in the RingCentral developer console.</p> : null}
       <table className="table wl-table backfill-kv">
         <tbody>
           <tr><th>Receiving</th><td>{p.receiving}</td></tr>
-          {p.provider === 'ringcentral' && <tr><th>Webhook subscription</th><td>{p.has_subscription ? `active, renews automatically (expires ${day(p.subscription_expires_at)})` : 'none'}</td></tr>}
-          {p.provider === 'twilio' && p.webhook_url && <tr><th>Incoming texts URL (set in Twilio)</th><td className="mono small">{p.webhook_url}</td></tr>}
+          {p.webhook_url && <tr><th>Incoming texts URL (set in Twilio)</th><td className="mono small">{p.webhook_url}</td></tr>}
           <tr><th>Last webhook event</th><td>{when(p.last_webhook_at)}</td></tr>
           <tr><th>Last text received</th><td>{when(p.last_received_at)}</td></tr>
           <tr><th>Last missed-text check</th><td>{when(p.last_reconcile_at)}</td></tr>

@@ -316,19 +316,13 @@ export interface ChannelAccount {
   ingested_count: number;
 }
 export interface SmsProviderStatus {
-  provider: 'ringcentral' | 'twilio';
+  provider: 'twilio';
   enabled: boolean;
   health_ok: boolean;
   health: {
     sms_numbers: string[];
     not_sms_capable: string[];
     checked_at: string;
-    // RingCentral
-    account_id?: string | null;
-    extension?: { id: string; number: string | null; name: string | null };
-    other_sms_numbers?: string[];
-    missing_scopes?: string[];
-    // Twilio
     account?: { sid: string; name: string | null; status: string | null; type: string | null };
     webhook_elsewhere?: string[];
   } | null;
@@ -337,8 +331,6 @@ export interface SmsProviderStatus {
   configured_numbers: string[];
   numbers: { number: string; can_send: boolean; queue: string }[];
   receiving: string;
-  has_subscription?: boolean;
-  subscription_expires_at?: string | null;
   last_webhook_at: string | null;
   last_received_at: string | null;
   last_reconcile_at: string | null;
@@ -422,7 +414,7 @@ export interface KustomerPlanConversation { kustomer_conversation_id: string; l2
 
 export interface ChannelStatus {
   email: { state: ChannelState; provider: string | null; send_from?: string[]; accounts: ChannelAccount[]; read_only: boolean };
-  sms: { state: ChannelState; provider: string | null; providers: SmsProviderStatus[]; problems?: { provider: 'ringcentral' | 'twilio' | null; problem: string }[] };
+  sms: { state: ChannelState; provider: string | null; providers: SmsProviderStatus[]; problems?: { provider: 'twilio' | null; problem: string }[] };
 }
 
 export interface Meta {

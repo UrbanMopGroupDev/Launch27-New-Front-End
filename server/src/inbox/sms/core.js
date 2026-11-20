@@ -1,18 +1,11 @@
 // What every SMS provider shares: its row in sms_provider_state (kept in memory too, so sending
 // never queries the database from inside a reply's transaction), the durable queue of incoming
 // texts (sms_events), and turning each one into an inbox message through ingestInbound().
-import { timingSafeEqual } from 'node:crypto';
 import { normalizePhone } from '../normalize.js';
 import { contactsByIdentity, ingestInbound } from '../service.js';
 
 export const MIN = 60_000;
 const MAX_EVENT_ATTEMPTS = 8;
-
-export const sameToken = (a, b) => {
-  const x = Buffer.from(String(a || ''));
-  const y = Buffer.from(String(b || ''));
-  return x.length > 0 && x.length === y.length && timingSafeEqual(x, y);
-};
 
 // Error text kept for admins: the reason, never a phone number or message text.
 export const sanitize = (err) => String(err?.message || err).replace(/\+?\d[\d\s().-]{7,}\d/g, '[number]').slice(0, 300);
