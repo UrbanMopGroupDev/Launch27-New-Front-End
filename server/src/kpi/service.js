@@ -39,7 +39,8 @@ export function createKpi({ db, config, log = { info() {}, warn() {}, error() {}
         got = { refreshed_at: null, note: 'refresh failed' };
       }
       pulled.push([c, got]);
-      ds.sources[c.key] = { refreshed_at: got.refreshed_at || null, note: got.note || null };
+      ds.sources[c.key] = { refreshed_at: got.refreshed_at || null, note: got.note || null, static: !!got.static };
+      if (got.reviewsExport) ds.reviewsExport = got.reviewsExport;
       if (got.bookings) ds.bookings = got.bookings;
       if (got.complaints) ds.complaints = got.complaints;
       if (got.complaintCoverage) ds.complaintCoverage = got.complaintCoverage;

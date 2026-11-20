@@ -65,6 +65,7 @@ export function slimReportVisit(booking, tt, fb) {
         program: partner?.program || null,
         addr: street || null,
         freq: (booking || b).frequency?.name || null,
+        services,
       };
     })(),
     location_id: Number(b.location?.id ?? b.location_id ?? booking?.location?.id) || null,
@@ -147,6 +148,43 @@ export function periodRange(today, period) {
   return { from: addDays(today, -days), to: addDays(today, -1), days };
 }
 
+// Re-cleans from Launch27: a visit on the "Reclean" service. It is charged to the cleaner(s)
+// of the client's last regular clean before it (the clean that prompted it, up to RECLEAN_DAYS
+// earlier), not to whoever went back.
+export const RECLEAN_DAYS = 30;
+const RECLEAN_SERVICE = /\bre-?clean/i;
+// Only the Launch27 "Reclean" service counts. ($0 visits can be comps, so they're left out.)
+export function isRecleanVisit(v) {
+  return (v.services || []).some((n) => RECLEAN_SERVICE.test(n)) ? 'service' : null;
+}
+export function findRecleans(byCustomer, days = RECLEAN_DAYS) {
+  const out = new Map(); // cleaner id -> [{ date, customer, original_date, how, by, visit_id }]
+  for (const list of byCustomer.values()) {
+    for (let i = 0; i < list.length; i++) {
+      const v = list[i];
+      const how = isRecleanVisit(v);
+      if (!how) continue;
+      // The client's last regular clean before it (same day allowed for the Reclean service).
+      let orig = null;
+      for (let j = i - 1; j >= 0; j--) {
+        const p = list[j];
+        const gap = daysBetween(p.date, v.date);
+        if (gap > days) break;
+        if (p.at >= v.at || isRecleanVisit(p)) continue;
+        orig = p;
+        break;
+      }
+      if (!orig) continue;
+      const ev = { date: v.date, customer: v.customer, customer_id: v.customer_id, original_date: orig.date, original_by: orig.teams.map((t) => t.name), gap_days: daysBetween(orig.date, v.date), how, by: v.teams.map((t) => t.name), visit_id: v.id };
+      for (const t of orig.teams) {
+        if (!out.has(t.id)) out.set(t.id, []);
+        out.get(t.id).push(ev);
+      }
+    }
+  }
+  return out;
+}
+
 // Same-cleaner share for recurring visits in a range (and week by week).
 export function sameCleaner(visits, byCustomer, from, to) {
   let n = 0;
@@ -214,6 +252,7 @@ export function cleanerStats(visits, byCustomer, from, to, today, rules = LESLIE
         if (tm.distance != null) s.km.push(tm.distance);
       }
       if (v.rating) {
+        s.ratedList.push({ date: v.date, customer: v.customer, r: v.rating.r, comment: v.rating.comment || null });
         s.rated++;
         if (v.rating.r === 2) s.happy++;
         if (v.rating.r === 0) {
@@ -254,7 +293,7 @@ export function cleanerStats(visits, byCustomer, from, to, today, rules = LESLIE
   return map;
 }
 
-const emptyStats = (id, name) => ({ id, name, visits: 0, onsiteMin: 0, bookedMin: 0, tracked: 0, onTime: 0, lateMin: [], lateList: [], long: 0, early: 0, earlyList: [], residential: 0, missing: [], enroute: 0, km: [], rated: 0, happy: 0, unhappy: 0, unhappyRecent: 0, revenue: 0, earned: 0, earnedKnown: false, marginRev: 0, marginPay: 0, last40: [] });
+const emptyStats = (id, name) => ({ id, name, visits: 0, onsiteMin: 0, bookedMin: 0, tracked: 0, onTime: 0, lateMin: [], lateList: [], long: 0, early: 0, earlyList: [], residential: 0, missing: [], ratedList: [], enroute: 0, km: [], rated: 0, happy: 0, unhappy: 0, unhappyRecent: 0, revenue: 0, earned: 0, earnedKnown: false, marginRev: 0, marginPay: 0, last40: [] });
 export { emptyStats };
 
 // The team's overtime picture (cleans 15%+ over booked time) from everyone's last 40 visits:
