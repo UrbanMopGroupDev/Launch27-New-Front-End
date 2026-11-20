@@ -1,7 +1,7 @@
 // KPI scorecard service: pulls each source through its read-only connector, hands the
 // normalized dataset to the calc layer (calc.js) and serves the scorecard and drill-downs.
 import { localDate } from '../schedule/rules.js';
-import { indexDataset, scorecard, drill, lastClosedMonth, addMonths, monthOf, monthsBetween, monthLabel } from './calc.js';
+import { indexDataset, scorecard, drill, lastClosedMonth, monthOf, monthsBetween, monthLabel } from './calc.js';
 import { KPI_BRANDS, KPI_RULES } from './config.js';
 import { createKpiConnectors } from './connectors.js';
 import { createLiveKpiConnectors } from './live.js';
@@ -78,27 +78,42 @@ export function createKpi({ db, config, log = { info() {}, warn() {}, error() {}
   };
   const cleanOutage = (o) => (synthetic && o && o in KPI_OUTAGES ? o : null);
   function pickMonth(month, today) {
-    const last = addMonths(monthOf(today), -1);
+    // The month in progress can be picked too; it is shown as "to date".
+    const last = monthOf(today);
     const def = lastClosedMonth(today, KPI_RULES);
     if (month == null || month === '') return { month: def, last, def };
     if (!MONTH.test(month) || month < KPI_RULES.firstMonth || month > last) throw fail(400, `Month must be between ${KPI_RULES.firstMonth} and ${last}`);
     return { month, last, def };
   }
 
+  // Exact dates for a custom range: both needed, in order, inside the dashboard's span, not in the future.
+  const DAYRE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+  function pickRange(mode, from, to, today) {
+    if (mode !== 'range') return null;
+    const first = `${KPI_RULES.firstMonth}-01`;
+    const real = (d) => DAYRE.test(String(d)) && new Date(`${d}T12:00:00Z`).toISOString().slice(0, 10) === d;
+    if (!real(from) || !real(to)) throw fail(400, 'Pick a start date and an end date');
+    if (from > to) throw fail(400, 'The start date is after the end date');
+    if (from < first || to > today) throw fail(400, `Dates must be between ${first} and ${today}`);
+    return { from, to };
+  }
+
   return {
-    async scorecard({ brand, month, mode, outage } = {}) {
+    async scorecard({ brand, month, mode, outage, from, to } = {}) {
       const b = brandOf(brand);
       const o = cleanOutage(outage);
       const c = await load(b.key, o);
-      const m = pickMonth(month, c.today);
-      const card = scorecard(c.ix, { brand: b, month: m.month, mode: mode === 't12' ? 't12' : 'month', now: now(), today: c.today });
+      const range = pickRange(mode, from, to, c.today);
+      const m = pickMonth(range ? null : month, c.today);
+      const card = scorecard(c.ix, { brand: b, month: m.month, mode: range ? 'range' : mode === 't12' ? 't12' : 'month', range, now: now(), today: c.today });
       return {
         ...card,
         today: c.today,
         env: config.appEnv,
         synthetic,
         brands: KPI_BRANDS.map((x) => ({ key: x.key, name: x.name, detail: x.detail })),
-        months: monthsBetween(KPI_RULES.firstMonth, m.last).reverse().map((x) => ({ value: x, label: monthLabel(x) })),
+        months: monthsBetween(KPI_RULES.firstMonth, m.last).reverse().map((x) => ({ value: x, label: x === m.last ? `${monthLabel(x)} (to date)` : monthLabel(x) })),
+        first_day: `${KPI_RULES.firstMonth}-01`,
         default_month: m.def,
         sources: connectors.map((x) => ({ key: x.key, label: x.label, mode: x.mode, ...c.ds.sources[x.key] })),
         outage: o,
@@ -107,12 +122,13 @@ export function createKpi({ db, config, log = { info() {}, warn() {}, error() {}
         manual_reviews: synthetic ? { can_enter: true, entry: c.ds.manualReviews[m.month] || null } : { can_enter: false, entry: null },
       };
     },
-    async drill({ brand, month, mode, kpi, outage } = {}) {
+    async drill({ brand, month, mode, kpi, outage, from, to } = {}) {
       const b = brandOf(brand);
       if (!['ocr', 'churn', 'over_cancel', 'fulfilment', 'complaints', 'reviews'].includes(kpi) || !b.kpis.includes(kpi === 'over_cancel' ? 'churn' : kpi)) throw fail(400, 'Unknown KPI');
       const c = await load(b.key, cleanOutage(outage));
-      const m = pickMonth(month, c.today);
-      return drill(c.ix, { kpi, month: m.month, mode: mode === 't12' ? 't12' : 'month', today: c.today });
+      const range = pickRange(mode, from, to, c.today);
+      const m = pickMonth(range ? null : month, c.today);
+      return drill(c.ix, { kpi, month: m.month, mode: range ? 'range' : mode === 't12' ? 't12' : 'month', range, today: c.today });
     },
     // Daily read-only refresh of the live sources (worker tick), and "Refresh now".
     async maybeRun() {

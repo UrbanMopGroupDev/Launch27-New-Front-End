@@ -2055,6 +2055,8 @@ a.rep-factor:hover b { text-decoration: underline; }
 .sc-controls { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
 .sc-month { display: flex; flex-direction: column; gap: 2px; }
 .sc-month select, .sc-dev select { height: 44px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); font: inherit; color: var(--text); }
+.sc-range { display: flex; gap: 8px; flex-wrap: wrap; }
+.sc-range input[type='date'] { height: 44px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); font: inherit; color: var(--text); }
 .sc-synthetic { display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 999px; background: var(--warn-soft); color: var(--warn-ink); font-size: 12px; font-weight: 600; }
 .sc-section { margin: 4px 0 10px; }
 .sc-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 14px; align-items: start; }
