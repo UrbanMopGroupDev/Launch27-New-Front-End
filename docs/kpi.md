@@ -6,9 +6,9 @@ Gmail, and it has no "edit data" controls.
 
 **Status.** Development and QA run on synthetic data. Production reads Launch27 (churn,
 fulfilment, visit counts), the Kustomer complaints the Complaint playbook already collects, and
-the monthly Syft management report from Gmail (OCR). QuickBooks and Google Business Profile are
-not connected yet: OCR shows the Syft report's stated figure with no cross-check, and Google
-reviews read "No data".
+the monthly Syft management report from Gmail (OCR). QuickBooks and the Google Business Profile
+API are not connected yet: OCR shows the Syft report's stated figure with no cross-check, and
+Google reviews come from a dated export, not a live feed.
 
 ## Where the code is
 
@@ -84,6 +84,11 @@ Production:
 - A failed refresh keeps the previous snapshot; the affected tiles turn "Stale" after 48 hours.
 - Every refresh writes one row per source per day to `kpi_refresh_log` (updated in place).
 - Only bookings at the Ottawa location count for UrbanMop Residential (`locations` in `KPI_BRANDS`).
+
+- **Google reviews**: not live. They come from a one-off Google Takeout export kept in
+  `server/src/kpi/data/google-reviews-urbanmop.json` (dates and star ratings only, no names or
+  comments). The tile says so, and months after the export's last review read "No data". To refresh
+  it before the Business Profile API is connected, replace that file from a newer export.
 
 Not built yet: QuickBooks and Google connectors, the email alert when a refresh fails or
 a source is stale, and per-brand roles for office managers.
