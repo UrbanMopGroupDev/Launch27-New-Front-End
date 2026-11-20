@@ -124,11 +124,11 @@ inside a conversation.
 | Phone | RingCentral Embeddable widget (loads when `RINGCENTRAL_CLIENT_ID` is set): calls ring in the browser, the caller's profile pops, finished calls are logged; click-to-call from a profile |
 | Search | Ctrl+K: people by name, phone or email; message text; jump to a booking number |
 
-**Email is read-only.** In production new mail in each Gmail mailbox becomes a conversation
-within a minute, matched to the Launch27 customer, but **nothing can be emailed to anyone from
-the platform**: email replies and new email conversations are refused, and Gmail is asked only
-for read access (`EMAIL_SENDING_ENABLED` in `server/src/inbox/channels.js`). Dev and QA run a sandbox email channel (recorded, never
-sent, no mailbox read). Setup and how it works: [docs/email.md](docs/email.md); status in
+**Email is read and sent.** In production new mail in each Gmail mailbox becomes a conversation
+within a minute, matched to the Launch27 customer; agents reply by email in the customer's
+thread (with attached files), or start an email from New conversation or a customer's page.
+Sending needs the `gmail.send` scope allowed in Google Workspace. Dev and QA run a sandbox email
+channel (recorded, never sent, no mailbox read). Setup and how it works: [docs/email.md](docs/email.md); status in
 Support settings → Channels. **SMS runs on Twilio** (production only; RingCentral is used for calls, not texts): customers and cleaners text the business numbers,
 the texts arrive in the inbox matched to the Launch27 customer or cleaner and routed by the
 routing rules, and agents reply from the inbox. Unknown or shared numbers go to *Who is this?*.
