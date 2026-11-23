@@ -141,3 +141,25 @@ describe('reports: keep themselves fresh without a sync login', () => {
     await db.close();
   });
 });
+
+describe('reports: analytics field feed', () => {
+  test('daily counts by area and cleaner, no customer names', async () => {
+    const { fieldDaily, FIELD_COLUMNS } = await import('../src/reports/compute.js');
+    const visits = [V('2026-08-03', 1, 7), V('2026-08-17', 1, 7, { lateMin: 20, rating: 2 }), V('2026-08-17', 2, 8, { kind: 'One Time', rating: 0, km: 12 })];
+    const rows = fieldDaily(visits, indexVisits(visits), '2026-08-01', '2026-08-31', new Map([[7, 'West'], [8, 'East']]));
+    const obj = rows.map((r) => Object.fromEntries(FIELD_COLUMNS.map((c, i) => [c, r[i]])));
+    const late = obj.find((r) => r.day === '2026-08-17' && r.cleaner === 'Cleaner 7');
+    assert.equal(late.area, 'West');
+    assert.equal(late.client_type, 'Recurring');
+    assert.equal(late.recurring_checked, 1);
+    assert.equal(late.same_cleaner, 1);
+    assert.equal(late.on_time, 0);
+    assert.equal(late.late_minutes, 20);
+    assert.equal(late.happy, 1);
+    const one = obj.find((r) => r.cleaner === 'Cleaner 8');
+    assert.equal(one.client_type, 'One-time');
+    assert.equal(one.unhappy, 1);
+    assert.equal(one.km_total, 12);
+    assert.doesNotMatch(JSON.stringify(rows), /Client \d/);
+  });
+});
