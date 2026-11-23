@@ -203,6 +203,18 @@ export function createApp(
     });
   }
 
+  // The company analytics dashboard reads daily field-operations counts here (docs/analytics-feed.md).
+  // Off unless ANALYTICS_FEED_KEY (24+ characters) is set; the caller sends it as a Bearer token.
+  // Counts only: no customer names, addresses or cleaner pay.
+  const feedKey = process.env.ANALYTICS_FEED_KEY || '';
+  app.get('/analytics/v1/field', async (req, res, next) => {
+    try {
+      if (!feedKey || feedKey.length < 24 || !reports?.fieldFeed) return res.status(404).json({ error: 'Not found.' });
+      if (!tokenMatches(String(req.get('authorization') || '').replace(/^Bearer\s+/i, ''), feedKey)) return res.status(401).json({ error: 'Not allowed.' });
+      res.set('Cache-Control', 'no-store').json(await reports.fieldFeed({ from: req.query.from, to: req.query.to }));
+    } catch (e) { if (e.status === 409) return res.status(409).json({ error: e.message }); next(e); }
+  });
+
   // Placement API for the Sales Hub (service tokens, not staff logins). Mounted before the
   // workspace's /api routes, which need a signed-in person.
   if (placement && config.placementTokens?.size) app.use('/api/placement/v1', createPlacementRouter({ placement, config, log, limits: config.placementLimits }));
