@@ -214,6 +214,36 @@ export function createApp(
       res.set('Cache-Control', 'no-store').json(await reports.fieldFeed({ from: req.query.from, to: req.query.to }));
     } catch (e) { if (e.status === 409) return res.status(409).json({ error: e.message }); next(e); }
   });
+  // The same numbers as a catalogue of datasets, the contract every app follows for the company
+  // dashboard (docs/analytics-feed.md): the middleware copies each dataset to its own sheet tab.
+  const FEED_DATASETS = [
+    { name: 'field_daily', title: 'Field operations by day', kind: 'period', grain: 'day × location × area × cleaner × client type', description: 'Cleaner visits, same cleaner for recurring clients, on-time arrival, minutes late, visits that ran long, en route texts, km driven, ratings and revenue.', pick: (f) => ({ from: f.from, to: f.to, columns: f.columns, rows: f.rows }) },
+    { name: 'capacity', title: 'Hours filled by area, next four weeks', kind: 'snapshot', grain: 'one row per area', description: 'Assignable cleaners, booked and available hours per week, and visits with no cleaner yet.', pick: (f) => ({ columns: f.capacity_columns, rows: f.capacity }) },
+    { name: 'planner', title: 'Schedule changes to handle', kind: 'snapshot', grain: 'one row (last four weeks)', description: 'Changes the planner raised, how many were handled, how fast, and how many are still open.', pick: (f) => { const c = ['raised', 'handled', 'handled_share', 'median_hours', 'recommended_share', 'expired', 'open', 'snapshot_taken_at']; return { columns: c, rows: [c.map((k) => (k === 'snapshot_taken_at' ? f.taken_at : f.planner?.[k]) ?? null)] }; } },
+  ];
+  let feedCache = null;
+  const feedOf = async (from, to) => {
+    const key = `${from || ''}|${to || ''}`;
+    if (!feedCache || feedCache.key !== key || Date.now() - feedCache.at > 10 * 60_000) feedCache = { key, at: Date.now(), out: await reports.fieldFeed({ from, to }) };
+    return feedCache.out;
+  };
+  const feedRoute = (handler) => async (req, res, next) => {
+    try {
+      if (!feedKey || feedKey.length < 24 || !reports?.fieldFeed) return res.status(404).json({ error: 'Not found.' });
+      if (!tokenMatches(String(req.get('authorization') || '').replace(/^Bearer\s+/i, ''), feedKey)) return res.status(401).json({ error: 'Not allowed.' });
+      const out = await handler(req);
+      if (!out) return res.status(404).json({ error: 'No such dataset.' });
+      res.set('Cache-Control', 'no-store').json(out);
+    } catch (e) { if (e.status === 409) return res.status(409).json({ error: e.message }); next(e); }
+  };
+  app.get('/analytics/v1/catalogue', feedRoute(async () => ({ source: 'residential', version: 1, time_zone: 'America/Toronto', default_window_days: 730,
+    datasets: FEED_DATASETS.map(({ pick: _p, ...d }) => ({ ...d, path: `/analytics/v1/data/${d.name}` })) })));
+  app.get('/analytics/v1/data/:name', feedRoute(async (req) => {
+    const d = FEED_DATASETS.find((x) => x.name === req.params.name);
+    if (!d) return null;
+    const f = await feedOf(d.kind === 'period' ? req.query.from : null, d.kind === 'period' ? req.query.to : null);
+    return { name: d.name, kind: d.kind, generated_at: new Date().toISOString(), from: null, to: null, ...d.pick(f) };
+  }));
 
   // Placement API for the Sales Hub (service tokens, not staff logins). Mounted before the
   // workspace's /api routes, which need a signed-in person.
