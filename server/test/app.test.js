@@ -113,3 +113,25 @@ test('every write to Launch27 is logged with who, what and the answer; reads are
     await db.close();
   }
 });
+
+test('analytics catalogue: field datasets behind the feed key', async () => {
+  const KEY = 'feed-key-0123456789abcdefghijklmnop';
+  const reports = { fieldFeed: async ({ from, to }) => ({ taken_at: '2026-11-22T06:00:00.000Z', from: from || '2025-11-22', to: to || '2026-11-21', columns: ['day', 'visits'], rows: [['2026-11-20', 3]],
+    capacity_columns: ['area', 'assignable_cleaners'], capacity: [['East', 19]], planner: { raised: 10, handled: 4, open: 2 } }) };
+  process.env.ANALYTICS_FEED_KEY = KEY;
+  const app = createApp(config, { reports });
+  delete process.env.ANALYTICS_FEED_KEY;
+  await withServer(app, async (base) => {
+    const get = (p, k = KEY) => fetch(`${base}${p}`, { headers: { authorization: `Bearer ${k}` } });
+    assert.equal((await get('/analytics/v1/catalogue', 'nope')).status, 401);
+    const cat = await (await get('/analytics/v1/catalogue')).json();
+    assert.deepEqual(cat.datasets.map((d) => d.name), ['field_daily', 'capacity', 'planner']);
+    const daily = await (await get('/analytics/v1/data/field_daily?from=2026-11-01&to=2026-11-21')).json();
+    assert.deepEqual(daily.rows, [['2026-11-20', 3]]);
+    assert.equal(daily.from, '2026-11-01');
+    const planner = await (await get('/analytics/v1/data/planner')).json();
+    assert.equal(planner.rows[0][planner.columns.indexOf('handled')], 4);
+    assert.equal(planner.rows[0][planner.columns.indexOf('snapshot_taken_at')], '2026-11-22T06:00:00.000Z');
+    assert.equal((await get('/analytics/v1/data/nope')).status, 404);
+  });
+});
