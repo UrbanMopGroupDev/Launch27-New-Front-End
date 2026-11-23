@@ -1,7 +1,7 @@
 // KPI scorecard service: pulls each source through its read-only connector, hands the
 // normalized dataset to the calc layer (calc.js) and serves the scorecard and drill-downs.
 import { localDate } from '../schedule/rules.js';
-import { indexDataset, scorecard, drill, lastClosedMonth, monthOf, monthsBetween, monthLabel } from './calc.js';
+import { indexDataset, scorecard, drill, lastClosedMonth, monthOf, monthsBetween, monthLabel, sourceState } from './calc.js';
 import { KPI_BRANDS, KPI_RULES } from './config.js';
 import { createKpiConnectors } from './connectors.js';
 import { createLiveKpiConnectors } from './live.js';
@@ -24,6 +24,21 @@ export function createKpi({ db, config, log = { info() {}, warn() {}, error() {}
   const jobs = connectors.map((c) => c.job).filter(Boolean);
   let cache = null;
   let manualVersion = 0;
+  let lastAuto = 0;
+
+  // Opening the scorecard keeps Launch27 current by itself: when its copy is over
+  // autoRefreshHours old (or missing), a read-only refresh starts in the background on the
+  // viewer's own Launch27 login. At most one try every 30 minutes. True while one is running.
+  function autoRefresh(ds, bearer) {
+    const job = connectors.find((c) => c.key === 'launch27')?.job;
+    if (!job) return false;
+    if (job.running()) return true;
+    const at = ds.sources.launch27?.refreshed_at;
+    if (!bearer || (at && now() - Date.parse(at) < KPI_RULES.autoRefreshHours * 3_600_000) || now() - lastAuto < 30 * 60_000) return false;
+    lastAuto = now();
+    job.start({ bearer });
+    return true;
+  }
 
   async function load(brandKey, outage) {
     const today = localDate(now());
@@ -99,7 +114,7 @@ export function createKpi({ db, config, log = { info() {}, warn() {}, error() {}
   }
 
   return {
-    async scorecard({ brand, month, mode, outage, from, to } = {}) {
+    async scorecard({ brand, month, mode, outage, from, to, bearer = null } = {}) {
       const b = brandOf(brand);
       const o = cleanOutage(outage);
       const c = await load(b.key, o);
@@ -115,10 +130,10 @@ export function createKpi({ db, config, log = { info() {}, warn() {}, error() {}
         months: monthsBetween(KPI_RULES.firstMonth, m.last).reverse().map((x) => ({ value: x, label: x === m.last ? `${monthLabel(x)} (to date)` : monthLabel(x) })),
         first_day: `${KPI_RULES.firstMonth}-01`,
         default_month: m.def,
-        sources: connectors.map((x) => ({ key: x.key, label: x.label, mode: x.mode, ...c.ds.sources[x.key] })),
+        sources: connectors.map((x) => ({ key: x.key, label: x.label, mode: x.mode, ...c.ds.sources[x.key], state: sourceState(c.ds.sources[x.key], x.key, now()) })),
         outage: o,
         outages: synthetic ? KPI_OUTAGES : null,
-        refresh: { available: jobs.length > 0, running: jobs.some((j) => j.running()) },
+        refresh: { available: jobs.length > 0, running: autoRefresh(c.ds, bearer) || jobs.some((j) => j.running()) },
         manual_reviews: synthetic ? { can_enter: true, entry: c.ds.manualReviews[m.month] || null } : { can_enter: false, entry: null },
       };
     },

@@ -1,6 +1,7 @@
 // KPI scorecard (Reports → KPI scorecard): the monthly scorecard, read-only. Every number
 // comes from the server's calc module (server/src/kpi/calc.js); this page only renders it.
-// A tile with a missing or stale source shows "No data" or "Stale", never a number.
+// A tile with a missing source shows "No data", never a number. A source that has not refreshed
+// lately keeps its figures; one notice at the top of the page says so.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { kpiApi, type Drill, type DrillRow, type Kpi, type ManualReviews, type Mode, type Query, type Reference, type Scorecard, type Tile, type Tone, type TrendPoint } from '../kpi/api';
@@ -27,8 +28,9 @@ export function KpiScorecardPage() {
   const [range, setRange] = useState<{ from: string; to: string }>({ from: '', to: '' });
   const rangeReady = mode !== 'range' || (!!range.from && !!range.to && range.from <= range.to);
   const query: Query = { brand, month, mode, outage, from: range.from, to: range.to };
-  const q = useQuery({ queryKey: ['kpi', 'scorecard', brand, month, mode, outage, mode === 'range' ? range.from : '', mode === 'range' ? range.to : ''], queryFn: () => kpiApi.scorecard(query), retry: false, placeholderData: (p) => p, enabled: rangeReady });
+  const q = useQuery({ queryKey: ['kpi', 'scorecard', brand, month, mode, outage, mode === 'range' ? range.from : '', mode === 'range' ? range.to : ''], queryFn: () => kpiApi.scorecard(query), retry: false, placeholderData: (p) => p, enabled: rangeReady, refetchInterval: (x) => (x.state.data?.refresh.running ? 20_000 : false) });
   const s = q.data;
+  const stale = s ? s.sources.filter((x) => x.state === 'stale') : [];
   return (
     <div className="seg-page sc-page">
       <header className="page-header">
@@ -88,6 +90,11 @@ export function KpiScorecardPage() {
       )}
       {s && (
         <>
+          {s.refresh.running ? (
+            <p className="notice sc-fresh" role="status">Updating from Launch27 now. The figures refresh on their own when it finishes (usually a minute or two).</p>
+          ) : stale.length > 0 && (
+            <p className="notice sc-fresh" role="status">{stale.map((x) => `${x.label} was last updated ${when(x.refreshed_at)}`).join(' · ')}. The figures below are as of then.</p>
+          )}
           <section className="sc-tiles" aria-label="KPIs">
             {s.tiles.map((t) => <TileCard key={t.kpi} tile={t} detailed={view === 'detailed'} onDrill={setDrill} />)}
           </section>
@@ -179,7 +186,7 @@ function TileCard({ tile: t, detailed, onDrill }: { tile: Tile; detailed: boolea
         </>
       ) : (
         <div className="sc-empty">
-          <span className="sc-value sc-value-none">{t.state === 'disabled' ? 'Coming later' : t.state === 'stale' ? 'Stale' : 'No data'}</span>
+          <span className="sc-value sc-value-none">{t.state === 'disabled' ? 'Coming later' : 'No data'}</span>
           {t.note && t.state !== 'disabled' && <p className="muted small">{t.note}</p>}
         </div>
       )}
@@ -208,7 +215,7 @@ function TrendCard({ tile, points, reference }: { tile: Tile; points: TrendPoint
     return (
       <div className="card sc-trend">
         <h3>{tile.label}</h3>
-        <p className="muted small sc-trend-none">{tile.state === 'stale' ? 'Stale: no trend shown' : 'No data'}</p>
+        <p className="muted small sc-trend-none">No data</p>
       </div>
     );
   }
@@ -282,7 +289,7 @@ function SourcesCard({ s, outage, setOutage }: { s: Scorecard; outage: string | 
       <p className="small muted">Read-only: this page never changes anything in Launch27, QuickBooks, Kustomer or Google.</p>
       {s.refresh.available && (
         <p className="small">
-          {s.refresh.running || refresh.isSuccess ? <span className="muted">Refreshing now (Launch27 takes about seven minutes the first time). Reload the page afterwards.</span> : <button className="link" disabled={refresh.isPending} onClick={() => refresh.mutate()}>Refresh now</button>}
+          {s.refresh.running || refresh.isSuccess ? <span className="muted">Refreshing now. The page updates itself when it finishes.</span> : <button className="link" disabled={refresh.isPending} onClick={() => refresh.mutate()}>Refresh now</button>}
           {refresh.isError && <span className="warn"> {(refresh.error as Error).message}</span>}
         </p>
       )}

@@ -86,7 +86,8 @@ export const KPI_RULES = {
   closeDay: 10, // a month is Provisional until this day of the following month
 
   // ----- Freshness -----
-  staleHours: 48,
+  staleHours: 48, // older than this: the page says so in one notice (figures stay)
+  autoRefreshHours: 6, // opening the scorecard refreshes Launch27 by itself when its copy is older than this
 };
 
 export const KPI_SOURCES = {
