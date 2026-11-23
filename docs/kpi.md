@@ -61,6 +61,8 @@ cancellation date, and the last cleaner is the one on the client's last complete
 
 - **Month**: any month from January 2024, including the month in progress (shown "to date").
 - **Trailing 12**: the 12 months ending at the chosen month, pooled.
+- **Last 30 / 60 / 90 days**: the days ending today, today included. These are custom dates with the
+  dates filled in, so the same rules apply.
 - **Custom dates**: any start and end date up to today, compared with the same number of days
   before. Churn is events in the range ÷ clients with a recurring visit booked in the 31 days from
   the start date; the monthly bands and target are not applied to a partial period. OCR is

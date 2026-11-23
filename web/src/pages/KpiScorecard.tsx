@@ -11,6 +11,9 @@ const signed = (v: number, digits: number) => `${v > 0 ? '+' : v < 0 ? '−' : '
 const fmtDelta = (d: NonNullable<Tile['delta']>) => (d.unit === 'pp' ? `${signed(d.value, 1)} pp` : d.unit === 'per100' ? signed(d.value, 2) : signed(d.value, 0));
 const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString('en-CA', { timeZone: 'America/Toronto', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'never');
 const shortMonth = (m: string) => new Date(`${m}-15T12:00:00Z`).toLocaleDateString('en-CA', { month: 'short', timeZone: 'UTC' });
+// Quick ranges: the last N days, today included. They are custom dates with the dates filled in.
+const LAST_DAYS = [30, 60, 90];
+const daysBack = (today: string, n: number) => new Date(Date.parse(`${today}T12:00:00Z`) - (n - 1) * 86_400_000).toISOString().slice(0, 10);
 const longMonth = (m: string) => new Date(`${m}-15T12:00:00Z`).toLocaleDateString('en-CA', { month: 'short', year: 'numeric', timeZone: 'UTC' });
 const UNIT_NOTE: Record<string, string> = { per100: 'per 100 visits', count: 'new this period' };
 const TONE_ICON: Record<Tone, string> = { good: '●', warning: '⚠', critical: '🔴', neutral: '' };
@@ -30,6 +33,7 @@ export function KpiScorecardPage() {
   const query: Query = { brand, month, mode, outage, from: range.from, to: range.to };
   const q = useQuery({ queryKey: ['kpi', 'scorecard', brand, month, mode, outage, mode === 'range' ? range.from : '', mode === 'range' ? range.to : ''], queryFn: () => kpiApi.scorecard(query), retry: false, placeholderData: (p) => p, enabled: rangeReady, refetchInterval: (x) => (x.state.data?.refresh.running ? 20_000 : false) });
   const s = q.data;
+  const lastDays = s && mode === 'range' && range.to === s.today ? LAST_DAYS.find((n) => range.from === daysBack(s.today, n)) || null : null;
   const stale = s ? s.sources.filter((x) => x.state === 'stale') : [];
   return (
     <div className="seg-page sc-page">
@@ -55,7 +59,10 @@ export function KpiScorecardPage() {
             <div className="seg-period" role="group" aria-label="Period">
               <button className={mode === 'month' ? 'active' : ''} aria-pressed={mode === 'month'} onClick={() => setMode('month')}>Month</button>
               <button className={mode === 't12' ? 'active' : ''} aria-pressed={mode === 't12'} onClick={() => setMode('t12')}>Trailing 12</button>
-              <button className={mode === 'range' ? 'active' : ''} aria-pressed={mode === 'range'} onClick={() => { if (!range.from) setRange({ from: `${s.today.slice(0, 7)}-01`, to: s.today }); setMode('range'); }}>Custom dates</button>
+              {LAST_DAYS.map((n) => (
+                <button key={n} className={lastDays === n ? 'active' : ''} aria-pressed={lastDays === n} title={`The ${n} days ending today`} onClick={() => { setRange({ from: daysBack(s.today, n), to: s.today }); setMode('range'); }}>Last {n} days</button>
+              ))}
+              <button className={mode === 'range' && !lastDays ? 'active' : ''} aria-pressed={mode === 'range' && !lastDays} onClick={() => { if (!range.from) setRange({ from: `${s.today.slice(0, 7)}-01`, to: s.today }); setMode('range'); }}>Custom dates</button>
             </div>
             {mode === 'range' ? (
               <div className="sc-range">
