@@ -29,8 +29,9 @@ Every tile shows its value, status, change, **Target** and **Last 12 months** (t
 the same words, on every tile), plus period, source, last refresh and an "i" button with the formula.
 The page opens on **Summary**; **Detailed** (or a tile's "Details") adds the breakdowns, and "View rows"
 goes down to the individual bookings and clients.
-If a source is missing or has not refreshed in 48 hours, the tile says "No data" or "Stale"
-and shows no number. A month with no data is a gap in the trend, never a zero.
+If a source is missing, the tile says "No data" and shows no number. If a source has not refreshed
+in 48 hours, the tiles keep their figures and one notice at the top of the page says when that
+source was last updated. A month with no data is a gap in the trend, never a zero.
 
 | KPI | Formula | Sources |
 | --- | --- | --- |
@@ -90,7 +91,11 @@ Production:
   month's report restating it in its previous-month column). The figure is for
   the whole company (Residential and Commercial), and it is Syft's own calculation, not the
   account-by-account definition above, until QuickBooks is connected.
-- A failed refresh keeps the previous snapshot; the affected tiles turn "Stale" after 48 hours.
+- Opening the scorecard also refreshes Launch27 on its own when its copy is over 6 hours old
+  (`autoRefreshHours`), read-only, on the viewer's own Launch27 login, so the nightly job's sync
+  login is not required. The page shows "Updating" and reloads the figures when it finishes.
+- A failed refresh keeps the previous snapshot; after 48 hours the page shows one notice with the
+  date of the last good refresh.
 - Every refresh writes one row per source per day to `kpi_refresh_log` (updated in place).
 - Only bookings at the Ottawa location count for UrbanMop Residential (`locations` in `KPI_BRANDS`).
 

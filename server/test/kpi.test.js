@@ -361,10 +361,11 @@ describe('scorecard', () => {
     assert.equal(d.better, d.value === 0 ? null : d.value < 0);
     assert.equal(tile(c, 'fulfilment').delta.better === true, tile(c, 'fulfilment').delta.value > 0);
   });
-  test('a stale or missing source shows no value: never a zero, never last month', () => {
+  test('a missing source shows no value (never a zero); a stale one keeps its figures and is marked', () => {
     const stale = card('launch27_stale');
-    for (const k of ['churn', 'fulfilment', 'complaints', 'reviews']) assert.deepEqual([tile(stale, k).state, tile(stale, k).value, stale.trends[k]], ['stale', null, undefined], k);
-    assert.equal(tile(stale, 'ocr').state, 'ok');
+    const fresh = card(null);
+    for (const k of ['churn', 'fulfilment', 'complaints', 'reviews']) assert.deepEqual([tile(stale, k).state, tile(stale, k).stale, tile(stale, k).value], ['ok', true, tile(fresh, k).value], k);
+    assert.deepEqual([tile(stale, 'ocr').state, tile(stale, 'ocr').stale, tile(fresh, 'churn').stale], ['ok', undefined, undefined]);
     const noKustomer = card('kustomer_missing');
     assert.deepEqual([tile(noKustomer, 'complaints').state, tile(noKustomer, 'complaints').value], ['no_data', null]);
     assert.equal(tile(noKustomer, 'churn').state, 'ok');
@@ -609,6 +610,23 @@ describe('kpi live connectors (production path), run against the synthetic Launc
     const mine = await createSyncBearer({ config, fetchImpl })();
     const done = await l27.job.start({ bearer: mine });
     assert.ok(done.bookings > 100);
+    await db.close();
+  });
+  test('opening the scorecard refreshes Launch27 by itself on the viewer login, then leaves it alone', async () => {
+    const { db, fetchImpl } = await setup();
+    const live = { ...config, production: true, l27Mode: 'live', l27SyncEmail: null, l27SyncPassword: null };
+    const connectors = createLiveKpiConnectors({ db, config: live, fetchImpl, syncBearer: async () => null, brand, log: quiet });
+    const kpi = createKpi({ db, config: live, log: quiet, connectors });
+    // Nobody signed in to Launch27 on this request: nothing starts.
+    assert.equal((await kpi.scorecard()).refresh.running, false);
+    const mine = await createSyncBearer({ config, fetchImpl })();
+    assert.equal((await kpi.scorecard({ bearer: mine })).refresh.running, true);
+    await connectors[0].job.start();
+    const after = await kpi.scorecard({ bearer: mine });
+    assert.equal(after.refresh.running, false);
+    assert.equal(after.sources.find((x) => x.key === 'launch27').state, 'ok');
+    assert.equal(after.tiles.find((t) => t.kpi === 'fulfilment').state, 'ok');
+    assert.equal((await db.query("SELECT count(*)::int AS n FROM kpi_refresh_log WHERE source = 'launch27'")).rows[0].n, 1);
     await db.close();
   });
   test('a failed refresh keeps the previous snapshot and is logged', async () => {

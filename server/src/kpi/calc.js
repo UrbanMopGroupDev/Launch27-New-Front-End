@@ -384,7 +384,8 @@ function measure(ix, kpi, months, today, rules) {
  * The scorecard for one brand.
  * mode 'month': the selected month vs the month before. mode 't12': the 12 months ending at
  * the selected month, pooled, vs the 12 before.
- * A KPI whose source is missing or stale has no value: state 'no_data' or 'stale'.
+ * A KPI whose source is missing has no value (state 'no_data'). A source that has not refreshed
+ * lately keeps its figures and is marked `stale`: the page says so once, at the top.
  */
 /** One KPI over exact dates (a custom range). OCR is reported by month only. */
 function ranged(ix, kpi, w, today, rules) {
@@ -419,7 +420,8 @@ export function scorecard(ix, { brand, month, mode = 'month', range = null, now,
     // OCR needs QuickBooks or, failing that, the Syft report; everything else needs all its sources.
     const ocrBlock = () => (sourcesFor(ix, ['qbo'], now, rules).state === 'ok' ? 'ok' : sourcesFor(ix, ['syft'], now, rules).state);
     const blocking = kpi === 'ocr' ? ocrBlock() : src.state;
-    if (blocking !== 'ok') return { ...tile, state: blocking, note: src.list.filter((s) => s.state !== 'ok').map((s) => `${s.label}: ${s.state === 'stale' ? `no refresh in over ${rules.staleHours} hours` : s.note || 'not connected'}`).join(' · ') };
+    if (blocking === 'no_data') return { ...tile, state: blocking, note: src.list.filter((s) => s.state === 'missing').map((s) => `${s.label}: ${s.note || 'not connected'}`).join(' · ') };
+    if (blocking === 'stale') tile.stale = true;
     const cur = isRange ? ranged(ix, kpi, range, today, rules) : measure(ix, kpi, months, today, rules);
     if (cur.state !== 'ok') return { ...tile, state: 'no_data', note: cur.monthly_only ? 'Reported by month only. Choose a month to see it.' : `No data for ${period}` };
     const prev = isRange ? (prevRange.from >= monthStart(rules.firstMonth) ? ranged(ix, kpi, prevRange, today, rules) : null) : prevMonths.length === span ? measure(ix, kpi, prevMonths, today, rules) : null;
