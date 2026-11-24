@@ -168,6 +168,29 @@ function TileCard({ tile: t, detailed, onDrill }: { tile: Tile; detailed: boolea
                   </div>
                 ))}
               </dl>
+              {t.segments && (
+                <div className="sc-segments">
+                  <span className="small muted">By plan type · {t.period}</span>
+                  <table>
+                    <thead>
+                      <tr><th scope="col">Segment</th><th scope="col">Starting clients</th><th scope="col">Temporary churn</th><th scope="col">Permanent churn</th><th scope="col">Churn %</th></tr>
+                    </thead>
+                    <tbody>
+                      {t.segments.map((g) => (
+                        <tr key={g.key} className={g.key === 'all' ? 'sc-seg-total' : ''}>
+                          <th scope="row">{g.label}</th>
+                          <td>{g.den.toLocaleString('en-CA')}</td>
+                          <td>{g.temporary}</td>
+                          <td>{g.permanent}{g.provisional > 0 && <span className="muted"> ({g.provisional} provisional)</span>}</td>
+                          <td>{g.value == null ? '—' : `${g.value.toFixed(1)}%`}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <p className="small muted">Provisional: cancelled inside the last 90 days, so the client can still return. Temporary churn is not in the rate.</p>
+                  {(t.segment_notes || []).map((n) => <p key={n} className="small sc-status-warning">⚠ {n}</p>)}
+                </div>
+              )}
               {t.breakdown && t.breakdown.length > 0 && (
                 <div className="sc-breakdown">
                   <span className="small muted">Not fulfilled, by reason</span>

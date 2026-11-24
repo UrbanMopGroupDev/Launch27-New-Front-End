@@ -51,8 +51,25 @@ Churn rules, in the order they are applied to each cancellation in the month:
    Temporary reasons (travel, hold/pause, renovation, Airbnb, postpartum): out if the client is back
    on a recurring plan within 90 days (shown as back within 30, 60 or 90); counted as churn in the
    cancellation month once 90 days pass with no return; pending, and not counted, until then.
-5. The client has a later active recurring booking ("came back"): out.
+5. The client has a recurring visit within 90 days of cancelling: out. If Launch27's cancellation
+   type says they cancelled this and all future recurring bookings (`seriesCancelPattern`), it is
+   **temporary churn** (shown beside the rate, not in it); a cancellation of one booking is a
+   skipped or moved visit. Where Launch27 gives no type, more than 60 days between cleans stands
+   in for it. No recurring visit within 90 days is **permanent churn**, whichever was cancelled;
+   the tile says how many were counted after a one-visit cancellation. A cancellation
+   inside the last 90 days counts now and is marked provisional; it drops out if the client returns.
 6. A second event for the same client in the month: out.
+
+A **prepaid plan that runs out** with no renewal is also an event: dated the client's last prepaid
+visit, with the same 90-day return test (a renewal or a move to pay-as-you-go within 60 days is not
+an event).
+
+**By plan type.** The churn tile's details split the same events and base into **Prepaid** (the
+Launch27 frequency name contains "prepaid") and **Pay-as-you-go** (every other recurring frequency),
+with the blended row beside them. A churned client is counted under the plan of the booking that
+ended; the starting count under the client's first recurring visit in the period. Clients on both
+kinds of plan in the period, and churned clients not in the starting count, are listed as warnings.
+The windows are `temporaryReturnDays` (90) and `temporaryGapDays` (60) in `KPI_RULES`.
 
 Test and institutional clients are also left out of the base. The event is dated by the
 cancellation date, and the last cleaner is the one on the client's last completed visit.

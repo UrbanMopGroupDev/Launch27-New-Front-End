@@ -34,11 +34,15 @@ export const KPI_RULES = {
     { key: 'temporary', label: 'Temporary (travel, hold, renovation, Airbnb, postpartum)', pattern: /travel|vacation|out of (town|the country)|snowbird|on hold|\bhold\b|pause|renovat|air\s?bnb|post\s?partum/i },
     { key: 'admin_error', label: 'Admin error', pattern: /admin(istrative|istration)? error|duplicate|by mistake|in error/i },
   ],
-  // "Came back": a later active recurring booking. null = any time after the cancellation;
-  // a number limits it to that many days.
-  returnWindowDays: null,
-  // Temporary cancellations: back within this many days = not churn; no return by then = churn.
+  // The return window. Back on a recurring visit within this many days of cancelling (or of the
+  // last prepaid visit) = not permanent churn; no return by then = permanent churn.
   temporaryReturnDays: 90,
+  // Temporary churn = back inside the return window after more than this many days between
+  // cleans. A shorter gap is a skipped or moved visit, not churn of either kind.
+  temporaryGapDays: 60,
+  // Launch27's cancellation type says whether the client cancelled this booking only or this
+  // and all future recurring bookings. A type matching this pattern is the whole plan.
+  seriesCancelPattern: /future|all|recurring|series/i,
   returnBuckets: [30, 60, 90],
   churnBands: [
     { max: 7, label: 'Excellent', tone: 'good' },
