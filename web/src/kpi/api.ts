@@ -19,6 +19,8 @@ export interface Tile {
   status: { label: string; tone: Tone } | null;
   badges: { tone: Tone; text: string }[];
   details: { label: string; value: string; drill?: string }[];
+  segments?: { key: string; label: string; den: number; temporary: number; permanent: number; provisional: number; value: number | null }[];
+  segment_notes?: string[];
   breakdown?: { label: string; n: number; kind: 'company' | 'client' | 'unclassified'; group: string }[];
   weeks?: { from: string; to: string; value: number | null; num: number; den: number }[];
   sources: { key: string; label: string; refreshed_at: string | null; state: 'ok' | 'stale' | 'missing' }[];
