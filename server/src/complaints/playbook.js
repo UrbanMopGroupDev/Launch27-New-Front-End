@@ -25,16 +25,51 @@ function topRung(rs) {
   return best || (rs.some((r) => r.action === 'damage_reimbursement') ? 'damage' : 'L0');
 }
 
+const ids = (list) => list.map((c) => c.id);
+const sum = (list) => list.reduce((s, c) => s + c.cost, 0);
+
+// Why a case has no saved/lost verdict. Every rate is "x of decided"; these are the rest.
+export const EXCLUDED_LABEL = {
+  one_time: 'one-time clients (measured on booking again instead)',
+  unmatched: 'not matched to a Launch27 client',
+  too_recent: 'not yet 60 days old',
+  no_outcome: 'no outcome recorded',
+};
+function whyExcluded(c) {
+  if (c.one_time) return 'one_time';
+  if (!c.l27_customer_id) return 'unmatched';
+  return c.age_days != null && c.age_days < 60 ? 'too_recent' : 'no_outcome';
+}
+
+// Every figure comes with the case ids behind it, so the page can open the exact list.
+// Saved / partial / lost are shares of `decided`. Average cost is given twice: over every
+// case (avg_cost) and over the same decided cases the rates use (avg_cost_decided).
 function outcomeStats(list) {
   const decided = list.filter((c) => c.outcome60 && c.outcome60 !== 'pending');
   const costs = list.map((c) => c.cost);
+  const of = (o) => decided.filter((c) => c.outcome60 === o);
+  const [saved, partial, lost] = [of('saved'), of('partial_save'), of('lost')];
+  const excluded = {};
+  for (const c of list) if (!decided.includes(c)) (excluded[whyExcluded(c)] ||= []).push(c.id);
   return {
     n: list.length,
+    ids: ids(list),
     decided: decided.length,
-    saved: share(decided.filter((c) => c.outcome60 === 'saved').length, decided.length),
-    partial: share(decided.filter((c) => c.outcome60 === 'partial_save').length, decided.length),
-    lost: share(decided.filter((c) => c.outcome60 === 'lost').length, decided.length),
-    avg_cost: list.length ? r2(costs.reduce((s, x) => s + x, 0) / list.length) : null,
+    decided_ids: ids(decided),
+    saved: share(saved.length, decided.length),
+    saved_n: saved.length,
+    saved_ids: ids(saved),
+    partial: share(partial.length, decided.length),
+    partial_n: partial.length,
+    partial_ids: ids(partial),
+    lost: share(lost.length, decided.length),
+    lost_n: lost.length,
+    lost_ids: ids(lost),
+    excluded_n: list.length - decided.length,
+    excluded,
+    total_cost: r2(sum(list)),
+    avg_cost: list.length ? r2(sum(list) / list.length) : null,
+    avg_cost_decided: decided.length ? r2(sum(decided) / decided.length) : null,
     median_cost: r2(median(costs)),
     confidence: confidence(decided.length),
     one_time: oneTimeStats(list),
@@ -46,11 +81,22 @@ function oneTimeStats(list) {
   const ot = list.filter((c) => c.one_time);
   const d120 = ot.filter((c) => c.outcome120 && c.outcome120 !== 'pending');
   const d90 = ot.filter((c) => c.outcome90 && c.outcome90 !== 'pending');
+  const r90 = d90.filter((c) => c.outcome90 === 'rebooked');
+  const r120 = d120.filter((c) => c.outcome120 === 'rebooked');
   return {
     n: ot.length,
+    ids: ids(ot),
     decided: d120.length,
-    rebooked_90: share(d90.filter((c) => c.outcome90 === 'rebooked').length, d90.length),
-    rebooked_120: share(d120.filter((c) => c.outcome120 === 'rebooked').length, d120.length),
+    decided_ids: ids(d120),
+    decided_90: d90.length,
+    decided_90_ids: ids(d90),
+    rebooked_90: share(r90.length, d90.length),
+    rebooked_90_n: r90.length,
+    rebooked_90_ids: ids(r90),
+    rebooked_120: share(r120.length, d120.length),
+    rebooked_120_n: r120.length,
+    rebooked_120_ids: ids(r120),
+    too_early_ids: ids(ot.filter((c) => !d120.includes(c))),
     confidence: confidence(d120.length),
   };
 }
@@ -83,6 +129,7 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, visits = []
       outcome90: (O.get(id) || []).find((o) => o.day === 90)?.outcome || null,
       outcome120: (O.get(id) || []).find((o) => o.day === 120)?.outcome || null,
       one_time: !!c.one_time,
+      age_days: c.opened_at ? Math.floor((Date.parse(today) - Date.parse(c.opened_at)) / 86_400_000) : null,
       reclean: (R.get(id) || []).some((r) => /^reclean/.test(r.action)),
       refund: (R.get(id) || []).some((r) => r.action === 'refund'),
     };
@@ -101,23 +148,21 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, visits = []
       for (const c of list) rungCounts[c.rung] = (rungCounts[c.rung] || 0) + 1;
       const typical = Object.entries(rungCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
       const byRung = Object.entries(rungCounts).map(([rung, n]) => ({ rung, name: rungName(rung), ...outcomeStats(list.filter((c) => c.rung === rung)), n }));
-      const decidedRungs = byRung.filter((b) => b.decided >= 3 && b.saved != null);
-      // "What actually kept clients at what cost": the cheapest rung whose save rate is within
-      // 10 points of the best rung's, among rungs with at least 3 decided cases.
-      const best = decidedRungs.reduce((m, b) => Math.max(m, b.saved), 0);
-      const cheapestGood = decidedRungs.filter((b) => b.saved >= best - 0.1).sort((a, b) => (a.avg_cost ?? 0) - (b.avg_cost ?? 0))[0] || null;
+      const cheapest = cheapestThatWorks(byRung, typical);
       return {
         key,
         label: categoryLabel(key),
         n: list.length,
         share: share(list.length, rows.length),
+        total_n: rows.length,
         hard_routed: list.filter((c) => c.hard_route).length,
+        hard_routed_ids: ids(list.filter((c) => c.hard_route)),
         typical_rung: typical,
         typical_name: typical ? rungName(typical) : null,
         tones: Object.fromEntries(['mild', 'frustrated', 'angry', 'threat_leave', 'threat_review'].map((t) => [t, list.filter((c) => c.tone === t).length])),
         ...outcomeStats(list),
         by_rung: byRung.sort((a, b) => rungIndex(a.rung) - rungIndex(b.rung)),
-        cheapest_that_works: cheapestGood ? { rung: cheapestGood.rung, name: rungName(cheapestGood.rung), saved: cheapestGood.saved, avg_cost: cheapestGood.avg_cost, n: cheapestGood.decided } : null,
+        cheapest_that_works: cheapest,
       };
     })
     .sort((a, b) => b.n - a.n);
@@ -155,14 +200,15 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, visits = []
   const months = new Map();
   for (const v of visits) {
     const m = v.date.slice(0, 7);
-    if (!months.has(m)) months.set(m, { month: m, revenue: 0, cost: 0, refunds: 0, credits: 0, recleans: 0, cases: 0 });
+    if (!months.has(m)) months.set(m, { month: m, revenue: 0, cost: 0, refunds: 0, credits: 0, recleans: 0, cases: 0, case_ids: [] });
     months.get(m).revenue += v.revenue || 0;
   }
   for (const c of rows) {
     const m = new Date(c.opened_at).toISOString().slice(0, 7);
-    if (!months.has(m)) months.set(m, { month: m, revenue: 0, cost: 0, refunds: 0, credits: 0, recleans: 0, cases: 0 });
+    if (!months.has(m)) months.set(m, { month: m, revenue: 0, cost: 0, refunds: 0, credits: 0, recleans: 0, cases: 0, case_ids: [] });
     const x = months.get(m);
     x.cases++;
+    x.case_ids.push(c.id);
     x.refunds += c.costBy.refund;
     x.credits += c.costBy.credit;
     x.recleans += c.costBy.reclean;
@@ -205,7 +251,7 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, visits = []
 
   return {
     window: { from, to },
-    totals: { cases: n, hard_routed: rows.filter((c) => c.hard_route).length, by_source: countBy(rows, 'source'), total_cost: r2(rows.reduce((s, c) => s + c.cost, 0)), ...outcomeStats(rows) },
+    totals: { cases: n, hard_routed: rows.filter((c) => c.hard_route).length, hard_routed_ids: ids(rows.filter((c) => c.hard_route)), by_source: countBy(rows, 'source'), total_cost: r2(rows.reduce((s, c) => s + c.cost, 0)), ...outcomeStats(rows) },
     taxonomy,
     ladder,
     reclean_vs_refund: recleanVsRefund,
@@ -216,11 +262,37 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, visits = []
     },
     like_for_like: likeForLike,
     root_causes: rootCauses,
-    hard_routes: Object.entries(HARD_ROUTES).map(([key, label]) => ({ key, label, n: rows.filter((c) => c.hard_route === key).length })),
+    hard_routes: Object.entries(HARD_ROUTES).map(([key, label]) => ({ key, label, n: rows.filter((c) => c.hard_route === key).length, ids: ids(rows.filter((c) => c.hard_route === key)) })),
     response: { first_response_median_hours: r2(median(responseHours)), with_response_time: responseHours.length, decided_by: decidedBy },
     baseline,
     gaps,
     thin_threshold: THIN,
+    excluded_labels: EXCLUDED_LABEL,
+  };
+}
+
+// "Cheapest that works" always answers, and says how much to trust the answer.
+//   compared:    the cheapest response whose save rate is within 10 points of the best one,
+//                among responses with at least 3 known outcomes
+//   few:         fewer than 3 known outcomes anywhere: the best-saving response we have seen
+//   no_outcomes: nothing decided yet: only what we usually did
+// The grade here is by number of known outcomes (30+ High, 10-29 Medium, under 10 Low).
+function cheapestThatWorks(byRung, typical) {
+  const withOutcome = byRung.filter((b) => b.decided >= 1 && b.saved != null);
+  const solid = withOutcome.filter((b) => b.decided >= 3);
+  const pool = solid.length ? solid : withOutcome;
+  if (!pool.length) {
+    const b = byRung.find((x) => x.rung === typical);
+    if (!b) return null;
+    return { rung: b.rung, name: b.name, saved: null, saved_n: 0, avg_cost: b.avg_cost, n: 0, cases: b.n, ids: b.ids, basis: 'no_outcomes', grade: 'Low', reason: `no outcomes yet: this is only what we usually did (${b.n} ${b.n === 1 ? 'case' : 'cases'})` };
+  }
+  const best = pool.reduce((m, b) => Math.max(m, b.saved), 0);
+  const b = pool.filter((x) => x.saved >= best - 0.1).sort((x, y) => (x.avg_cost ?? 0) - (y.avg_cost ?? 0))[0];
+  return {
+    rung: b.rung, name: b.name, saved: b.saved, saved_n: b.saved_n, avg_cost: b.avg_cost, n: b.decided, cases: b.n, ids: b.decided_ids,
+    basis: solid.length ? 'compared' : 'few',
+    grade: b.decided >= 30 ? 'High' : b.decided >= THIN ? 'Medium' : 'Low',
+    reason: `${b.decided} ${b.decided === 1 ? 'case' : 'cases'} with a known outcome, ${b.saved_n} saved`,
   };
 }
 
@@ -257,7 +329,9 @@ function rootCauseTable(visits, cases, from, to) {
       move: !!v.move,
     });
   }
-  const complained = new Set(cases.map((c) => Number(c.l27_booking_id)).filter(Boolean));
+  const complained = new Map();
+  for (const c of cases) if (Number(c.l27_booking_id)) complained.set(Number(c.l27_booking_id), [...(complained.get(Number(c.l27_booking_id)) || []), c.id]);
+  const caseIds = (vs) => vs.flatMap((v) => complained.get(v.id) || []);
   const labels = {
     first_three: "Client's first 3 cleans",
     cleaner_changed: 'Different cleaner from last visit',
@@ -277,11 +351,12 @@ function rootCauseTable(visits, cases, from, to) {
     base_rate_per_100: Math.round(base * 10000) / 100,
     visits: all,
     linked_complaints: allComplaints,
+    linked_ids: caseIds(inWindow),
     rows: Object.entries(labels).map(([k, label]) => {
       const seg = inWindow.filter((v) => feat.get(v.id)?.[k]);
       const c = seg.filter((v) => complained.has(v.id)).length;
       const rate = seg.length ? c / seg.length : null;
-      return { key: k, label, visits: seg.length, complaints: c, rate_per_100: rate == null ? null : Math.round(rate * 10000) / 100, vs_base: rate != null && base ? Math.round((rate / base) * 100) / 100 : null, confidence: confidence(c) };
+      return { key: k, label, visits: seg.length, complaints: c, case_ids: caseIds(seg), rate_per_100: rate == null ? null : Math.round(rate * 10000) / 100, vs_base: rate != null && base ? Math.round((rate / base) * 100) / 100 : null, confidence: confidence(c) };
     }),
   };
 }
@@ -327,8 +402,8 @@ function likeForLikeCompare(rows) {
   const out = {
     groups_compared: matched.length,
     matched_pairs: pairs,
-    reclean: pairs ? { saved: Math.round((rec / w) * 1000) / 1000, avg_cost: r2(recCost / w), n: matched.reduce((s, g) => s + g.reclean.length, 0) } : null,
-    refund: pairs ? { saved: Math.round((ref / w) * 1000) / 1000, avg_cost: r2(refCost / w), n: matched.reduce((s, g) => s + g.refund.length, 0) } : null,
+    reclean: pairs ? { saved: Math.round((rec / w) * 1000) / 1000, avg_cost: r2(recCost / w), n: matched.reduce((s, g) => s + g.reclean.length, 0), ids: matched.flatMap((g) => ids(g.reclean)) } : null,
+    refund: pairs ? { saved: Math.round((ref / w) * 1000) / 1000, avg_cost: r2(refCost / w), n: matched.reduce((s, g) => s + g.refund.length, 0), ids: matched.flatMap((g) => ids(g.refund)) } : null,
     confidence: confidence(pairs),
     verdict: 'Not enough comparable cases yet: no group of similar complaints has both a reclean and a refund with a known outcome.',
   };
