@@ -51,9 +51,12 @@ Churn rules, in the order they are applied to each cancellation in the month:
    Temporary reasons (travel, hold/pause, renovation, Airbnb, postpartum): out if the client is back
    on a recurring plan within 90 days (shown as back within 30, 60 or 90); counted as churn in the
    cancellation month once 90 days pass with no return; pending, and not counted, until then.
-5. The client has a recurring visit within 90 days of cancelling: out. If more than 60 days passed
-   between cleans it is **temporary churn** (shown beside the rate, not in it); a shorter gap is a
-   skipped or moved visit. No recurring visit within 90 days is **permanent churn**. A cancellation
+5. The client has a recurring visit within 90 days of cancelling: out. If Launch27's cancellation
+   type says they cancelled this and all future recurring bookings (`seriesCancelPattern`), it is
+   **temporary churn** (shown beside the rate, not in it); a cancellation of one booking is a
+   skipped or moved visit. Where Launch27 gives no type, more than 60 days between cleans stands
+   in for it. No recurring visit within 90 days is **permanent churn**, whichever was cancelled;
+   the tile says how many were counted after a one-visit cancellation. A cancellation
    inside the last 90 days counts now and is marked provisional; it drops out if the client returns.
 6. A second event for the same client in the month: out.
 

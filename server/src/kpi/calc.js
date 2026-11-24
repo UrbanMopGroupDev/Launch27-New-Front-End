@@ -154,6 +154,19 @@ function returnAfter(ix, customerId, on, rules) {
   const days = Math.round(daysApart(next.date, on));
   return { kind: gap != null && gap > rules.temporaryGapDays ? 'temporary' : 'continued', days, gap };
 }
+// 'series' = Launch27 says this and all future recurring bookings were cancelled; 'single' = this
+// booking only; null = Launch27 gave no type (older bookings). Any booking the client cancelled
+// on the same day decides it, since cancelling a plan cancels several bookings at once.
+function cancelScope(ix, b, rules) {
+  const day = dayOf(b.cancellation.at);
+  const types = (ix.byCustomer.get(b.customer_id) || []).filter((x) => x.cancellation && dayOf(x.cancellation.at) === day).map((x) => x.cancellation.type).filter(Boolean);
+  if (!types.length) return null;
+  return types.some((t) => rules.seriesCancelPattern.test(t)) ? 'series' : 'single';
+}
+const SCOPE_LABEL = { series: 'All future visits', single: 'This visit only' };
+// Came back inside the window: temporary churn when the whole plan was cancelled (or, with no
+// type from Launch27, when more than temporaryGapDays passed between cleans); otherwise a skip.
+const wasTemporary = (scope, back) => back.kind !== 'none' && (scope === 'series' || (scope == null && back.kind === 'temporary'));
 // Prepaid plans that ran out: a client's active prepaid visit with no recurring visit after it
 // inside temporaryGapDays. Indexed once per dataset by the month of that last visit.
 function prepaidEnds(ix, rules) {
@@ -201,7 +214,8 @@ export function churnMonth(ix, month, today, rules = KPI_RULES, win = null) {
   };
   const events = cancels.map((b) => {
     const c = b.cancellation;
-    const row = { segment: isRecurring(b.frequency, rules) ? SEGMENT_LABEL[churnSegment(b.frequency)] : '', booking_id: b.id, customer_id: b.customer_id, customer: b.customer, cancelled_on: dayOf(c.at), service_date: b.date, frequency: b.frequency, reason: c.reason || '', cancelled_by: c.by === 'staff' ? `Staff${c.by_name ? ` (${c.by_name})` : ''}` : 'Client', last_cleaner: lastCleaner(ix, b), over_cancel: isOverCancel(c, rules) };
+    const scope = cancelScope(ix, b, rules);
+    const row = { scope: SCOPE_LABEL[scope] || '', segment: isRecurring(b.frequency, rules) ? SEGMENT_LABEL[churnSegment(b.frequency)] : '', booking_id: b.id, customer_id: b.customer_id, customer: b.customer, cancelled_on: dayOf(c.at), service_date: b.date, frequency: b.frequency, reason: c.reason || '', cancelled_by: c.by === 'staff' ? `Staff${c.by_name ? ` (${c.by_name})` : ''}` : 'Client', last_cleaner: lastCleaner(ix, b), over_cancel: isOverCancel(c, rules) };
     const cat = reasonCategory(c.reason, rules);
     let outcome = null;
     if (isTest(b.customer, c.reason, rules)) outcome = 'Excluded: test entry';
@@ -214,20 +228,21 @@ export function churnMonth(ix, month, today, rules = KPI_RULES, win = null) {
       const back = returnAfter(ix, b.customer_id, on, rules);
       if (back.kind !== 'none') {
         outcome = `Excluded: temporary, back within ${rules.returnBuckets.find((d) => back.days <= d)} days`;
-        if (back.kind === 'temporary') temporary.set(b.customer_id, churnSegment(b.frequency));
+        if (wasTemporary(scope, back)) temporary.set(b.customer_id, churnSegment(b.frequency));
       } else if (today < addDays(on, rules.temporaryReturnDays)) outcome = `Pending: temporary, inside the ${rules.temporaryReturnDays}-day return window`;
       else if (counted.has(b.customer_id)) outcome = 'Excluded: second event this month';
       else row.note = `temporary, no return within ${rules.temporaryReturnDays} days`;
     } else if (cat) outcome = `Excluded: ${cat.label.toLowerCase()}`;
     else {
       const back = returnAfter(ix, b.customer_id, dayOf(c.at), rules);
-      if (back.kind === 'temporary') {
-        outcome = `Excluded: temporary churn, came back after ${back.days} days (${back.gap} days between cleans)`;
+      if (wasTemporary(scope, back)) {
+        outcome = `Excluded: temporary churn, came back after ${back.days} days (${scope === 'series' ? 'cancelled all future visits' : `${back.gap} days between cleans`})`;
         temporary.set(b.customer_id, churnSegment(b.frequency));
-      } else if (back.kind === 'continued') outcome = 'Excluded: came back (skipped or moved visit, recurring visits continued)';
+      } else if (back.kind !== 'none') outcome = 'Excluded: came back (skipped or moved visit, recurring visits continued)';
       else if (counted.has(b.customer_id)) outcome = 'Excluded: second event this month';
     }
     if (!outcome) mark(b, dayOf(c.at));
+    if (!outcome && scope === 'single') row.note = row.note || 'cancelled one visit, then no recurring visit after';
     return { ...row, counted: !outcome, outcome: outcome || (row.note ? `Counted as churn (${row.note})` : 'Counted as churn') };
   });
 
@@ -282,7 +297,7 @@ export function churnMonth(ix, month, today, rules = KPI_RULES, win = null) {
     off_base: [...counted].filter((id) => !base.has(id)).length,
     moved: [...counted].filter((id) => base.has(id) && base.get(id).seg !== segOf.get(id)).length,
   };
-  return { month, state: den ? 'ok' : 'no_data', value, num, den, segments, unclear, plan_ends: events.filter((e) => e.completion && e.counted).length, provisional: provisional.size, temporary: temporary.size, band: value == null ? null : churnBand(value, rules), events, base: [...base.values()], pending: events.filter((e) => e.outcome.startsWith('Pending')).length, over_cancel: events.filter((e) => e.over_cancel && !e.outcome.includes('test')) };
+  return { month, state: den ? 'ok' : 'no_data', value, num, den, segments, unclear, plan_ends: events.filter((e) => e.completion && e.counted).length, single_visit: events.filter((e) => e.counted && e.scope === SCOPE_LABEL.single).length, provisional: provisional.size, temporary: temporary.size, band: value == null ? null : churnBand(value, rules), events, base: [...base.values()], pending: events.filter((e) => e.outcome.startsWith('Pending')).length, over_cancel: events.filter((e) => e.over_cancel && !e.outcome.includes('test')) };
 }
 
 // ---------- 3. Service fulfilment ----------
@@ -440,7 +455,7 @@ export function fulfilmentStatus(pct, rules = KPI_RULES) {
 // ---------- scorecard ----------
 const FORMULAS = (rules) => ({
   ocr: `Operational delivery cost ÷ revenue for the month, from QuickBooks Online.\nIncluded: ${Object.values(rules.ocrIncluded).join('; ')}.\nExcluded: ${Object.values(rules.ocrExcluded).join('; ')}.\nSyft's reported figure is shown beside it; ⚠ when the two differ by more than ${rules.ocrFlagPp.toFixed(1)} percentage points. Provisional until the ${rules.closeDay}th of the following month, then Final. Change is in percentage points.\nStatus against the ${rules.ocrTarget[0]}–${rules.ocrTarget[1]}% target (lower is better): On track at or under ${rules.ocrTarget[1]}%, Warning within 5% above it, Off track beyond that.`,
-  churn: `Permanent churn events in the calendar month ÷ active recurring clients at the start of the month.\nRecurring: frequency contains weekly, biweekly, triweekly, monthly or prepaid (not one-time).\nLeft out of both sides: institutional clients and test entries.\nPermanent churn: the client cancels and has no recurring visit in the ${rules.temporaryReturnDays} days after. A cancellation inside the last ${rules.temporaryReturnDays} days counts now and is marked provisional; it drops out if the client returns.\nTemporary churn (shown, not in the rate): back within ${rules.temporaryReturnDays} days after more than ${rules.temporaryGapDays} days between cleans. A shorter gap is a skipped or moved visit and is neither.\nPrepaid plan that runs out with no renewal: churn dated the last prepaid visit, with the same return test.\nNot counted as churn: transfers to LuxoClean and admin errors.\nCancellations with a temporary reason (travel, hold/pause, renovation, Airbnb, postpartum) are not counted while still inside the ${rules.temporaryReturnDays}-day window, so recent months can rise. One event per client per month, dated by the cancellation date.\nPrepaid = the Launch27 frequency name contains 'prepaid'; everything else recurring is pay-as-you-go. A churned client is counted under the plan of the booking that ended; the starting count under the client's first recurring visit in the period.\nBands: ≤7% Excellent · 7–10% Healthy · 10–12% Elevated · over 12% High. Target: under ${rules.churnTarget}%. Last 12 months is the 12 months pooled (events ÷ the sum of monthly bases).\nThe CS dashboard uses a 30-day trailing window, so expect a 1–3 event difference.`,
+  churn: `Permanent churn events in the calendar month ÷ active recurring clients at the start of the month.\nRecurring: frequency contains weekly, biweekly, triweekly, monthly or prepaid (not one-time).\nLeft out of both sides: institutional clients and test entries.\nPermanent churn: the client cancels and has no recurring visit in the ${rules.temporaryReturnDays} days after. A cancellation inside the last ${rules.temporaryReturnDays} days counts now and is marked provisional; it drops out if the client returns.\nTemporary churn (shown, not in the rate): the client cancelled this and all future recurring bookings in Launch27, then came back within ${rules.temporaryReturnDays} days. A cancellation of one booking followed by a return is a skipped or moved visit and is neither. Where Launch27 gives no cancellation type, more than ${rules.temporaryGapDays} days between cleans stands in for it.\nPrepaid plan that runs out with no renewal: churn dated the last prepaid visit, with the same return test.\nNot counted as churn: transfers to LuxoClean and admin errors.\nCancellations with a temporary reason (travel, hold/pause, renovation, Airbnb, postpartum) are not counted while still inside the ${rules.temporaryReturnDays}-day window, so recent months can rise. One event per client per month, dated by the cancellation date.\nPrepaid = the Launch27 frequency name contains 'prepaid'; everything else recurring is pay-as-you-go. A churned client is counted under the plan of the booking that ended; the starting count under the client's first recurring visit in the period.\nBands: ≤7% Excellent · 7–10% Healthy · 10–12% Elevated · over 12% High. Target: under ${rules.churnTarget}%. Last 12 months is the 12 months pooled (events ÷ the sum of monthly bases).\nThe CS dashboard uses a 30-day trailing window, so expect a 1–3 event difference.`,
   fulfilment: `Bookings completed ÷ bookings that were on the books ${rules.snapshotHours} hours before the visit: the ones we could have fulfilled.\nThe all-scheduled figure is the same ratio over every booking for the period, including those cancelled earlier than ${rules.snapshotHours} hours ahead. Bookings made inside ${rules.snapshotHours} hours are listed separately.\nIf we arrived and did the clean, it is fulfilled, even when late: arrivals more than ${rules.lateMinutes} minutes after the scheduled start (Launch27 check-in) are counted separately as late.\nStatus against the ${rules.fulfilmentTarget}% target: On track at or above it, Warning within 5% below, Off track beyond that.\nAnything not completed is not fulfilled, whoever caused it. The breakdown splits it into ours (cleaner no-show, cleaner cancelled, unable to staff, we rescheduled, no check-in), client-related (the client cancelled, or staff entered a client reason) and unclear (a staff cancellation with no recognizable reason).`,
   complaints: `Complaints ÷ completed visits × 100.\nA complaint is a Kustomer complaint object or a Launch27 bottom ("bad") rating. The same visit, or the same client within ${rules.dedupeDays} days, counts once.\nSaved: the client still has a booking ${rules.savedDays}+ days after the complaint; shown once ${rules.savedDays} days have passed.`,
   reviews: 'New Google reviews in the month, with the average rating for the month and all time, and reviews per 100 completed visits (Launch27).',
@@ -562,6 +577,8 @@ export function scorecard(ix, { brand, month, mode = 'month', range = null, now,
       tile.segments = [segRow('prepaid', 'Prepaid'), segRow('payg', 'Pay-as-you-go'), segRow(null, 'All recurring')];
       const ends = sumP((p) => p.plan_ends);
       tile.details.push({ label: 'Prepaid plans ended, not renewed', value: ends ? `${ends} · without them ${(((cur.num - ends) / cur.den) * 100).toFixed(1)}%` : '0' });
+      const faded = sumP((p) => p.single_visit);
+      if (faded) tile.details.push({ label: 'Counted after a one-visit cancellation', value: `${faded} (no recurring visit since)` });
       const unclear = ['mixed', 'off_base', 'moved'].map((k) => sumP((p) => p.unclear[k]));
       tile.segment_notes = [
         unclear[0] ? `${unclear[0]} client${unclear[0] === 1 ? '' : 's'} on both a prepaid and a pay-as-you-go plan in the period (kept under their first visit's plan)` : null,
@@ -652,7 +669,7 @@ export function drill(ix, { kpi, month, mode = 'month', range = null, today, rul
     return { title: `${KPI_LABELS.ocr} · ${period}`, tabs: rows.length ? tabs : tabs.reverse() };
   }
   if (kpi === 'churn' || kpi === 'over_cancel') {
-    const eventCols = [col('cancelled_on', 'Cancelled'), col('customer', 'Client'), col('outcome', 'Result'), col('segment', 'Plan'), col('reason', 'Reason'), col('frequency', 'Frequency'), col('cancelled_by', 'Cancelled by'), col('last_cleaner', 'Last cleaner')];
+    const eventCols = [col('cancelled_on', 'Cancelled'), col('customer', 'Client'), col('outcome', 'Result'), col('segment', 'Plan'), col('scope', 'Cancelled'), col('reason', 'Reason'), col('frequency', 'Frequency'), col('cancelled_by', 'Cancelled by'), col('last_cleaner', 'Last cleaner')];
     const flags = { key: 'over_cancel', label: 'Admin over-cancellation flags', columns: eventCols, rows: all((p) => p.over_cancel) };
     if (kpi === 'over_cancel') return { title: `Admin over-cancellation flags · ${period}`, tabs: [flags] };
     return { title: `${KPI_LABELS.churn} · ${period}`, tabs: [{ key: 'events', label: 'Cancellations', columns: eventCols, rows: all((p) => p.events) }, { key: 'base', label: 'Recurring base', columns: [col('month', 'Month'), col('customer', 'Client'), col('segment', 'Plan'), col('frequency', 'Frequency'), col('first_visit', 'First visit in month'), col('outcome', 'Result')], rows: all((p) => p.base.map((b) => ({ ...b, month: p.month, counted: true, outcome: `${b.churned ? 'Churned this month' : 'Active'}${b.mixed ? ' · on both plans' : ''}` }))) }, flags] };

@@ -186,6 +186,27 @@ describe('churn', () => {
     assert.match(outcome(r, 'Skipped One'), /skipped or moved visit/);
     assert.deepEqual(r.segments.payg, { den: 4, permanent: 1, provisional: 0, temporary: 1 });
   });
+  test("Launch27's cancellation type separates temporary churn from a skipped visit; the 90-day test decides permanent", () => {
+    const ALL = 'This booking and all future recurring bookings';
+    const ONE = 'This booking only';
+    const typed = (date, reason, type) => ({ ...cx(date, reason), type });
+    const r = churnMonth(ix([
+      b(50, 'Steady', '2026-06-02'),
+      // Cancelled the plan, back three weeks later: temporary churn even with a short gap.
+      b(1, 'Plan Then Back', '2026-06-01'), b(1, 'Plan Then Back', '2026-06-15', { cancellation: typed('2026-06-10', 'Too expensive', ALL) }), b(1, 'Plan Then Back', '2026-06-29', { cancellation: typed('2026-06-10', 'Too expensive', null) }), b(1, 'Plan Then Back', '2026-07-01'),
+      // Cancelled one visit, back after a long gap: a skipped visit, not temporary churn.
+      b(2, 'One Visit Then Back', '2026-06-01'), b(2, 'One Visit Then Back', '2026-06-15', { cancellation: typed('2026-06-10', 'Away', ONE) }), b(2, 'One Visit Then Back', '2026-08-20'),
+      b(3, 'Plan Gone', '2026-06-01'), b(3, 'Plan Gone', '2026-06-15', { cancellation: typed('2026-06-10', 'Moving', ALL) }),
+      b(4, 'One Visit Then Gone', '2026-06-01'), b(4, 'One Visit Then Gone', '2026-06-15', { cancellation: typed('2026-06-10', 'Busy that day', ONE) }),
+    ]), '2026-06', TODAY);
+    assert.match(outcome(r, 'Plan Then Back'), /^Excluded: temporary churn, came back after 21 days \(cancelled all future visits\)/);
+    assert.match(outcome(r, 'One Visit Then Back'), /skipped or moved visit/);
+    assert.equal(outcome(r, 'Plan Gone'), 'Counted as churn');
+    assert.equal(outcome(r, 'One Visit Then Gone'), 'Counted as churn (cancelled one visit, then no recurring visit after)');
+    assert.deepEqual(r.segments.payg, { den: 5, permanent: 2, provisional: 0, temporary: 1 });
+    assert.equal(r.single_visit, 1);
+    assert.deepEqual(r.events.find((e) => e.customer === 'Plan Gone').scope, 'All future visits');
+  });
   test('a prepaid plan that runs out with no renewal is churn, dated the last prepaid visit', () => {
     const P = { frequency: 'Prepaid Biweekly' };
     const june = churnMonth(ix([

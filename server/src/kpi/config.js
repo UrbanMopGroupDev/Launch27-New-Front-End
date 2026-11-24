@@ -40,6 +40,9 @@ export const KPI_RULES = {
   // Temporary churn = back inside the return window after more than this many days between
   // cleans. A shorter gap is a skipped or moved visit, not churn of either kind.
   temporaryGapDays: 60,
+  // Launch27's cancellation type says whether the client cancelled this booking only or this
+  // and all future recurring bookings. A type matching this pattern is the whole plan.
+  seriesCancelPattern: /future|all|recurring|series/i,
   returnBuckets: [30, 60, 90],
   churnBands: [
     { max: 7, label: 'Excellent', tone: 'good' },
