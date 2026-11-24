@@ -41,6 +41,45 @@ Scope: **Residential only** (`brand = 'residential'`). Read-only on every source
 
 ---
 
+## Phase 1.5: validation release
+
+Phase 2 waits until the taxonomy and playbook are signed off. Phase 1.5 makes the numbers
+checkable. It ships in slices; this section is updated as each one lands.
+
+### Release 1: numbers you can trace (live in this version)
+
+- **Who can see it.** Everyone with a staff login can read the playbook, cases and clients and
+  check cases. Starting an update and changing rules stay admin-only.
+- **Drill-down.** Every case count on the Playbook tab opens the exact list of cases behind it
+  (client, booking, cleaner, category, what we did, cost, outcome, source link), with a CSV
+  download. `buildPlaybook` returns the case ids next to each figure (`ids`, `decided_ids`,
+  `saved_ids`, ...), and the page looks them up in the case list for the same dates.
+  Visit counts in "Pain points upstream" and monthly revenue come from Launch27 bookings, not
+  cases, so they are shown as plain numbers.
+- **Rates.** Saved, Partial and Lost are always shares of **decided** cases: recurring clients
+  matched in Launch27 whose complaint is at least 60 days old. Each rate shows "x of y decided".
+  Every other case is listed under **Not counted** with one reason:
+  one-time client, not matched to a Launch27 client, not yet 60 days old, or no outcome recorded.
+  Decided + not counted always equals the number of cases.
+- **Average cost** is shown twice: over every case, and over the decided cases the rates use.
+- **One-time clients** have their own table (booked again within 90 / 120 days).
+- **Cheapest that works** always answers. With 3+ known outcomes per response it is the
+  lowest-cost response within 10 points of the best save rate; with fewer it is the best seen
+  so far; with none it is only what we usually did. Each answer carries a grade by number of
+  known outcomes (30+ High, 10-29 Medium, under 10 Low) and the reason. The full confidence
+  grade (data quality as well as sample size) arrives in Release 6.
+- **Labels.** "Hard routed" is shown as "Escalated (damage / theft / safety / legal)";
+  "Share" is "% of all complaints".
+
+### Still to come
+
+2. Cost lines per case (actual vs estimated) and the escalation audit.
+3. Drivers, secondary tags, billing tag, Category x Driver view, codebook.
+4. New Check accuracy: Measure and Fix queues, field-level verdicts, evidence panel, Wilson ranges.
+5. Second reviewer and agreement.
+6. Confidence grades and sign-off.
+7. Re-classify unchecked cases and accuracy over time.
+
 ## Design (as proposed)
 
 ## 1. Where it lives

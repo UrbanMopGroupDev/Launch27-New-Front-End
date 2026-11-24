@@ -2009,6 +2009,8 @@ a.rep-factor:hover b { text-decoration: underline; }
 .cmp-quote { margin: 10px 0; padding: 8px 12px; border-left: 3px solid var(--border); background: var(--bg); white-space: pre-wrap; font-size: 14px; }
 .cmp-check-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
 .cmp-check-actions select { width: auto; }
+.cmp-nd { white-space: nowrap; }
+.rep-drill .cmp-detail { border: 1px solid var(--border); }
 .cmp-rules { border: 0; padding: 0; margin: 0; min-width: 0; }
 .cmp-rules label.cmp-slider { display: flex; flex-direction: row; gap: 12px; align-items: center; flex-wrap: wrap; text-align: left; }
 .cmp-rules label.cmp-slider input { flex: 1; min-width: 180px; width: auto; }
