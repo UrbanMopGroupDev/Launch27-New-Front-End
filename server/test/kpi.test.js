@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { indexDataset, isRecurring, isTest, isInstitutional, reasonCategory, churnBand, isOverCancel, cancellationCause, churnMonth, churnSegment, fulfilmentMonth, complaintsMonth, reviewsMonth, ocrMonth, fulfilmentRange, scorecard, drill, lastClosedMonth, sourceState, ocrStatus, fulfilmentStatus } from '../src/kpi/calc.js';
+import { indexDataset, isRecurring, isTest, isInstitutional, reasonCategory, churnBand, isOverCancel, cancellationCause, churnMonth, churnSegment, churnForSegment, fulfilmentMonth, complaintsMonth, reviewsMonth, ocrMonth, fulfilmentRange, scorecard, drill, lastClosedMonth, sourceState, ocrStatus, fulfilmentStatus } from '../src/kpi/calc.js';
 import { KPI_BRANDS, KPI_RULES } from '../src/kpi/config.js';
 import { buildSyntheticDataset } from '../src/kpi/synthetic.js';
 import { createKpi, canSeeKpi } from '../src/kpi/service.js';
@@ -228,6 +228,26 @@ describe('churn', () => {
     assert.match(oct.events.find((e) => e.customer === 'Just Ended').outcome, /prepaid plan ended, inside the 90-day return window/);
     assert.deepEqual(oct.segments.prepaid, { den: 2, permanent: 1, provisional: 1, temporary: 0 });
   });
+  test('the two plan cards: each has its own rate, events and starting clients, and they add up to the blended card', () => {
+    const data = indexDataset(buildSyntheticDataset({ today: TODAY, now: NOW, outage: null }));
+    const c = scorecard(data, { brand: KPI_BRANDS[0], month: '2026-10', now: NOW, today: TODAY });
+    const t = (k) => c.tiles.find((x) => x.kpi === k);
+    assert.deepEqual(c.tiles.map((x) => x.kpi).slice(1, 4), ['churn', 'churn_prepaid', 'churn_payg']);
+    assert.deepEqual([t('churn_prepaid').label, t('churn_payg').label], ['Prepaid churn', 'Pay-as-you-go churn']);
+    const oct = churnMonth(data, '2026-10', TODAY);
+    const pre = churnForSegment(oct, 'prepaid');
+    const payg = churnForSegment(oct, 'payg');
+    assert.deepEqual([pre.num + payg.num, pre.den + payg.den], [oct.num, oct.den]);
+    assert.equal(t('churn_prepaid').value, Math.round(pre.value * 10) / 10);
+    assert.equal(t('churn_payg').value, Math.round(payg.value * 10) / 10);
+    assert.ok(pre.events.length > 0 && pre.events.every((e) => e.segment === 'Prepaid'));
+    assert.equal(c.trends.churn_prepaid.length, c.trends.churn.length);
+    // The rows behind a plan card are that plan's only.
+    const rows = drill(data, { kpi: 'churn_payg', month: '2026-10', today: TODAY });
+    assert.match(rows.title, /^Pay-as-you-go churn/);
+    assert.ok(rows.tabs[0].rows.length > 0 && rows.tabs[0].rows.every((r) => r.segment === 'Pay-as-you-go'));
+    assert.ok(rows.tabs[1].rows.every((r) => r.segment === 'Pay-as-you-go'));
+  });
   test('at most one churn event per client per calendar month', () => {
     const r = res([b(1, 'Twice', '2026-10-06', { cancellation: cx('2026-10-03', 'Too expensive') }), b(1, 'Twice', '2026-10-21', { cancellation: cx('2026-10-19', 'Stopping after all') })]);
     assert.equal(r.num, 1);
@@ -414,7 +434,7 @@ describe('scorecard', () => {
       assert.equal(c.trends[t.kpi].length, 12);
     }
     // The same two reference lines, in the same words, on every tile.
-    assert.deepEqual(c.tiles.map((t) => t.target), ['63–68%', 'under 6.8%', '98.5% or higher', null, null, null]);
+    assert.deepEqual(c.tiles.map((t) => t.target), ['63–68%', 'under 6.8%', null, null, '98.5% or higher', null, null, null]);
     for (const t of c.tiles.filter((y) => y.kpi !== 'billing')) assert.ok(t.last12, t.kpi);
     assert.ok(!c.tiles.some((t) => t.details.some((d) => /north star|baseline|^target$/i.test(d.label))));
     assert.deepEqual([tile(c, 'billing').state, tile(c, 'billing').note, tile(c, 'billing').value], ['disabled', 'Coming later', null]);

@@ -64,7 +64,8 @@ A **prepaid plan that runs out** with no renewal is also an event: dated the cli
 visit, with the same 90-day return test (a renewal or a move to pay-as-you-go within 60 days is not
 an event).
 
-**By plan type.** The churn tile's details split the same events and base into **Prepaid** (the
+**By plan type.** Two cards sit beside the blended churn card: **Prepaid churn** and **Pay-as-you-go
+churn**, each with its own rate, change, 12-month trend and rows. The blended card's details also split the same events and base into **Prepaid** (the
 Launch27 frequency name contains "prepaid") and **Pay-as-you-go** (every other recurring frequency),
 with the blended row beside them. A churned client is counted under the plan of the booking that
 ended; the starting count under the client's first recurring visit in the period. Clients on both
