@@ -2,7 +2,7 @@
 // dev/QA-only manual Google review entry.
 import { ApiError, describeErrors } from '../api';
 
-export type Kpi = 'ocr' | 'churn' | 'fulfilment' | 'complaints' | 'reviews' | 'billing';
+export type Kpi = 'ocr' | 'churn' | 'churn_prepaid' | 'churn_payg' | 'fulfilment' | 'complaints' | 'reviews' | 'billing';
 export type Mode = 'month' | 't12' | 'range';
 export type Tone = 'good' | 'warning' | 'critical' | 'neutral';
 

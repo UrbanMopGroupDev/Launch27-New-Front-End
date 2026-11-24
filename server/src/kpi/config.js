@@ -4,13 +4,15 @@
 // Brands shown on the scorecard. To add a brand: add an entry here, give its connectors data
 // (connectors.js) and list which KPIs apply. No UI change is needed.
 export const KPI_BRANDS = [
-  { key: 'urbanmop', name: 'UrbanMop', detail: 'Ottawa Residential', locations: /^ottawa$/i, complaintBrand: 'residential', googleExport: 'google-reviews-urbanmop.json', syftReport: /(urban ?mop|um canada).*(management|monthly|syft) report/i, syftNotReport: /luxo|clean ?bee|\b(urban ?mop|um) us\b/i, syftEntity: /urban ?mop|um canada/i, syftQuery: 'from:indep.so has:attachment filename:pdf ("Management Report" OR "Management Reports" OR "Monthly Report") newer_than:1100d', syftScope: 'Whole company (UM Canada: Residential and Commercial)', kpis: ['ocr', 'churn', 'fulfilment', 'complaints', 'reviews', 'billing'] },
+  { key: 'urbanmop', name: 'UrbanMop', detail: 'Ottawa Residential', locations: /^ottawa$/i, complaintBrand: 'residential', googleExport: 'google-reviews-urbanmop.json', syftReport: /(urban ?mop|um canada).*(management|monthly|syft) report/i, syftNotReport: /luxo|clean ?bee|\b(urban ?mop|um) us\b/i, syftEntity: /urban ?mop|um canada/i, syftQuery: 'from:indep.so has:attachment filename:pdf ("Management Report" OR "Management Reports" OR "Monthly Report") newer_than:1100d', syftScope: 'Whole company (UM Canada: Residential and Commercial)', kpis: ['ocr', 'churn', 'churn_prepaid', 'churn_payg', 'fulfilment', 'complaints', 'reviews', 'billing'] },
   // { key: 'cleanbee', name: 'Clean Bee', detail: 'Spokane', kpis: ['ocr', 'churn', 'complaints', 'reviews', 'billing'] },
 ];
 
 export const KPI_LABELS = {
   ocr: 'Operational Cost Ratio',
   churn: 'Recurring client churn',
+  churn_prepaid: 'Prepaid churn',
+  churn_payg: 'Pay-as-you-go churn',
   fulfilment: 'Service fulfilment',
   complaints: 'Complaint rate',
   reviews: 'Google reviews',

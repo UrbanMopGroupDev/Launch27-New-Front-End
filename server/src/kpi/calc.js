@@ -198,6 +198,26 @@ const lastCleaner = (ix, booking) => {
  * month is returned with the rule that counted or excluded it, so the number can be audited.
  */
 export function churnMonth(ix, month, today, rules = KPI_RULES, win = null) {
+  // The blended tile, the two plan tiles and the trends all ask for the same periods: work each out once.
+  const memoKey = `${month}|${win?.from || ''}|${win?.to || ''}|${today}`;
+  ix.churnMemo = ix.churnMemo || new Map();
+  if (rules === KPI_RULES && ix.churnMemo.has(memoKey)) return ix.churnMemo.get(memoKey);
+  const out = churnCalc(ix, month, today, rules, win);
+  if (rules === KPI_RULES) ix.churnMemo.set(memoKey, out);
+  return out;
+}
+/** One plan type's share of a churn result: its own events, starting clients and rate. */
+export function churnForSegment(res, key, rules = KPI_RULES) {
+  const g = res.segments[key];
+  const label = SEGMENT_LABEL[key];
+  const value = g.den ? (g.permanent / g.den) * 100 : null;
+  const events = res.events.filter((e) => e.segment === label);
+  return { ...res, state: g.den ? 'ok' : 'no_data', value, num: g.permanent, den: g.den, band: value == null ? null : churnBand(value, rules), events, base: res.base.filter((x) => x.seg === key), over_cancel: res.over_cancel.filter((e) => e.segment === label), pending: events.filter((e) => e.outcome.startsWith('Pending')).length, temporary: g.temporary, provisional: g.provisional, plan_ends: key === 'prepaid' ? res.plan_ends : 0, segment: key };
+}
+const CHURN_SEGMENT = { churn_prepaid: 'prepaid', churn_payg: 'payg' };
+const isChurn = (kpi) => kpi === 'churn' || kpi in CHURN_SEGMENT;
+const churnFor = (kpi, res, rules) => (kpi in CHURN_SEGMENT ? churnForSegment(res, CHURN_SEGMENT[kpi], rules) : res);
+function churnCalc(ix, month, today, rules, win) {
   // `win` narrows it to exact dates (a custom range): events dated inside it ÷ clients active at its start.
   const from = win?.from || monthStart(month);
   const to = win?.to || monthEnd(month);
@@ -461,12 +481,13 @@ const FORMULAS = (rules) => ({
   reviews: 'New Google reviews in the month, with the average rating for the month and all time, and reviews per 100 completed visits (Launch27).',
   billing: 'Not built yet.',
 });
-const SOURCES_FOR = { ocr: ['qbo', 'syft'], churn: ['launch27'], fulfilment: ['launch27'], complaints: ['kustomer', 'launch27'], reviews: ['google', 'launch27'] };
-const UNIT = { ocr: 'pct', churn: 'pct', fulfilment: 'pct', complaints: 'per100', reviews: 'count' };
-const LOWER_IS_BETTER = { ocr: true, churn: true, fulfilment: false, complaints: true, reviews: false };
+const SEGMENT_FORMULA = (rules, label, rule) => `${label} only: permanent churn events ÷ ${label.toLowerCase()} clients at the start of the period.\n${rule}\nSame rules as Recurring client churn (open its "i" for the full list): permanent = no recurring visit within ${rules.temporaryReturnDays} days of cancelling; temporary churn and skipped visits are not in the rate.\nA churned client is counted under the plan of the booking that ended; the starting count under the client's first recurring visit in the period.`;
+const SOURCES_FOR = { ocr: ['qbo', 'syft'], churn: ['launch27'], churn_prepaid: ['launch27'], churn_payg: ['launch27'], fulfilment: ['launch27'], complaints: ['kustomer', 'launch27'], reviews: ['google', 'launch27'] };
+const UNIT = { ocr: 'pct', churn: 'pct', churn_prepaid: 'pct', churn_payg: 'pct', fulfilment: 'pct', complaints: 'per100', reviews: 'count' };
+const LOWER_IS_BETTER = { ocr: true, churn: true, churn_prepaid: true, churn_payg: true, fulfilment: false, complaints: true, reviews: false };
 
 const monthly = (ix, kpi, month, today, rules) =>
-  kpi === 'ocr' ? ocrMonth(ix, month, today, rules) : kpi === 'churn' ? churnMonth(ix, month, today, rules) : kpi === 'fulfilment' ? fulfilmentMonth(ix, month, today, rules) : kpi === 'complaints' ? complaintsMonth(ix, month, today, rules) : reviewsMonth(ix, month, rules);
+  kpi === 'ocr' ? ocrMonth(ix, month, today, rules) : isChurn(kpi) ? churnFor(kpi, churnMonth(ix, month, today, rules), rules) : kpi === 'fulfilment' ? fulfilmentMonth(ix, month, today, rules) : kpi === 'complaints' ? complaintsMonth(ix, month, today, rules) : reviewsMonth(ix, month, rules);
 
 /** One KPI over one month or pooled over several (trailing 12): sums of numerators ÷ sums of denominators. */
 function measure(ix, kpi, months, today, rules) {
@@ -492,7 +513,7 @@ function measure(ix, kpi, months, today, rules) {
 function ranged(ix, kpi, w, today, rules) {
   const p =
     kpi === 'ocr' ? { state: 'no_data', value: null, num: 0, den: 0, monthly_only: true }
-    : kpi === 'churn' ? churnMonth(ix, monthOf(w.from), today, rules, w)
+    : isChurn(kpi) ? churnFor(kpi, churnMonth(ix, monthOf(w.from), today, rules, w), rules)
     : kpi === 'fulfilment' ? fulfilmentRange(ix, w.from, w.to, today, rules)
     : kpi === 'complaints' ? complaintsMonth(ix, monthOf(w.from), today, rules, w)
     : reviewsMonth(ix, monthOf(w.from), rules, w);
@@ -510,7 +531,7 @@ export function scorecard(ix, { brand, month, mode = 'month', range = null, now,
   const months = monthsBetween(addMonths(month, 1 - span), month).filter((m) => m >= rules.firstMonth);
   const prevMonths = monthsBetween(addMonths(month, 1 - 2 * span), addMonths(month, -span)).filter((m) => m >= rules.firstMonth);
   const period = isRange ? (range.from === range.to ? dayLabel(range.from) : `${dayLabel(range.from)} – ${dayLabel(range.to)}`) : span === 1 ? `${monthLabel(month)}${inProgress ? ' to date' : ''}` : `${monthLabel(months[0])} – ${monthLabel(month)}`;
-  const formulas = FORMULAS(rules);
+  const formulas = { ...FORMULAS(rules), churn_prepaid: SEGMENT_FORMULA(rules, 'Prepaid', "Prepaid = the Launch27 frequency name contains 'prepaid'. A plan that runs out with no renewal counts, dated the last prepaid visit."), churn_payg: SEGMENT_FORMULA(rules, 'Pay-as-you-go', "Pay-as-you-go = every recurring frequency that is not prepaid.") };
   const tiles = brand.kpis.map((kpi) => {
     const tile = { kpi, label: KPI_LABELS[kpi], period, formula: formulas[kpi], unit: UNIT[kpi] || null, value: null, delta: null, status: null, badges: [], details: [], sources: [], refreshed_at: null, target: null, last12: null };
     if (kpi === 'billing') return { ...tile, state: 'disabled', note: 'Coming later' };
@@ -534,7 +555,7 @@ export function scorecard(ix, { brand, month, mode = 'month', range = null, now,
     }
     if (inProgress) tile.badges.push({ tone: 'neutral', text: 'Month in progress: figures to date' });
     if (cur.missing) tile.badges.push({ tone: 'warning', text: `${cur.missing} of ${months.length} months have no data` });
-    tile.details.push({ label: kpi === 'ocr' ? 'Cost ÷ revenue' : kpi === 'churn' ? 'Events ÷ clients' : kpi === 'fulfilment' ? 'Completed ÷ scheduled' : kpi === 'complaints' ? 'Complaints ÷ visits' : 'New reviews', value: kpi === 'ocr' ? `$${Math.round(cur.num).toLocaleString('en-CA')} ÷ $${Math.round(cur.den).toLocaleString('en-CA')}` : kpi === 'reviews' ? String(cur.num) : `${cur.num.toLocaleString('en-CA')} ÷ ${cur.den.toLocaleString('en-CA')}` });
+    tile.details.push({ label: kpi === 'ocr' ? 'Cost ÷ revenue' : isChurn(kpi) ? 'Events ÷ starting clients' : kpi === 'fulfilment' ? 'Completed ÷ scheduled' : kpi === 'complaints' ? 'Complaints ÷ visits' : 'New reviews', value: kpi === 'ocr' ? `$${Math.round(cur.num).toLocaleString('en-CA')} ÷ $${Math.round(cur.den).toLocaleString('en-CA')}` : kpi === 'reviews' ? String(cur.num) : `${cur.num.toLocaleString('en-CA')} ÷ ${cur.den.toLocaleString('en-CA')}` });
     const one = span === 1 ? cur : null;
     // Baseline: the same measure pooled over the 12 months ending at the selected month.
     const lastFull = inProgress || isRange ? addMonths(monthOf(today) < month ? monthOf(today) : month, month === monthOf(today) ? -1 : 0) : month;
@@ -562,6 +583,18 @@ export function scorecard(ix, { brand, month, mode = 'month', range = null, now,
         const flagged = cur.parts.filter((p) => p.flagged).length;
         if (flagged) tile.badges.push({ tone: 'warning', text: `${flagged} month${flagged === 1 ? '' : 's'} where QBO and Syft differ by over ${rules.ocrFlagPp.toFixed(1)} pp` });
       }
+    }
+    if (kpi in CHURN_SEGMENT) {
+      const band = churnBand(cur.value, rules);
+      if (isRange || inProgress) tile.badges.push({ tone: 'neutral', text: 'Monthly bands do not apply to a partial period' });
+      else tile.status = { label: band.label, tone: band.tone };
+      const sumP = (k) => cur.parts.reduce((t, p) => t + (p[k] || 0), 0);
+      // A small starting count swings the rate: say how much one client is worth.
+      if (cur.den < 100) tile.badges.push({ tone: 'neutral', text: `Small base: one client is ${(100 / cur.den).toFixed(1)} pp` });
+      tile.details.push({ label: 'Temporary churn (back within 90 days)', value: `${sumP('temporary')} (not in the rate)` });
+      tile.details.push({ label: `Provisional (inside the ${rules.temporaryReturnDays}-day window)`, value: `${sumP('provisional')} of ${cur.num}` });
+      if (kpi === 'churn_prepaid') tile.details.push({ label: 'Plans ended, not renewed', value: `${sumP('plan_ends')} of ${cur.num}` });
+      if (sumP('pending')) tile.details.push({ label: `Temporary reason, inside ${rules.temporaryReturnDays}-day window`, value: `${sumP('pending')} (not counted yet)` });
     }
     if (kpi === 'churn') {
       const band = churnBand(cur.value, rules);
@@ -642,7 +675,7 @@ export function scorecard(ix, { brand, month, mode = 'month', range = null, now,
     if (tile.state !== 'ok') continue;
     trends[tile.kpi] = trendMonths.map((m) => {
       const r = monthly(ix, tile.kpi, m, today, rules);
-      return { month: m, value: r.state === 'ok' ? round(r.value, tile.kpi === 'complaints' ? 2 : 1) : null, num: r.num, den: r.den ?? null, tone: tile.kpi === 'churn' && r.band ? r.band.tone : null, flag: tile.kpi === 'ocr' ? (r.flagged ? 'QBO and Syft differ' : r.status === 'Provisional' ? 'Provisional' : null) : null };
+      return { month: m, value: r.state === 'ok' ? round(r.value, tile.kpi === 'complaints' ? 2 : 1) : null, num: r.num, den: r.den ?? null, tone: isChurn(tile.kpi) && r.band ? r.band.tone : null, flag: tile.kpi === 'ocr' ? (r.flagged ? 'QBO and Syft differ' : r.status === 'Provisional' ? 'Provisional' : null) : null };
     });
   }
   const references = { churn: { line: rules.churnTarget, label: `target ${rules.churnTarget}%` }, fulfilment: { line: rules.fulfilmentTarget, label: `target ${rules.fulfilmentTarget}%` }, ocr: { band: rules.ocrTarget, label: `target ${rules.ocrTarget[0]}–${rules.ocrTarget[1]}%` } };
@@ -659,6 +692,7 @@ export function drill(ix, { kpi, month, mode = 'month', range = null, today, rul
   const span = mode === 't12' ? 12 : 1;
   const months = monthsBetween(addMonths(month, 1 - span), month).filter((m) => m >= rules.firstMonth);
   const parts = isRange ? ranged(ix, kpi === 'over_cancel' ? 'churn' : kpi, range, today, rules).parts.map((p) => ({ ...p, month: p.month || month, lines: p.lines || [] })) : months.map((m) => monthly(ix, kpi === 'over_cancel' ? 'churn' : kpi, m, today, rules));
+  // (a plan tile's parts are already narrowed to that plan's events and starting clients)
   const all = (pick) => parts.flatMap((p) => pick(p) || []);
   const period = isRange ? `${dayLabel(range.from)} – ${dayLabel(range.to)}` : span === 1 ? monthLabel(month) : `${monthLabel(months[0])} – ${monthLabel(month)}`;
   if (kpi === 'ocr') {
@@ -668,11 +702,11 @@ export function drill(ix, { kpi, month, mode = 'month', range = null, today, rul
     // With no QuickBooks lines to show, lead with the Syft figures.
     return { title: `${KPI_LABELS.ocr} · ${period}`, tabs: rows.length ? tabs : tabs.reverse() };
   }
-  if (kpi === 'churn' || kpi === 'over_cancel') {
+  if (isChurn(kpi) || kpi === 'over_cancel') {
     const eventCols = [col('cancelled_on', 'Cancelled'), col('customer', 'Client'), col('outcome', 'Result'), col('segment', 'Plan'), col('scope', 'Cancelled'), col('reason', 'Reason'), col('frequency', 'Frequency'), col('cancelled_by', 'Cancelled by'), col('last_cleaner', 'Last cleaner')];
     const flags = { key: 'over_cancel', label: 'Admin over-cancellation flags', columns: eventCols, rows: all((p) => p.over_cancel) };
     if (kpi === 'over_cancel') return { title: `Admin over-cancellation flags · ${period}`, tabs: [flags] };
-    return { title: `${KPI_LABELS.churn} · ${period}`, tabs: [{ key: 'events', label: 'Cancellations', columns: eventCols, rows: all((p) => p.events) }, { key: 'base', label: 'Recurring base', columns: [col('month', 'Month'), col('customer', 'Client'), col('segment', 'Plan'), col('frequency', 'Frequency'), col('first_visit', 'First visit in month'), col('outcome', 'Result')], rows: all((p) => p.base.map((b) => ({ ...b, month: p.month, counted: true, outcome: `${b.churned ? 'Churned this month' : 'Active'}${b.mixed ? ' · on both plans' : ''}` }))) }, flags] };
+    return { title: `${KPI_LABELS[kpi]} · ${period}`, tabs: [{ key: 'events', label: 'Cancellations', columns: eventCols, rows: all((p) => p.events) }, { key: 'base', label: 'Recurring base', columns: [col('month', 'Month'), col('customer', 'Client'), col('segment', 'Plan'), col('frequency', 'Frequency'), col('first_visit', 'First visit in month'), col('outcome', 'Result')], rows: all((p) => p.base.map((b) => ({ ...b, month: p.month, counted: true, outcome: `${b.churned ? 'Churned this month' : 'Active'}${b.mixed ? ' · on both plans' : ''}` }))) }, flags] };
   }
   if (kpi === 'fulfilment') {
     return { title: `${KPI_LABELS.fulfilment} · ${period}`, tabs: [{ key: 'bookings', label: 'Bookings', columns: [col('date', 'Date'), col('start', 'Start'), col('customer', 'Client'), col('result', 'Result'), col('group', 'Whose'), col('cleaner', 'Cleaner'), col('minutes_late', 'Min late', 'num'), col('cancel_reason', 'Cancellation reason'), col('cancelled_by', 'Cancelled by'), col('books_label', 'On books 48 h ahead')], rows: all((p) => p.rows.map((r) => ({ ...r, outcome: r.result, books_label: r.on_books_48h ? 'Yes' : 'No' }))), defaultFilter: 'issues' }] };

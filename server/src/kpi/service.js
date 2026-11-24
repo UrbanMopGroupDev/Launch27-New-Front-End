@@ -139,7 +139,7 @@ export function createKpi({ db, config, log = { info() {}, warn() {}, error() {}
     },
     async drill({ brand, month, mode, kpi, outage, from, to } = {}) {
       const b = brandOf(brand);
-      if (!['ocr', 'churn', 'over_cancel', 'fulfilment', 'complaints', 'reviews'].includes(kpi) || !b.kpis.includes(kpi === 'over_cancel' ? 'churn' : kpi)) throw fail(400, 'Unknown KPI');
+      if (!['ocr', 'churn', 'churn_prepaid', 'churn_payg', 'over_cancel', 'fulfilment', 'complaints', 'reviews'].includes(kpi) || !b.kpis.includes(kpi === 'over_cancel' ? 'churn' : kpi)) throw fail(400, 'Unknown KPI');
       const c = await load(b.key, cleanOutage(outage));
       const range = pickRange(mode, from, to, c.today);
       const m = pickMonth(range ? null : month, c.today);

@@ -173,7 +173,7 @@ function TileCard({ tile: t, detailed, onDrill }: { tile: Tile; detailed: boolea
                   <span className="small muted">By plan type · {t.period}</span>
                   <table>
                     <thead>
-                      <tr><th scope="col">Segment</th><th scope="col">Starting clients</th><th scope="col">Temporary churn</th><th scope="col">Permanent churn</th><th scope="col">Churn %</th></tr>
+                      <tr><th scope="col">Plan</th><th scope="col" title="Recurring clients at the start of the period">Start</th><th scope="col" title="Temporary churn: back within 90 days">Temp.</th><th scope="col" title="Permanent churn (provisional in brackets)">Perm.</th><th scope="col">Churn</th></tr>
                     </thead>
                     <tbody>
                       {t.segments.map((g) => (
@@ -181,13 +181,13 @@ function TileCard({ tile: t, detailed, onDrill }: { tile: Tile; detailed: boolea
                           <th scope="row">{g.label}</th>
                           <td>{g.den.toLocaleString('en-CA')}</td>
                           <td>{g.temporary}</td>
-                          <td>{g.permanent}{g.provisional > 0 && <span className="muted"> ({g.provisional} provisional)</span>}</td>
+                          <td>{g.permanent}{g.provisional > 0 && <span className="muted"> ({g.provisional})</span>}</td>
                           <td>{g.value == null ? '—' : `${g.value.toFixed(1)}%`}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
-                  <p className="small muted">Provisional: cancelled inside the last 90 days, so the client can still return. Temporary churn is not in the rate.</p>
+                  <p className="small muted">Start = clients at the start of the period. Temp. = back within 90 days (not in the rate). Perm. = permanent churn; in brackets, how many are provisional (cancelled inside the last 90 days, so they can still return).</p>
                   {(t.segment_notes || []).map((n) => <p key={n} className="small sc-status-warning">⚠ {n}</p>)}
                 </div>
               )}
