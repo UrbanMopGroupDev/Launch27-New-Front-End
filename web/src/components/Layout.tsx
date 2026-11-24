@@ -23,7 +23,7 @@ const NAV: { section: string; items: { to: string; label: string; icon: string; 
       { to: '/supervisor', label: 'Supervisor', icon: 'headset' },
       { to: '/calls', label: 'Calls', icon: 'voice' },
       { to: '/contacts', label: 'Contacts', icon: 'user' },
-      { to: '/complaints', label: 'Complaint playbook', icon: 'alert', lead: true },
+      { to: '/complaints', label: 'Complaint playbook', icon: 'alert' },
       { to: '/inbox-simulator', label: 'Channel simulator', icon: 'flask' },
       { to: '/inbox-settings', label: 'Support settings', icon: 'sliders' },
     ],
