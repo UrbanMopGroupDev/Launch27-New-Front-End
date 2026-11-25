@@ -131,8 +131,9 @@ const complaints = createComplaints({
   log,
 });
 await complaints.markInterrupted().then((n) => n && log.warn('complaints: marked runs cut off by the restart as interrupted', { runs: n })).catch(() => {});
-// Kustomer historical migration: export (read-only) and dry run only; the import isn't enabled.
-// Production reads Kustomer with KUSTOMER_API_KEY; dev and QA read a synthetic Kustomer.
+// Kustomer historical migration: export (read-only), dry run, and the import (every conversation
+// onto someone's Story). Production reads Kustomer with KUSTOMER_API_KEY; dev and QA read a
+// synthetic Kustomer. The dry run matches people against Launch27 with the L27_SYNC login.
 const migrationL27 = createL27Client({ baseUrl: config.l27BaseUrl, fetchImpl });
 const migrationBearer = createSyncBearer({ config, fetchImpl });
 const kustomerMigration = createKustomerMigration({
