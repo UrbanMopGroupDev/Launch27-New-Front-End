@@ -404,6 +404,10 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
   const [to, setTo] = useState('');
   const [from, setFrom] = useState('');
   const [subject, setSubject] = useState('');
+  // Email: more people to copy (comma or space separated), shown when "Cc" is pressed.
+  const [cc, setCc] = useState('');
+  const [showCc, setShowCc] = useState(false);
+  const signature = useQuery({ queryKey: ['inbox', 'signature'], queryFn: inbox.signature, staleTime: 5 * 60_000 });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const sendKey = useRef<string | null>(null);
@@ -502,10 +506,13 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
         // error), the server returns the first one instead of texting the customer twice.
         sendKey.current ||= crypto.randomUUID();
         const attachments = channel === 'email' && files.length ? await Promise.all(files.map(toAttachment)) : undefined;
-        await inbox.reply(c.id, { body: text, channel, to: target, from: sender, subject: channel === 'email' && subject ? subject : undefined, idempotency_key: sendKey.current, attachments });
+        const copies = channel === 'email' ? cc.split(/[\s,;]+/).map((a) => a.trim()).filter(Boolean) : [];
+        await inbox.reply(c.id, { body: text, channel, to: target, from: sender, subject: channel === 'email' && subject ? subject : undefined, cc: copies.length ? copies : undefined, idempotency_key: sendKey.current, attachments });
         sendKey.current = null;
       }
       setText('');
+      setCc('');
+      setShowCc(false);
       setFiles([]);
       setFileNote(null);
       setSwitched(false);
@@ -558,6 +565,11 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
       </div>
       {emailLocked && <div className="notice small" role="status">Email is read-only: emails can't be sent from this platform. Reply by text, or add an internal note.</div>}
       {mode === 'reply' && needsSubject && !emailLocked && <input className="full" placeholder="Subject" aria-label="Email subject" value={subject} onChange={(e) => setSubject(e.target.value)} />}
+      {mode === 'reply' && channel === 'email' && !emailLocked && (showCc ? (
+        <input className="full" type="text" inputMode="email" autoComplete="off" placeholder="Cc: other addresses, separated by commas" aria-label="Cc" value={cc} onChange={(e) => setCc(e.target.value)} />
+      ) : (
+        <button type="button" className="link small composer-cc" onClick={() => setShowCc(true)}>Add Cc</button>
+      ))}
       <div className="composer-box">
         <textarea
           ref={area}
@@ -621,6 +633,9 @@ const Composer = forwardRef<ComposerHandle, { detail: ConversationDetail; mine: 
           {mode === 'reply' && !connected && `${CHANNEL_LABEL[channel]} isn't connected yet: replies are saved, not sent.`}
           {mode === 'reply' && connected && sandboxed && !emailLocked && 'Sandbox: replies are recorded here, not sent to the customer.'}
           {mode === 'reply' && channel === 'sms' && text && <span className="mono"> {text.length} chars · {segments} text{segments === 1 ? '' : 's'}</span>}
+          {mode === 'reply' && channel === 'email' && !emailLocked && signature.data && (
+            <span title={signature.data.body}> Ends with your signature · <Link to="/inbox-settings?tab=signature">Edit</Link></span>
+          )}
           {!text && <span className="composer-keys"> Type <span className="kbd">/</span> for saved replies · <span className="kbd">Ctrl</span>+<span className="kbd">Enter</span> to send</span>}
         </span>
         <button disabled={busy || !text.trim() || !!optedOut || emailLocked || (mode === 'reply' && channel === 'email' && tooBig) || (mode === 'reply' && needsSubject && !subject.trim())} title={emailLocked ? 'Email is read-only' : mode === 'reply' && needsSubject && !subject.trim() ? 'Add a subject first' : undefined} className={mode === 'note' ? 'note-btn' : ''} onClick={send}>
