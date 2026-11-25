@@ -4,16 +4,25 @@
 //
 // What it does, per planned conversation (from a dry run), in one transaction per batch:
 //   - one historical conversation: status done, original dates, no queue, owner, reply target
-//     or SLA clock, linked to the matched customer's support contact (created only when the
-//     Launch27 customer has none yet: never a second contact for the same customer);
+//     or SLA clock, always on someone's support contact (the dry run's target):
+//       customer  the Launch27 customer's contact (created once if they have none)
+//       cleaner   the Launch27 cleaner's contact (created once if they have none)
+//       contact   a contact already in the inbox, not in Launch27
+//       new       a new customer profile made from the Kustomer name, emails and phones (internal
+//                 accounts too). Kustomer profiles that share an email end up on one profile; an
+//                 email or phone another contact already has isn't added, so live messages from
+//                 it keep going where they went before;
 //   - its messages with original timestamps and direction, delivery_state 'historical';
 //   - internal notes as notes (never shown to the customer);
 //   - Kustomer's status, tags, teams and owners as source_meta.
 // It never calls ingestInbound() or reply(), so nothing is routed, assigned, notified or sent,
-// and it never touches an existing live conversation. Re-running it is a no-op: conversations
-// are unique by (source, source_id) and messages/notes by external_id. Every row carries the
-// import run id, so a run can be rolled back.
+// and it never touches an existing live conversation or changes an existing contact. Re-running
+// it is a no-op: conversations are unique by (source, source_id) and messages/notes by
+// external_id. Every row carries the import run id, so a run can be rolled back; contacts it
+// created are recorded in kustomer_contacts.
 import * as K from './normalize.js';
+import * as svc from '../inbox/service.js';
+import { TARGETS } from './dryrun.js';
 
 export const KUSTOMER_IMPORT_ENABLED = true;
 
@@ -23,13 +32,48 @@ export function createKustomerImporter({ db, vault, enabled = KUSTOMER_IMPORT_EN
   const guard = () => {
     if (!enabled) throw Object.assign(new Error('Importing Kustomer history is not enabled. It needs approval and a code change (KUSTOMER_IMPORT_ENABLED).'), { status: 403 });
   };
+  const one = async (q, sql, p) => (await q.query(sql, p)).rows[0] || null;
+  const remember = (q, contactId, plan, kind, runId) =>
+    q.query('INSERT INTO kustomer_contacts (contact_id, kustomer_customer_id, kind, import_run_id) VALUES ($1,$2,$3,$4) ON CONFLICT (contact_id) DO NOTHING', [contactId, plan.kustomer_customer_id, kind, runId]);
 
-  async function contactFor(q, plan) {
-    if (plan.contact_id && (await q.query('SELECT 1 FROM contacts WHERE id = $1', [plan.contact_id])).rows.length) return Number(plan.contact_id);
-    if (plan.match !== 'confident' || !plan.l27_customer_id) return null; // unmatched/uncertain: not linked to anyone
-    const existing = (await q.query('SELECT id FROM contacts WHERE l27_customer_id = $1 ORDER BY id LIMIT 1', [plan.l27_customer_id])).rows[0];
-    if (existing) return Number(existing.id);
-    return Number((await q.query("INSERT INTO contacts (roles, l27_customer_id) VALUES ('[\"customer\"]'::jsonb, $1) RETURNING id", [plan.l27_customer_id])).rows[0].id);
+  // A contact for a Launch27 customer or cleaner: theirs if they have one, else one made once.
+  async function linkedContact(q, plan, kc, runId, col, id, role) {
+    const existing = await one(q, `SELECT id FROM contacts WHERE ${col} = $1 ORDER BY id LIMIT 1`, [id]);
+    if (existing) return { id: Number(existing.id) };
+    const made = await svc.createContact(q, { name: kc?.name || null, roles: [role], [col]: id });
+    await remember(q, made.id, plan, role, runId);
+    return { id: Number(made.id) };
+  }
+
+  // A profile for someone Launch27 doesn't know: one an import already made for this Kustomer
+  // customer, else a contact with one of their emails (or, with no email, a phone), else a new one.
+  async function profile(q, plan, kc, runId) {
+    const before = await one(q, "SELECT contact_id FROM kustomer_contacts WHERE kustomer_customer_id = $1 AND kind IN ('profile', 'internal') ORDER BY contact_id LIMIT 1", [plan.kustomer_customer_id]);
+    if (before) return { id: Number(before.contact_id) };
+    const emails = kc?.emails.map((e) => e.email) || [];
+    const phones = kc?.phones || [];
+    for (const [kind, values] of emails.length ? [['email', emails]] : [['phone', phones]]) {
+      for (const v of values) {
+        const [hit] = await svc.contactsByIdentity(q, kind, v);
+        if (hit) return { id: Number(hit.id) };
+      }
+    }
+    // Only identities no other contact has: live messages from a shared number keep their match.
+    const free = [];
+    for (const [kind, values] of [['email', emails], ['phone', phones]]) {
+      for (const v of values) if (!(await svc.contactsByIdentity(q, kind, v)).length) free.push({ kind, value: v });
+    }
+    const made = await svc.createContact(q, { name: kc?.name || emails[0] || phones[0] || null, roles: ['customer'], identities: free });
+    await remember(q, made.id, plan, plan.match === 'internal' ? 'internal' : 'profile', runId);
+    return { id: Number(made.id), created: true };
+  }
+
+  async function contactFor(q, plan, kc, runId) {
+    if (!TARGETS.includes(plan.target)) throw new Error('This plan was made before every conversation got a customer: run the dry run again');
+    if (plan.target !== 'new' && plan.contact_id && (await one(q, 'SELECT 1 FROM contacts WHERE id = $1', [plan.contact_id]))) return { id: Number(plan.contact_id) };
+    if (plan.target === 'customer' && plan.l27_customer_id) return linkedContact(q, plan, kc, runId, 'l27_customer_id', Number(plan.l27_customer_id), 'customer');
+    if (plan.target === 'cleaner' && plan.l27_team_id) return linkedContact(q, plan, kc, runId, 'l27_team_id', Number(plan.l27_team_id), 'cleaner');
+    return profile(q, plan, kc, runId); // new, or a contact that has gone since the dry run
   }
 
   async function records(q, conversationId) {
@@ -45,27 +89,44 @@ export function createKustomerImporter({ db, vault, enabled = KUSTOMER_IMPORT_EN
     return out;
   }
 
+  // The Kustomer customers behind these plans (name, emails, phones), for contacts the import makes.
+  async function customers(q, ids) {
+    const out = new Map();
+    if (!ids.length) return out;
+    for (const r of (await q.query("SELECT kustomer_id, data FROM kustomer_records WHERE kind = 'customer' AND kustomer_id = ANY($1::text[])", [ids])).rows) out.set(r.kustomer_id, K.customer(vault.open(r.data)));
+    return out;
+  }
+
   /** Import planned conversations (rows of kustomer_plan_conversations with their customer's plan). */
   // `dedupe(messages)` (optional) returns an isDuplicate function; it runs before the batch's
   // transaction, so it may read the database (one connection: no reads inside the transaction).
   async function importBatch(runId, plans, { isDuplicate = null, dedupe = null } = {}) {
     guard();
-    const result = { conversations: 0, messages: 0, notes: 0, skipped: 0 };
+    const result = { conversations: 0, messages: 0, notes: 0, skipped: 0, profiles: 0 };
     const loaded = new Map();
     for (const plan of plans) if (plan.action === 'new') loaded.set(plan.kustomer_conversation_id, await records(db, plan.kustomer_conversation_id));
+    const people = await customers(db, [...new Set(plans.filter((p) => p.action === 'new').map((p) => p.kustomer_customer_id).filter(Boolean))]);
     const dup = isDuplicate || (dedupe ? await dedupe([...loaded.values()].flatMap((r) => r.messages)) : () => false);
     await db.tx(async (q) => {
+      const contacts = new Map(); // Kustomer customer -> contact, within this batch
       for (const plan of plans) {
         if (plan.action !== 'new') {
           result.skipped++;
           continue;
         }
         const { conv, messages, notes } = loaded.get(plan.kustomer_conversation_id);
-        if (!conv) {
+        // Missing, or imported before: skipped before a contact is found or made for it.
+        if (!conv || (await one(q, "SELECT 1 FROM conversations WHERE source = 'kustomer' AND source_id = $1", [conv.id]))) {
           result.skipped++;
           continue;
         }
-        const contactId = await contactFor(q, plan);
+        let contactId = contacts.get(plan.kustomer_customer_id);
+        if (!contactId) {
+          const c = await contactFor(q, plan, people.get(plan.kustomer_customer_id), runId);
+          if (c.created) result.profiles++;
+          contactId = c.id;
+          contacts.set(plan.kustomer_customer_id, contactId);
+        }
         const last = messages.at(-1);
         const firstIn = messages.find((m) => m.direction === 'in');
         const theirs = firstIn?.from || last?.to?.[0] || null;
@@ -119,11 +180,26 @@ export function createKustomerImporter({ db, vault, enabled = KUSTOMER_IMPORT_EN
 
   return {
     importBatch,
-    /** Undo one import run: its conversations (and, by cascade, their messages and notes). */
+    /**
+     * Undo one import run: its conversations (and, by cascade, their messages and notes), then
+     * the new profiles it made that are left empty and still not linked to Launch27. Contacts
+     * made for Launch27 customers and cleaners stay, as do profiles that have since received
+     * live messages or been linked by an agent.
+     */
     async rollback(runId) {
       guard();
-      const res = await db.query("DELETE FROM conversations WHERE source = 'kustomer' AND import_run_id = $1 RETURNING id", [runId]);
-      return { conversations: res.rows.length };
+      return db.tx(async (q) => {
+        const res = await q.query("DELETE FROM conversations WHERE source = 'kustomer' AND import_run_id = $1 RETURNING id", [runId]);
+        const gone = await q.query(
+          `DELETE FROM contacts c USING kustomer_contacts k
+           WHERE k.contact_id = c.id AND k.import_run_id = $1 AND k.kind IN ('profile', 'internal')
+             AND c.l27_customer_id IS NULL AND c.l27_team_id IS NULL
+             AND NOT EXISTS (SELECT 1 FROM conversations v WHERE v.contact_id = c.id)
+           RETURNING c.id`,
+          [runId],
+        );
+        return { conversations: res.rows.length, profiles: gone.rows.length };
+      });
     },
     /** Compare what was imported with what the dry run planned (read-only). */
     async reconcile(dryRunId, runId) {
@@ -139,7 +215,9 @@ export function createKustomerImporter({ db, vault, enabled = KUSTOMER_IMPORT_EN
       );
       const missing = planned.filter((p) => !got.has(p.id)).map((p) => p.id);
       const different = planned.filter((p) => got.has(p.id) && (got.get(p.id).notes !== p.notes || got.get(p.id).messages < p.messages)).map((p) => p.id);
-      return { planned: planned.length, imported: got.size, missing, different };
+      // Every imported conversation must be on someone's Story.
+      const withoutCustomer = Number((await db.query("SELECT count(*)::int AS n FROM conversations WHERE source = 'kustomer' AND import_run_id = $1 AND contact_id IS NULL", [runId])).rows[0].n);
+      return { planned: planned.length, imported: got.size, missing, different, without_customer: withoutCustomer };
     },
   };
 }
@@ -169,7 +247,7 @@ export function createKustomerImportJob({ db, importer, dedupe = null, log = () 
       }
       const plans = (
         await db.query(
-          `SELECT c.*, p.contact_id FROM kustomer_plan_conversations c
+          `SELECT c.*, p.contact_id, p.target, p.l27_team_id FROM kustomer_plan_conversations c
            JOIN kustomer_plan_customers p ON p.run_id = c.run_id AND p.kustomer_customer_id = c.kustomer_customer_id
            WHERE c.run_id = $1 AND c.action = 'new' AND c.kustomer_conversation_id > $2
            ORDER BY c.kustomer_conversation_id LIMIT $3`,
@@ -181,12 +259,12 @@ export function createKustomerImportJob({ db, importer, dedupe = null, log = () 
       cursor = plans.at(-1).kustomer_conversation_id;
       await db.query(
         `UPDATE kustomer_import_runs SET cursor = $2, processed = processed + $3, conversations = conversations + $4, messages = messages + $5,
-                notes = notes + $6, skipped = skipped + $7, batches = batches + 1, updated_at = now() WHERE id = $1`,
-        [runId, cursor, plans.length, r.conversations, r.messages, r.notes, r.skipped],
+                notes = notes + $6, skipped = skipped + $7, profiles = profiles + $8, batches = batches + 1, updated_at = now() WHERE id = $1`,
+        [runId, cursor, plans.length, r.conversations, r.messages, r.notes, r.skipped, r.profiles],
       );
     }
     const rec = await importer.reconcile(run.dry_run_id, runId);
-    const summary = { planned: rec.planned, imported: rec.imported, missing: rec.missing.length, different: rec.different.length, missing_ids: rec.missing.slice(0, 50), different_ids: rec.different.slice(0, 50) };
+    const summary = { planned: rec.planned, imported: rec.imported, missing: rec.missing.length, different: rec.different.length, without_customer: rec.without_customer, missing_ids: rec.missing.slice(0, 50), different_ids: rec.different.slice(0, 50) };
     await db.query("UPDATE kustomer_import_runs SET status = 'completed', reconcile = $2::jsonb, finished_at = now(), updated_at = now() WHERE id = $1", [runId, JSON.stringify(summary)]);
     log('info', 'kustomer import completed', { run: runId, conversations: rec.imported });
   }
@@ -242,8 +320,8 @@ export function createKustomerImportJob({ db, importer, dedupe = null, log = () 
       if (!run) throw Object.assign(new Error('No such import'), { status: 404 });
       if (run.status === 'rolled_back') throw Object.assign(new Error('Already rolled back'), { status: 409 });
       const r = await importer.rollback(id);
-      await db.query("UPDATE kustomer_import_runs SET status = 'rolled_back', rolled_back_at = now(), rolled_back_by = $2, rolled_back_conversations = $3, updated_at = now() WHERE id = $1", [id, user?.id ?? null, r.conversations]);
-      log('info', 'kustomer import rolled back', { run: id, conversations: r.conversations, by: user?.id ?? null });
+      await db.query("UPDATE kustomer_import_runs SET status = 'rolled_back', rolled_back_at = now(), rolled_back_by = $2, rolled_back_conversations = $3, rolled_back_profiles = $4, updated_at = now() WHERE id = $1", [id, user?.id ?? null, r.conversations, r.profiles]);
+      log('info', 'kustomer import rolled back', { run: id, conversations: r.conversations, profiles: r.profiles, by: user?.id ?? null });
       return get(id);
     },
     async recover() {

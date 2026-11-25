@@ -100,7 +100,7 @@ INSERT INTO kustomer_team_carry VALUES
 -- Change history first, while the old rules, teams and Hiring queue are still there.
 INSERT INTO audit_log (action, object_type, object_id, detail)
 SELECT 'rules.replaced', 'routing_rules', 'all', jsonb_build_object(
-  'source', 'Kustomer routing export of Nov 25, 2026 (migration 0033)',
+  'source', 'Kustomer routing export of Nov 25, 2026 (migration 0036)',
   'count', (SELECT count(*) FROM kustomer_rules),
   'added', COALESCE((SELECT jsonb_agg(k.name ORDER BY k.position) FROM kustomer_rules k WHERE k.name NOT IN (SELECT name FROM routing_rules)), '[]'::jsonb),
   'changed', COALESCE((SELECT jsonb_agg(k.name ORDER BY k.position) FROM kustomer_rules k JOIN routing_rules r ON r.name = k.name
@@ -112,7 +112,7 @@ WHERE (SELECT yes FROM kustomer_seeded);
 
 INSERT INTO audit_log (action, object_type, object_id, detail)
 SELECT 'teams.replaced', 'teams', 'all', jsonb_build_object(
-  'source', 'Kustomer routing export of Nov 25, 2026 (migration 0033)',
+  'source', 'Kustomer routing export of Nov 25, 2026 (migration 0036)',
   'count', (SELECT count(*) FROM kustomer_teams),
   'removed', COALESCE((SELECT jsonb_agg(t.name ORDER BY t.position) FROM teams t WHERE t.name IN (SELECT old_name FROM kustomer_team_carry)), '[]'::jsonb),
   'before', COALESCE((SELECT jsonb_agg(jsonb_build_object(
@@ -123,7 +123,7 @@ SELECT 'teams.replaced', 'teams', 'all', jsonb_build_object(
 WHERE (SELECT yes FROM kustomer_seeded);
 
 INSERT INTO audit_log (action, object_type, object_id, detail)
-SELECT 'queue.merged', 'queue', h.id::text, jsonb_build_object('source', 'Kustomer routing export of Nov 25, 2026 (migration 0033)', 'name', h.name, 'into', 'HR Queue',
+SELECT 'queue.merged', 'queue', h.id::text, jsonb_build_object('source', 'Kustomer routing export of Nov 25, 2026 (migration 0036)', 'name', h.name, 'into', 'HR Queue',
   'conversations', (SELECT count(*) FROM conversations c WHERE c.queue_id = h.id))
 FROM queues h WHERE h.slug = 'hiring' AND EXISTS (SELECT 1 FROM queues WHERE slug = 'hr');
 
@@ -185,4 +185,4 @@ WITH added AS (
   RETURNING id, email
 )
 INSERT INTO audit_log (action, object_type, object_id, detail)
-SELECT 'user.added', 'user', id::text, jsonb_build_object('email', email, 'role', 'agent', 'source', 'migration 0033') FROM added;
+SELECT 'user.added', 'user', id::text, jsonb_build_object('email', email, 'role', 'agent', 'source', 'migration 0036') FROM added;

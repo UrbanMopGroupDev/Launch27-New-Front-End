@@ -656,17 +656,17 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     return { running: !!running, sources: sources(), last_run: last, mined, auto };
   }
 
-  async function listCases({ from, to, category, limit = 500 }) {
+  async function listCases({ from, to, category, limit = 5000 }) {
     const params = [from || '2000-01-01', to || '2999-12-31'];
     let where = 'c.merged_into IS NULL AND c.excluded_at IS NULL AND c.opened_at >= $1 AND c.opened_at < $2::date + 1';
     if (category) {
       params.push(category);
       where += ` AND c.category = $${params.length}`;
     }
-    params.push(Math.min(2000, Number(limit) || 500));
+    params.push(Math.min(5000, Number(limit) || 5000));
     const rows = await many(
       db,
-      `SELECT c.id, c.source, c.opened_at, c.service_date, c.customer_name, c.l27_customer_id, c.l27_booking_id, c.category, c.tone, c.severity, c.hard_route, c.summary, c.status, c.source_status, c.classified_by,
+      `SELECT c.id, c.source, c.source_id, c.opened_at, c.service_date, c.customer_name, c.l27_customer_id, c.l27_booking_id, c.category, c.tone, c.severity, c.hard_route, c.summary, c.status, c.source_status, c.classified_by,
               (SELECT coalesce(sum(amount), 0) FROM complaint_costs k WHERE k.case_id = c.id) AS total_cost,
               (SELECT string_agg(DISTINCT coalesce(r.rung, r.action), ', ') FROM complaint_resolutions r WHERE r.case_id = c.id) AS rungs,
               (SELECT outcome FROM complaint_outcomes o WHERE o.case_id = c.id AND o.day = 60) AS outcome_60,
@@ -677,7 +677,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       params,
     );
     const byId = await visitIndex();
-    return rows.map((r) => ({ ...r, ...visitInfo(byId.get(Number(r.l27_booking_id)), r.frequency) }));
+    return rows.map(({ source_id, ...r }) => ({ ...r, original_url: gmailUrl(r.source, source_id), ...visitInfo(byId.get(Number(r.l27_booking_id)), r.frequency) }));
   }
 
   // Service type and client type of the visit complained about, from the Launch27 snapshot.

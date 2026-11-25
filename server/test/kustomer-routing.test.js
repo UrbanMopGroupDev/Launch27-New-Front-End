@@ -1,5 +1,5 @@
 // Queues, routing rules and teams taken from Kustomer (routing export of Nov 25, 2026):
-// the seeded rules send Kustomer's cases where Kustomer sends them, and migration 0033 moves
+// the seeded rules send Kustomer's cases where Kustomer sends them, and migration 0036 moves
 // a database seeded before that export to the same configuration.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -113,12 +113,12 @@ describe('Kustomer routing: seeded queues, rules and teams', () => {
   });
 });
 
-describe('migration 0033: a database seeded before the Kustomer export', () => {
+describe('migration 0036: a database seeded before the Kustomer export', () => {
   const quiet = Object.assign(() => {}, { info() {}, warn() {}, error() {} });
 
   test('queues, rules and teams move to Kustomer; Hiring merges into HR; members, other teams and history are kept; agents are added', async () => {
     const db = await openDb({ migrate: false });
-    await runMigrations(db, { migrations: loadMigrations().filter((m) => m.version < '0033') });
+    await runMigrations(db, { migrations: loadMigrations().filter((m) => m.version < '0036') });
     const one = async (sql, p) => (await db.query(sql, p)).rows[0];
     const rows = async (sql, p) => (await db.query(sql, p)).rows;
 
@@ -139,7 +139,7 @@ describe('migration 0033: a database seeded before the Kustomer export', () => {
     await team('Weekend crew', ['operations']);
     const hiringConv = await one("INSERT INTO conversations (channel, queue_id) SELECT 'sms', id FROM queues WHERE slug = 'hiring' RETURNING id");
 
-    assert.deepEqual(await runMigrations(db), ['0033_kustomer_routing']);
+    assert.deepEqual(await runMigrations(db), ['0036_kustomer_routing']);
 
     const queues = await rows('SELECT slug, name, restricted FROM queues ORDER BY position');
     assert.deepEqual(queues.slice(0, QUEUES.length).map((q) => q.slug), QUEUES.map((q) => q.slug));
@@ -216,7 +216,7 @@ describe('migration 0033: a database seeded before the Kustomer export', () => {
       assert.deepEqual((await db.query('SELECT slug FROM queues ORDER BY position')).rows.map((q) => q.slug), QUEUES.map((q) => q.slug));
       assert.deepEqual((await db.query('SELECT name FROM routing_rules ORDER BY position')).rows.map((r) => r.name), RULES.map((r) => r.name));
       assert.deepEqual((await db.query('SELECT name FROM teams ORDER BY position')).rows.map((t) => t.name), DEFAULT_TEAMS.map((t) => t.name));
-      assert.equal((await db.query("SELECT count(*)::int AS n FROM audit_log WHERE detail->>'source' LIKE '%migration 0033%'")).rows[0].n, 0);
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM audit_log WHERE detail->>'source' LIKE '%migration 0036%'")).rows[0].n, 0);
     } finally {
       await db.close();
     }

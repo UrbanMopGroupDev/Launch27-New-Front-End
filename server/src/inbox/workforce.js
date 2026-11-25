@@ -34,6 +34,9 @@ export const DEFAULT_SETTINGS = {
   // 'admins'. Roles, active/inactive, teams and private queues are always admins only,
   // because they decide who can see restricted conversations.
   settings_editors: 'everyone',
+  // The name customers see on our emails ("UrbanMop Residential <info@…>"). Empty: the
+  // EMAIL_FROM_NAME setting on the server (else "UrbanMop").
+  email_from_name: '',
 };
 
 export const SETTINGS_EDITORS = ['everyone', 'supervisors', 'admins'];
@@ -129,7 +132,11 @@ export function validateSettings(patch) {
       if (!Number.isFinite(n) || n < 0) throw new Error(`${k} must be a number 0 or more`);
       out[k] = n;
     } else if (k === 'default_capacity') out[k] = normalizeCapacity(v, def);
-    else if (k === 'settings_editors') {
+    else if (k === 'email_from_name') {
+      const name = String(v ?? '').replace(/[\r\n<>"]/g, ' ').replace(/\s+/g, ' ').trim();
+      if (name.length > 60) throw new Error('The sender name can be up to 60 characters');
+      out[k] = name;
+    } else if (k === 'settings_editors') {
       if (!SETTINGS_EDITORS.includes(v)) throw new Error('settings_editors must be everyone, supervisors or admins');
       out[k] = v;
     }

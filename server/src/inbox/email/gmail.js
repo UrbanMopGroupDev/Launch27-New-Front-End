@@ -183,7 +183,9 @@ export function createGmailConnector({ client, mailboxes, fromName = null }) {
       const thread = message.thread || {};
       const existing = parseThreadKey(thread.key);
       const files = message.attachments || [];
-      const { raw, messageId } = buildMessage({ from, fromName, to: message.to, subject: message.subject, body: message.body, attachments: files, inReplyTo: thread.inReplyTo, references: thread.references });
+      // The sender name from Support settings when one is set, else EMAIL_FROM_NAME.
+      const name = (message.fromName || '').trim() || fromName;
+      const { raw, messageId } = buildMessage({ from, fromName: name, to: message.to, cc: message.cc || [], subject: message.subject, body: message.body, html: message.html || null, attachments: files, inReplyTo: thread.inReplyTo, references: thread.references });
       const sent = await client.send(account, { raw, threadId: existing?.account === account ? existing.threadId : null, large: files.length > 0 });
       // Gmail can replace our Message-ID; read back the one the customer will reply to.
       let finalId = messageId;

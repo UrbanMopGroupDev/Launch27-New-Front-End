@@ -196,8 +196,8 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
   // Admins: check, disconnect or reconnect one provider (credentials stay in Railway).
   r.post('/admin/sms/:provider/:action', needRole('admin'), wrap(async (req, res) => {
     const provider = Object.hasOwn(smsProviders, req.params.provider) ? smsProviders[req.params.provider] : null;
-    const actions = { check: 'check', disconnect: 'disconnect', connect: 'connect' };
-    if (!provider || !Object.hasOwn(actions, req.params.action)) throw new svc.InboxError(404, 'Unknown SMS provider or action');
+    const actions = { check: 'check', disconnect: 'disconnect', connect: 'connect', 'take-over': 'takeOver', 'hand-back': 'handBack' };
+    if (!provider || !Object.hasOwn(actions, req.params.action) || typeof provider[actions[req.params.action]] !== 'function') throw new svc.InboxError(404, 'Unknown SMS provider or action');
     await provider[actions[req.params.action]]();
     await svc.audit(db, req.user.id, `sms.${req.params.action}`, 'channel', `sms:${req.params.provider}`, {});
     res.json(await channelStatus());
@@ -427,6 +427,15 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     res.status(201).json(await db.tx((q) => svc.reply(q, req.user, req.params.id, req.body || {}, { connectors })));
   }));
 
+  // My email signature (Support settings -> My email signature): **bold** and [link](address).
+  r.get('/me/signature', wrap(async (req, res) => res.json(await svc.signatureFor(db, req.user))));
+  r.put('/me/signature', wrap(async (req, res) => {
+    const body = String(req.body?.body ?? '').replace(/\r\n/g, '\n').slice(0, 2000).trim();
+    if (body) await db.query('INSERT INTO user_signatures (user_id, body) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET body = EXCLUDED.body, updated_at = now()', [req.user.id, body]);
+    else await db.query('DELETE FROM user_signatures WHERE user_id = $1', [req.user.id]);
+    res.json(await svc.signatureFor(db, req.user));
+  }));
+
   r.post('/conversations/:id/notes', wrap(async (req, res) => {
     await loadConversation(req, req.params.id);
     res.status(201).json(await db.tx((q) => svc.addNote(q, req.user, req.params.id, req.body?.body)));
@@ -557,6 +566,30 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       many(db, `SELECT c.id, c.channel, c.status, c.subject, c.last_preview, c.last_message_at, c.l27_booking_id, c.queue_id, c.owner_id, c.disposition, c.complaint FROM conversations c WHERE c.contact_id = $1 AND (c.queue_id IS NULL OR c.queue_id = ANY($2::bigint[]) OR c.owner_id = $3) AND ${HAS_CONTENT} ORDER BY c.last_message_at DESC LIMIT 100`, [contact.id, visible, req.user.id]),
     ]);
     res.json({ ...contact, identities, conversations });
+  }));
+
+  // Every conversation of a contact, newest first, a page at a time (a Story or a cleaner's
+  // history can go back years, e.g. Kustomer history). Same visibility as above.
+  // ?before=<last_message_at>|<id> continues after the previous page's last row.
+  r.get('/contacts/:id/conversations', wrap(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) throw new svc.InboxError(400, 'Bad contact id');
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
+    const [at, beforeId] = String(req.query.before || '').split('|');
+    const cursor = at && Number(beforeId) > 0 && !Number.isNaN(Date.parse(at)) ? [new Date(at).toISOString(), Number(beforeId)] : null;
+    const visible = await visibleQueueIds(req.user);
+    const rows = await many(
+      db,
+      `SELECT c.id, c.channel, c.status, c.subject, c.last_preview, c.last_message_at, c.l27_booking_id, c.queue_id, c.owner_id, c.disposition, c.complaint, c.source
+       FROM conversations c WHERE c.contact_id = $1 AND (c.queue_id IS NULL OR c.queue_id = ANY($2::bigint[]) OR c.owner_id = $3) AND ${HAS_CONTENT}
+         AND ($4::timestamptz IS NULL OR (c.last_message_at, c.id) < ($4::timestamptz, $5::bigint))
+       ORDER BY c.last_message_at DESC, c.id DESC LIMIT $6`,
+      [id, visible, req.user.id, cursor?.[0] ?? null, cursor?.[1] ?? null, limit + 1],
+    );
+    const more = rows.length > limit;
+    const page = rows.slice(0, limit);
+    const last = page.at(-1);
+    res.json({ rows: page, next: more && last ? `${new Date(last.last_message_at).toISOString()}|${last.id}` : null });
   }));
 
   r.post('/contacts', wrap(async (req, res) => {

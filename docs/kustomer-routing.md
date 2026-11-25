@@ -8,7 +8,7 @@ and teams that work queues, all editable in Support settings.
 - New databases get it from `server/src/inbox/seed.js` (queues, rules) and
   `server/src/inbox/workforce.js` (teams).
 - Databases seeded before it are moved to it once by migration
-  `server/migrations/0033_kustomer_routing.sql` (generated from those two files).
+  `server/migrations/0036_kustomer_routing.sql` (generated from those two files).
 
 ## Queues
 
@@ -102,7 +102,7 @@ These follow from Kustomer's order and may be worth changing in Support settings
 
 ## Agents added ahead of sign-in
 
-People normally appear in Support settings after their first sign-in. Migration 0033 adds
+People normally appear in Support settings after their first sign-in. Migration 0036 adds
 mabutecarmelad@gmail.com, khaje91aquino@gmail.com and simon@urbanmop.ca as agents (offline,
 no teams) so admins can put them on teams now; signing in later uses the same account.
 They're only added to databases someone has already signed in to, so on a new database the

@@ -35,7 +35,7 @@ real messages; only production touches the real Launch27.
 | [docs/security.md](docs/security.md) | Secrets, sessions, least privilege, log redaction |
 | [docs/email.md](docs/email.md) | Email channel: Gmail setup, threading, sandbox in dev/QA, troubleshooting |
 | [docs/sms.md](docs/sms.md) | SMS through Twilio: setup, matching, webhook and recovery, troubleshooting |
-| [docs/kustomer-migration.md](docs/kustomer-migration.md) | Kustomer history: encrypted export, dry-run matching report, the (not enabled) import |
+| [docs/kustomer-migration.md](docs/kustomer-migration.md) | Kustomer history: encrypted export, dry-run matching report, the import (every conversation onto someone's Story) |
 | [docs/kustomer-routing.md](docs/kustomer-routing.md) | Queues, routing rules and teams taken from Kustomer: rule order, how conditions translate, what was left out |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Failed deploys, health checks, sign-in problems |
 | [docs/kpi.md](docs/kpi.md) | KPI scorecard: metric definitions, sources, refresh schedule, how to add a brand |

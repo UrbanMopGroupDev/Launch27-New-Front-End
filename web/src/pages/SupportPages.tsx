@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { inbox, type Channel, type Contact, type Role } from '../inbox/api';
-import { Customer360 } from '../inbox/Customer360';
+import { Customer360, Story } from '../inbox/Customer360';
 import { Cleaner360 } from '../inbox/Cleaner360';
 import { CleanerProfile } from '../inbox/CleanerProfile';
 import { CHANNEL_ICON, ROLE_LABEL, ago, displayIdentity, useInboxMe, useMeta } from '../inbox/util';
@@ -32,6 +32,9 @@ export function ContactPage() {
       setError((err as Error).message);
     }
   };
+
+  // Someone not in Launch27 (no customer, not a cleaner): this page is where their Story lives.
+  const storyHere = !c.l27_customer_id && !c.l27_team_id && !c.roles.includes('cleaner');
 
   // Cleaners get their own profile; contact details sit behind "Edit contact".
   if (c.roles.includes('cleaner') && c.l27_team_id) {
@@ -95,22 +98,28 @@ export function ContactPage() {
             ))}
           </div>
           {c.roles.includes('customer') || !c.roles.length ? <LeadFields contact={c} /> : null}
-          <h3>Conversations</h3>
-          <div className="mini-list">
-            {c.conversations?.map((x) => (
-              <Link key={x.id} to={`/inbox/${x.id}`} className="mini-row link-row">
-                <span>{CHANNEL_ICON[x.channel]}</span>
-                <span className="clip">{x.subject || x.last_preview}</span>
-                <span className="muted small">{x.disposition?.reason || x.status} · {ago(x.last_message_at)}</span>
-              </Link>
-            ))}
-            {!c.conversations?.length && <div className="muted small">None yet.</div>}
-          </div>
+          {!storyHere && (
+            <>
+              <h3>Conversations</h3>
+              <div className="mini-list">
+                {c.conversations?.map((x) => (
+                  <Link key={x.id} to={`/inbox/${x.id}`} className="mini-row link-row">
+                    <span>{CHANNEL_ICON[x.channel]}</span>
+                    <span className="clip">{x.subject || x.last_preview}</span>
+                    <span className="muted small">{x.disposition?.reason || x.status} · {ago(x.last_message_at)}</span>
+                  </Link>
+                ))}
+                {!c.conversations?.length && <div className="muted small">None yet.</div>}
+              </div>
+            </>
+          )}
         </section>
         <section className="card no-pad">
-          {c.roles.includes('cleaner') ? <Cleaner360 contact={c} /> : <Customer360 contact={c} />}
+          {c.roles.includes('cleaner') ? <Cleaner360 contact={c} /> : <Customer360 contact={c} hideHistory={storyHere} />}
         </section>
       </div>
+      {/* Not in Launch27 (e.g. a profile the Kustomer import made): their Story is every conversation. */}
+      {storyHere && <Story contactId={c.id} conversationsOnly />}
     </>
   );
 }

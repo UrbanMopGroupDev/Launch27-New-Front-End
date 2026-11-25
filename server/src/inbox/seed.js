@@ -1,7 +1,7 @@
 import { seedWorkforce } from './workforce.js';
 // Starting configuration for UrbanMop: queues and routing rules as they are in Kustomer
 // (routing export of Nov 25, 2026: 14 live queues, 22 queue rules, 18 teams with routing
-// profiles). Databases seeded before that export are moved to it by migration 0033.
+// profiles). Databases seeded before that export are moved to it by migration 0036.
 //
 // Rule order: a few rules that came from Kustomer business rules (not in the routing
 // export) run first, because they close, redact or escalate before queue routing; then
