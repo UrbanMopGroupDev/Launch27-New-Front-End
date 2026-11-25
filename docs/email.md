@@ -5,21 +5,24 @@ conversation (routed, threaded, matched to the Launch27 customer, with a reply t
 agents answer from the inbox or start an email from a customer's page. Every email
 conversation is listed in the inbox and on the customer's page (Story → Conversations).
 
-## Email is read-only
+## Sending email
 
-For now **no email can be sent to anyone from this platform**, in any environment. Email can
-be read (the Gmail sync below keeps working), but:
+Email can be read **and sent**: agents reply by email in the customer's thread, start an email
+from **New conversation** or a customer's page, and attach files. In production replies go
+through Gmail; in development and QA every email is recorded as a sandbox message and nothing
+is sent (as for texts).
 
-- email replies and new email conversations are refused by the server (403, "Email is read-only");
-- the outbound path never hands an email to the Gmail connector, and the connector the app
-  receives refuses to send;
-- Gmail is asked only for read access (`gmail.readonly`), so Google itself would refuse a send;
-- the composer shows email as read-only, and the customer page's Email button is off.
-
-Agents answer by text or add an internal note. This is a code constant
-(`EMAIL_SENDING_ENABLED = false` in `server/src/inbox/channels.js`), not an environment
-setting: turning sending on needs an approved code change, plus the `gmail.send` scope in
-`gmail.js` and in Google Workspace. Customer history will come from Kustomer later.
+- **Attachments**: the reply box's **Attach** button, dragging files onto it, or pasting a
+  screenshot. Up to 10 files and about 18 MB together (Gmail's 25 MB limit after encoding).
+  Kinds Gmail refuses (`.exe`, `.js`, `.bat`, …) are refused with a clear message. An email
+  with files goes through Gmail's upload address. Files on sent emails are listed on the
+  message and can be downloaded again from Gmail, like files on received mail.
+- **Sending needs Google's permission**: reading and sending sign in separately
+  (`gmail.readonly` and `gmail.send`). Until `gmail.send` is allowed in Google Workspace
+  (setup step 3), replies show **not sent** with Google's reason, and reading keeps working.
+- Turning sending off again is a code constant (`EMAIL_SENDING_ENABLED` in
+  `server/src/inbox/channels.js`), not a setting: when false, email replies and new email
+  conversations are refused and the connector the app gets cannot send.
 
 Launch27 itself may still email customers about booking changes made through the app in
 production (its own notifications); that is outside this setting.
@@ -58,7 +61,7 @@ see docs/architecture.md).
 | | Development / QA | Production |
 | --- | --- | --- |
 | Email in the inbox | Works end to end with the **sandbox** channel: compose, thread, route | Gmail |
-| Sending | Off (read-only) | Off (read-only) |
+| Sending | Recorded as sandbox, never sent | Sent through Gmail (attachments included) |
 | Reading mailboxes | Never (dev and QA must not hold real mail). Use the Channel simulator | Every minute |
 
 `GMAIL_*` variables are ignored outside production (with a warning in the logs), so a copied
@@ -74,7 +77,9 @@ and sends for every mailbox, and no person's login is involved.
    the file safe; it is a secret.
 3. Google Workspace Admin → Security → Access and data control → API controls → Domain-wide
    delegation → Add new: the service account's **client ID** with these scopes:
-   `https://www.googleapis.com/auth/gmail.readonly` (add `gmail.send` only when sending is approved)
+   `https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/gmail.send`
+   (if the client ID is already listed with only `gmail.readonly`, edit it and add `gmail.send`;
+   without it, mail is still read but replies are not sent)
 4. In Railway (production) set:
    - `GMAIL_SERVICE_ACCOUNT_JSON`: the whole JSON key (raw JSON, or base64 of it)
    - `GMAIL_MAILBOXES`: the mailboxes to read and send from, comma-separated, e.g.

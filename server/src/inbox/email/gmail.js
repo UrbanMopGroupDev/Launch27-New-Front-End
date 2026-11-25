@@ -5,19 +5,24 @@
 //   - a service account with domain-wide delegation: one key reads and sends for every
 //     @urbanmop.ca mailbox listed in GMAIL_MAILBOXES (recommended);
 //   - an OAuth refresh token for a single mailbox (its send-as aliases can still be listed).
-// Scope: gmail.readonly only, because email is read-only for now (see GMAIL_SCOPES). We never delete, label or
-// mark mail as read, so the team can keep using Gmail alongside the inbox.
-import { createSign } from 'node:crypto';
+// Scopes: read (gmail.readonly) and send (gmail.send), each asked for only when used, so
+// reading keeps working even before Google Workspace has allowed sending. We never delete,
+// label or mark mail as read, so the team can keep using Gmail alongside the inbox.
+import { createSign, randomUUID } from 'node:crypto';
 import { normalizeEmail } from '../normalize.js';
-import { buildMessage, toBase64Url } from './mime.js';
+import { attachmentParts, buildMessage, toBase64Url } from './mime.js';
 
-// Email is read-only (channels.js EMAIL_SENDING_ENABLED): only the read permission is requested,
-// so Google itself refuses any attempt to send. Sending later also needs GMAIL_SEND_SCOPE here.
+// A service account must be allowed both scopes in Google Workspace (domain-wide delegation).
+// Reading and sending use separate sign-ins: if sending isn't allowed yet, only sends fail.
+export const GMAIL_READ_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
 export const GMAIL_SEND_SCOPE = 'https://www.googleapis.com/auth/gmail.send';
-export const GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.readonly'];
+export const GMAIL_SCOPES = [GMAIL_READ_SCOPE, GMAIL_SEND_SCOPE];
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const API = 'https://gmail.googleapis.com/gmail/v1/users';
+const UPLOAD = 'https://gmail.googleapis.com/upload/gmail/v1/users';
 const TIMEOUT_MS = 20_000;
+const UPLOAD_TIMEOUT_MS = 120_000;
+const LARGE_FROM = 3_000_000; // characters of the finished message: bigger ones go by upload
 
 export class GmailError extends Error {
   constructor(status, message) {
@@ -62,7 +67,7 @@ export function parseServiceAccount(value) {
 }
 
 export function createGmailClient({ auth, fetchImpl = fetch, now = () => Date.now() }) {
-  const tokens = new Map(); // account -> { token, exp }
+  const tokens = new Map(); // account|scope -> { token, exp }
 
   async function tokenRequest(params) {
     const res = await fetchImpl(TOKEN_URL, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(params).toString(), signal: AbortSignal.timeout(TIMEOUT_MS) });
@@ -71,14 +76,14 @@ export function createGmailClient({ auth, fetchImpl = fetch, now = () => Date.no
     return { token: body.access_token, exp: now() + (Number(body.expires_in) || 3600) * 1000 - 60_000 };
   }
 
-  async function token(account) {
-    const key = auth.serviceAccount ? account : '*';
+  async function token(account, scope = GMAIL_READ_SCOPE) {
+    const key = `${auth.serviceAccount ? account : '*'}|${scope}`;
     const cached = tokens.get(key);
     if (cached && cached.exp > now()) return cached.token;
     let fresh;
     if (auth.serviceAccount) {
       const iat = Math.floor(now() / 1000);
-      const claims = { iss: auth.serviceAccount.client_email, sub: account, scope: GMAIL_SCOPES.join(' '), aud: TOKEN_URL, iat, exp: iat + 3600 };
+      const claims = { iss: auth.serviceAccount.client_email, sub: account, scope, aud: TOKEN_URL, iat, exp: iat + 3600 };
       const unsigned = `${toBase64Url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }))}.${toBase64Url(JSON.stringify(claims))}`;
       const signature = createSign('RSA-SHA256').update(unsigned).sign(auth.serviceAccount.private_key).toString('base64url');
       fresh = await tokenRequest({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: `${unsigned}.${signature}` });
@@ -89,15 +94,15 @@ export function createGmailClient({ auth, fetchImpl = fetch, now = () => Date.no
     return fresh.token;
   }
 
-  async function call(account, method, path, { query, body } = {}) {
+  async function call(account, method, path, { query, body, scope = GMAIL_READ_SCOPE } = {}) {
     const qs = query ? `?${new URLSearchParams(Object.entries(query).flatMap(([k, v]) => (Array.isArray(v) ? v.map((x) => [k, x]) : v == null ? [] : [[k, String(v)]]))).toString()}` : '';
     const res = await fetchImpl(`${API}/${encodeURIComponent(account)}${path}${qs}`, {
       method,
-      headers: { authorization: `Bearer ${await token(account)}`, accept: 'application/json', ...(body ? { 'content-type': 'application/json' } : {}) },
+      headers: { authorization: `Bearer ${await token(account, scope)}`, accept: 'application/json', ...(body ? { 'content-type': 'application/json' } : {}) },
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
-    if (res.status === 401) tokens.delete(auth.serviceAccount ? account : '*');
+    if (res.status === 401) tokens.delete(`${auth.serviceAccount ? account : '*'}|${scope}`);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new GmailError(res.status, `Gmail ${res.status}: ${data.error?.message || res.statusText || 'request failed'}`);
     return data;
@@ -131,7 +136,27 @@ export function createGmailClient({ auth, fetchImpl = fetch, now = () => Date.no
     attachment: (account, id, attachmentId) => call(account, 'GET', `/messages/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`),
     message: (account, id) => call(account, 'GET', `/messages/${encodeURIComponent(id)}`, { query: { format: 'full' } }),
     headers: (account, id, names) => call(account, 'GET', `/messages/${encodeURIComponent(id)}`, { query: { format: 'metadata', metadataHeaders: names } }),
-    send: (account, { raw, threadId }) => call(account, 'POST', '/messages/send', { body: { raw: toBase64Url(raw), ...(threadId ? { threadId } : {}) } }),
+    // A message with files goes through Gmail's upload address, which takes up to 35 MB; the
+    // ordinary one is for small messages. Both keep the email in its Gmail thread.
+    async send(account, { raw, threadId, large = false }) {
+      if (!large && raw.length < LARGE_FROM) return call(account, 'POST', '/messages/send', { scope: GMAIL_SEND_SCOPE, body: { raw: toBase64Url(raw), ...(threadId ? { threadId } : {}) } });
+      const boundary = `up-${randomUUID()}`;
+      const body = Buffer.concat([
+        Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(threadId ? { threadId } : {})}\r\n--${boundary}\r\nContent-Type: message/rfc822\r\n\r\n`),
+        Buffer.from(raw, 'utf8'),
+        Buffer.from(`\r\n--${boundary}--\r\n`),
+      ]);
+      const res = await fetchImpl(`${UPLOAD}/${encodeURIComponent(account)}/messages/send?uploadType=multipart`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${await token(account, GMAIL_SEND_SCOPE)}`, accept: 'application/json', 'content-type': `multipart/related; boundary=${boundary}` },
+        body,
+        signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
+      });
+      if (res.status === 401) tokens.delete(`${auth.serviceAccount ? account : '*'}|${GMAIL_SEND_SCOPE}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new GmailError(res.status, `Gmail ${res.status}: ${data.error?.message || res.statusText || 'request failed'}`);
+      return data;
+    },
   };
 }
 
@@ -157,8 +182,9 @@ export function createGmailConnector({ client, mailboxes, fromName = null }) {
       if (!account) throw new Error(`${message.from || 'That address'} isn't connected to Gmail. Send from ${[...sendAs.keys()].join(', ')}.`);
       const thread = message.thread || {};
       const existing = parseThreadKey(thread.key);
-      const { raw, messageId } = buildMessage({ from, fromName, to: message.to, subject: message.subject, body: message.body, inReplyTo: thread.inReplyTo, references: thread.references });
-      const sent = await client.send(account, { raw, threadId: existing?.account === account ? existing.threadId : null });
+      const files = message.attachments || [];
+      const { raw, messageId } = buildMessage({ from, fromName, to: message.to, subject: message.subject, body: message.body, attachments: files, inReplyTo: thread.inReplyTo, references: thread.references });
+      const sent = await client.send(account, { raw, threadId: existing?.account === account ? existing.threadId : null, large: files.length > 0 });
       // Gmail can replace our Message-ID; read back the one the customer will reply to.
       let finalId = messageId;
       try {
@@ -167,7 +193,18 @@ export function createGmailConnector({ client, mailboxes, fromName = null }) {
       } catch {
         // keep ours
       }
-      return { id: sent.id, thread_key: threadKey(account, sent.threadId), message_id: finalId };
+      return { id: sent.id, thread_key: threadKey(account, sent.threadId), message_id: finalId, mailbox: account };
+    },
+    /**
+     * One file from an email, received or sent: { filename, type, data: Buffer }. Read from
+     * Gmail when an agent asks for it; the portal keeps no copy.
+     */
+    async attachment({ mailbox, gmailId, index }) {
+      const parts = attachmentParts(await client.message(mailbox, gmailId));
+      const part = parts[index];
+      if (!part) throw new GmailError(404, 'That file is no longer on the email in Gmail');
+      const data = part.attachmentId ? Buffer.from((await client.attachment(mailbox, gmailId, part.attachmentId)).data || '', 'base64url') : Buffer.from(part.data || '', 'base64url');
+      return { filename: part.filename, type: part.type, data };
     },
   };
 }

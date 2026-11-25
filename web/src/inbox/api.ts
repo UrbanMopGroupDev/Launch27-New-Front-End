@@ -201,6 +201,8 @@ export interface Conversation extends Omit<ConversationRow, 'queue_name' | 'owne
   cleaner_id: number | null;
   cleaner_name: string | null;
   routed_by: string | null;
+  // Unsent reply on a conversation an agent started ("New conversation"); cleared when sent.
+  draft?: string | null;
   first_response_at: string | null;
   created_at: string;
   reopened_count: number;
@@ -220,9 +222,12 @@ export interface Message {
   author_id: number | null;
   author_name: string | null;
   delivery_state: string | null;
-  meta: Record<string, unknown> & { note?: string; result?: string; duration_seconds?: number; recording_url?: string; type?: string };
+  meta: Record<string, unknown> & { note?: string; result?: string; duration_seconds?: number; recording_url?: string; type?: string; via?: string; gmail_id?: string; mailbox?: string; cc?: string[]; attachments?: { filename: string; type?: string; size: number }[] };
   created_at: string;
 }
+
+// People offered first in "New conversation": recently contacted by this agent, or often by the team.
+export type SuggestedContact = Pick<Contact, 'id' | 'name' | 'roles' | 'l27_customer_id' | 'l27_team_id' | 'identities'> & { last_at: string; last_channel: Channel; times?: number };
 
 export interface Identity {
   id: number;
@@ -517,10 +522,14 @@ export const inbox = {
   kustomerPurge: () => call<{ purged: boolean }>('POST', '/admin/kustomer/purge'),
   smsAction: (provider: string, action: 'check' | 'disconnect' | 'connect' | 'take-over' | 'hand-back') => call<ChannelStatus>('POST', `/admin/sms/${provider}/${action}`),
   counts: () => call<Counts>('GET', '/counts'),
-  list: (params: { view?: string; status?: string; channel?: string; role?: string; q?: string; contact_id?: number; booking_id?: number }) => call<ConversationRow[]>('GET', `/conversations${qs(params)}`),
+  list: (params: { view?: string; status?: string; channel?: string; role?: string; q?: string; contact_id?: number; booking_id?: number; sort?: 'newest' | 'oldest' | 'due'; since?: string }) => call<ConversationRow[]>('GET', `/conversations${qs(params)}`),
   get: (id: number) => call<ConversationDetail>('GET', `/conversations/${id}`),
-  reply: (id: number, body: { body: string; channel?: Channel; to?: string; subject?: string; from?: string; idempotency_key?: string }) => call<Message>('POST', `/conversations/${id}/messages`, body),
+  reply: (id: number, body: { body: string; channel?: Channel; to?: string; subject?: string; from?: string; idempotency_key?: string; attachments?: { filename: string; type: string; data: string }[] }) => call<Message>('POST', `/conversations/${id}/messages`, body),
   note: (id: number, body: string) => call<Message>('POST', `/conversations/${id}/notes`, { body }),
+  saveDraft: (id: number, text: string) => call<{ ok: true }>('PUT', `/conversations/${id}/draft`, { text }),
+  bulkDone: (ids: number[], disposition?: Disposition) => call<{ done: number[]; failed: { id: number; error: string }[] }>('POST', '/conversations/bulk/done', { ids, disposition }),
+  personHistory: (id: number) => call<{ messages: Message[]; conversations: number }>('GET', `/conversations/${id}/history`),
+  suggested: () => call<{ recent: SuggestedContact[]; frequent: SuggestedContact[] }>('GET', '/contacts/suggested'),
   addEvent: (id: number, text: string, meta: Record<string, unknown> = {}) => call<Message>('POST', `/conversations/${id}/events`, { text, meta }),
   patch: (id: number, patch: Partial<{ status: Status; snooze_until: string; disposition: Disposition; queue_id: number; priority: number; l27_booking_id: number | null; complaint: Complaint | null; subject: string; cleaner_id: number | null; cleaner_name: string | null }>) => call<Conversation>('PATCH', `/conversations/${id}`, patch),
   claim: (id: number) => call<Conversation>('POST', `/conversations/${id}/claim`),

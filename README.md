@@ -111,7 +111,7 @@ inside a conversation.
 
 | Part | What it does |
 | --- | --- |
-| Inbox (`/inbox`) | Three panes: work list (mine, unassigned, mentions, late, "who is this?", each queue), the conversation with every channel in one thread, and the customer or cleaner 360 |
+| Inbox (`/inbox`) | Three panes: work list (opens on All; Mine and Unassigned tabs; Late, Mentions and "who is this?" when they have something; a queue picker; sort, time range and more filters; rows grouped by day; **New conversation**; **Select** to mark several done), the conversation (**Everything with them**: texts, calls and emails in one timeline, or this thread only; long messages folded; email files downloaded from Gmail), and the customer or cleaner details, which can be folded away (phones show one pane at a time) |
 | Customer 360 | Health strip (frequency, lifetime spend, cleans, cancellations, last rating, risk flag), next or pinned booking with live en-route/check-in status and lateness, booking tabs, ratings and cleaners they liked or didn't, card on file, home notes, all conversations |
 | Cleaner 360 | Today's bookings with time tracking, availability, rating and happy %, late check-ins in 30 days, unhappy comments, quick texts (ask for ETA, confirm arrival) |
 | Booking actions | From the pinned booking: edit/reschedule (booking form), cancel, restore, new booking, text the assigned cleaner. Each change is logged on the conversation |
@@ -124,11 +124,11 @@ inside a conversation.
 | Phone | RingCentral Embeddable widget (loads when `RINGCENTRAL_CLIENT_ID` is set): calls ring in the browser, the caller's profile pops, finished calls are logged; click-to-call from a profile |
 | Search | Ctrl+K: people by name, phone or email; message text; jump to a booking number |
 
-**Email is read-only.** In production new mail in each Gmail mailbox becomes a conversation
-within a minute, matched to the Launch27 customer, but **nothing can be emailed to anyone from
-the platform**: email replies and new email conversations are refused, and Gmail is asked only
-for read access (`EMAIL_SENDING_ENABLED` in `server/src/inbox/channels.js`). Dev and QA run a sandbox email channel (recorded, never
-sent, no mailbox read). Setup and how it works: [docs/email.md](docs/email.md); status in
+**Email is read and sent.** In production new mail in each Gmail mailbox becomes a conversation
+within a minute, matched to the Launch27 customer; agents reply by email in the customer's
+thread (with attached files), or start an email from New conversation or a customer's page.
+Sending needs the `gmail.send` scope allowed in Google Workspace. Dev and QA run a sandbox email
+channel (recorded, never sent, no mailbox read). Setup and how it works: [docs/email.md](docs/email.md); status in
 Support settings → Channels. **SMS runs on Twilio** (production only; RingCentral is used for calls, not texts): customers and cleaners text the business numbers,
 the texts arrive in the inbox matched to the Launch27 customer or cleaner and routed by the
 routing rules, and agents reply from the inbox. Unknown or shared numbers go to *Who is this?*.
