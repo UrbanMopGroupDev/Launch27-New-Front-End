@@ -291,6 +291,7 @@ export interface Contact {
   conversations?: (Pick<Conversation, 'id' | 'channel' | 'status' | 'subject' | 'l27_booking_id' | 'disposition' | 'complaint'> & { last_preview: string | null; last_message_at: string })[];
 }
 
+export type ContactConversation = NonNullable<Contact['conversations']>[number];
 export interface ConversationDetail {
   conversation: Conversation;
   messages: Message[];
@@ -346,7 +347,9 @@ export interface SmsProviderStatus {
   last_error_at: string | null;
   events: Record<string, number>;
 }
-export type KustomerMatchKind = 'confident' | 'review' | 'ambiguous' | 'conflict' | 'unmatched' | 'cleaner' | 'internal';
+export type KustomerMatchKind = 'confident' | 'phone' | 'picked' | 'cleaner' | 'existing' | 'internal' | 'new_profile';
+/** Where a Kustomer profile's conversations go: a Launch27 customer, a cleaner, an inbox contact, or a new profile. */
+export type KustomerTarget = 'customer' | 'cleaner' | 'contact' | 'new';
 export interface KustomerExport {
   id: number;
   kind: 'full' | 'catchup';
@@ -373,8 +376,13 @@ export interface KustomerDryRunResults {
   preview_only_messages: number;
   new_conversations: number;
   already_imported: number;
-  match: Record<KustomerMatchKind, number>;
-  conversations_by_match: Record<KustomerMatchKind, number>;
+  match: Partial<Record<KustomerMatchKind, number>>;
+  conversations_by_match: Partial<Record<KustomerMatchKind, number>>;
+  /** 2 since every conversation gets a customer; earlier dry runs can't be imported. */
+  plan_version?: number;
+  by_target?: Record<KustomerTarget, number>;
+  /** About how many new profiles the import will make. */
+  new_profiles?: number;
   by_channel: Record<string, number>;
   by_direction: { in: number; out: number; unknown: number };
   oldest: string | null;
@@ -406,17 +414,20 @@ export interface KustomerImport {
   messages: number;
   notes: number;
   skipped: number;
-  reconcile: { planned: number; imported: number; missing: number; different: number; missing_ids: string[]; different_ids: string[] } | null;
+  /** New profiles the import made. */
+  profiles: number;
+  reconcile: { planned: number; imported: number; missing: number; different: number; without_customer?: number; missing_ids: string[]; different_ids: string[] } | null;
   created_by_name: string | null;
   created_at: string;
   finished_at: string | null;
   rolled_back_at: string | null;
   rolled_back_conversations: number | null;
+  rolled_back_profiles: number | null;
   last_error: string | null;
 }
 export interface KustomerTest { source: string; ok: boolean; checks: { name: string; ok: boolean; status?: number | null; error?: string; hint?: string | null }[]; sample: { customers_on_first_page: number; more_pages: boolean; total_reported: number | null } }
 export interface KustomerScope { source: string; customers_total: number | null; customers_on_first_page: number; more_pages: boolean; oldest_on_first_page: string | null; rate_per_minute: number | null; note: string }
-export interface KustomerMatch { kustomer_customer_id: string; name: string | null; match: KustomerMatchKind; method: string | null; l27_customer_id: number | null; contact_id: number | null; candidates: number[]; reason: string | null; conversations: number; messages: number; notes: number }
+export interface KustomerMatch { kustomer_customer_id: string; name: string | null; match: KustomerMatchKind; target: KustomerTarget | null; method: string | null; l27_customer_id: number | null; l27_team_id: number | null; contact_id: number | null; candidates: number[]; reason: string | null; conversations: number; messages: number; notes: number }
 export interface KustomerPlanConversation { kustomer_conversation_id: string; l27_customer_id: number | null; action: 'new' | 'already_imported' | 'skip'; match: string; channels: string[]; messages: number; notes: number; duplicate_messages: number; preview_only_messages: number; first_at: string | null; last_at: string | null; reason: string | null }
 
 export interface ChannelStatus {
@@ -540,6 +551,8 @@ export const inbox = {
   match: (id: number, contactId: number) => call<Conversation>('POST', `/conversations/${id}/match`, { contact_id: contactId }),
   start: (body: { contact_id: number; channel: 'email' | 'sms'; to?: string; from?: string; subject?: string; body?: string; l27_booking_id?: number }) => call<Conversation>('POST', '/conversations', body),
   contact: (id: number) => call<Contact>('GET', `/contacts/${id}`),
+  /** Every conversation of a contact, newest first; pass the previous page's `next` to continue. */
+  contactConversations: (id: number, before?: string | null, limit = 100) => call<{ rows: ContactConversation[]; next: string | null }>('GET', `/contacts/${id}/conversations${qs({ before: before || undefined, limit })}`),
   findContacts: (q: string) => call<Contact[]>('GET', `/contacts${qs({ q })}`),
   createContact: (body: { name: string; roles: Role[]; email?: string; phone?: string }) => call<Contact>('POST', '/contacts', body),
   updateContact: (id: number, patch: Partial<Omit<Contact, 'id' | 'identities' | 'conversations'>>) => call<Contact>('PATCH', `/contacts/${id}`, patch),

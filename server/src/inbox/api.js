@@ -568,6 +568,30 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     res.json({ ...contact, identities, conversations });
   }));
 
+  // Every conversation of a contact, newest first, a page at a time (a Story or a cleaner's
+  // history can go back years, e.g. Kustomer history). Same visibility as above.
+  // ?before=<last_message_at>|<id> continues after the previous page's last row.
+  r.get('/contacts/:id/conversations', wrap(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) throw new svc.InboxError(400, 'Bad contact id');
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
+    const [at, beforeId] = String(req.query.before || '').split('|');
+    const cursor = at && Number(beforeId) > 0 && !Number.isNaN(Date.parse(at)) ? [new Date(at).toISOString(), Number(beforeId)] : null;
+    const visible = await visibleQueueIds(req.user);
+    const rows = await many(
+      db,
+      `SELECT c.id, c.channel, c.status, c.subject, c.last_preview, c.last_message_at, c.l27_booking_id, c.queue_id, c.owner_id, c.disposition, c.complaint, c.source
+       FROM conversations c WHERE c.contact_id = $1 AND (c.queue_id IS NULL OR c.queue_id = ANY($2::bigint[]) OR c.owner_id = $3) AND ${HAS_CONTENT}
+         AND ($4::timestamptz IS NULL OR (c.last_message_at, c.id) < ($4::timestamptz, $5::bigint))
+       ORDER BY c.last_message_at DESC, c.id DESC LIMIT $6`,
+      [id, visible, req.user.id, cursor?.[0] ?? null, cursor?.[1] ?? null, limit + 1],
+    );
+    const more = rows.length > limit;
+    const page = rows.slice(0, limit);
+    const last = page.at(-1);
+    res.json({ rows: page, next: more && last ? `${new Date(last.last_message_at).toISOString()}|${last.id}` : null });
+  }));
+
   r.post('/contacts', wrap(async (req, res) => {
     const { name, roles = ['customer'], email, phone } = req.body || {};
     const identities = [email && { kind: 'email', value: email }, phone && { kind: 'phone', value: phone }].filter(Boolean);

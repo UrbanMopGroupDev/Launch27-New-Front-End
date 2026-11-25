@@ -107,7 +107,7 @@ its own `SESSION_SECRET`; never copy one between environments.
 | `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` | `${{Postgres.DATABASE_URL}}` | `${{Postgres.DATABASE_URL}}` |
 | `L27_ALLOW_WRITES` | — | — | true when ready |
 | `LOG_LEVEL` | debug | info | info |
-| `L27_SYNC_EMAIL` / `L27_SYNC_PASSWORD` | — (ignored) | — (ignored) | read-only staff login for the nightly segment update |
+| `L27_SYNC_EMAIL` / `L27_SYNC_PASSWORD` | — (ignored) | — (ignored) | read-only staff login for background Launch27 reads: segments, planner, reports, KPI, complaints, inbox matching, and the Kustomer migration's dry run |
 
 ## Customer segments: when they update
 
