@@ -427,6 +427,15 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     res.status(201).json(await db.tx((q) => svc.reply(q, req.user, req.params.id, req.body || {}, { connectors })));
   }));
 
+  // My email signature (Support settings -> My email signature): **bold** and [link](address).
+  r.get('/me/signature', wrap(async (req, res) => res.json(await svc.signatureFor(db, req.user))));
+  r.put('/me/signature', wrap(async (req, res) => {
+    const body = String(req.body?.body ?? '').replace(/\r\n/g, '\n').slice(0, 2000).trim();
+    if (body) await db.query('INSERT INTO user_signatures (user_id, body) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET body = EXCLUDED.body, updated_at = now()', [req.user.id, body]);
+    else await db.query('DELETE FROM user_signatures WHERE user_id = $1', [req.user.id]);
+    res.json(await svc.signatureFor(db, req.user));
+  }));
+
   r.post('/conversations/:id/notes', wrap(async (req, res) => {
     await loadConversation(req, req.params.id);
     res.status(201).json(await db.tx((q) => svc.addNote(q, req.user, req.params.id, req.body?.body)));

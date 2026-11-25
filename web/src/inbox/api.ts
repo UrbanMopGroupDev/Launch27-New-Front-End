@@ -68,6 +68,7 @@ export interface WorkspaceSettings {
   require_disposition: boolean;
   alert_on_long_away: boolean;
   settings_editors: SettingsEditors;
+  email_from_name: string;
 }
 export type SettingsEditors = 'everyone' | 'supervisors' | 'admins';
 
@@ -496,6 +497,8 @@ export const inbox = {
   setStatus: (status_id: number) => call<{ status_id: number; status: string; presence: Presence; requeued: number }>('PUT', '/me/status', { status_id }),
   setUserStatus: (userId: number, status_id: number) => call<{ requeued: number }>('PUT', `/users/${userId}/status`, { status_id }),
   workforce: () => call<Workforce>('GET', '/admin/workforce'),
+  signature: () => call<{ body: string; custom: boolean; fallback: string }>('GET', '/me/signature'),
+  saveSignature: (body: string) => call<{ body: string; custom: boolean; fallback: string }>('PUT', '/me/signature', { body }),
   saveSettings: (patch: Partial<WorkspaceSettings>) => call<WorkspaceSettings>('PUT', '/admin/settings', patch),
   saveStatuses: (statuses: Partial<AgentStatus>[]) => call<AgentStatus[]>('PUT', '/admin/statuses', { statuses }),
   saveTeams: (teams: Team[]) => call<void>('PUT', '/admin/teams', { teams }),
@@ -524,7 +527,7 @@ export const inbox = {
   counts: () => call<Counts>('GET', '/counts'),
   list: (params: { view?: string; status?: string; channel?: string; role?: string; q?: string; contact_id?: number; booking_id?: number; sort?: 'newest' | 'oldest' | 'due'; since?: string }) => call<ConversationRow[]>('GET', `/conversations${qs(params)}`),
   get: (id: number) => call<ConversationDetail>('GET', `/conversations/${id}`),
-  reply: (id: number, body: { body: string; channel?: Channel; to?: string; subject?: string; from?: string; idempotency_key?: string; attachments?: { filename: string; type: string; data: string }[] }) => call<Message>('POST', `/conversations/${id}/messages`, body),
+  reply: (id: number, body: { body: string; channel?: Channel; to?: string; subject?: string; from?: string; cc?: string[]; idempotency_key?: string; attachments?: { filename: string; type: string; data: string }[] }) => call<Message>('POST', `/conversations/${id}/messages`, body),
   note: (id: number, body: string) => call<Message>('POST', `/conversations/${id}/notes`, { body }),
   saveDraft: (id: number, text: string) => call<{ ok: true }>('PUT', `/conversations/${id}/draft`, { text }),
   bulkDone: (ids: number[], disposition?: Disposition) => call<{ done: number[]; failed: { id: number; error: string }[] }>('POST', '/conversations/bulk/done', { ids, disposition }),

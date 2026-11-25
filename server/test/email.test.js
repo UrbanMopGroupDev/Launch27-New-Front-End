@@ -16,6 +16,11 @@ import { EMAIL_SENDING_ENABLED, guardConnectors, sendOutbound } from '../src/inb
 const b64 = (s) => Buffer.from(s, 'utf8').toString('base64url');
 const unraw = (raw) => Buffer.from(raw, 'base64url').toString('utf8');
 const bodyOf = (raw) => Buffer.from(raw.split('\r\n\r\n')[1].replace(/\r\n/g, ''), 'base64').toString('utf8');
+// One part of a multipart email (text/plain or text/html), decoded.
+const partOf = (raw, type) => {
+  const m = new RegExp(`Content-Type: ${type.replace('/', '\\/')}; charset=UTF-8\\r\\nContent-Transfer-Encoding: base64\\r\\n\\r\\n([A-Za-z0-9+/=\\r\\n]+?)\\r\\n--`).exec(raw);
+  return m ? Buffer.from(m[1].replace(/\r\n/g, ''), 'base64').toString('utf8') : null;
+};
 
 /** A Gmail message as the API returns it (format=full). */
 function gmailMsg({ id, threadId, from, to, subject, text, html, messageId, inReplyTo, references, cc, at = Date.now(), labels = ['INBOX', 'UNREAD'] }) {
@@ -261,7 +266,12 @@ describe('customer email conversations end to end (fake Gmail)', () => {
     assert.equal(out.via, 'send'); // no files: the ordinary send
     assert.match(out.raw, /^To: jane@example\.com$/m);
     assert.match(out.raw, /^In-Reply-To: <cust-1@example\.com>$/m);
-    assert.equal(bodyOf(out.raw), 'Thursday 9am works. See you then!');
+    // Formatted: plain text and HTML, both ending with the agent's signature (default: their name and the business).
+    assert.match(out.raw, /^Content-Type: multipart\/alternative; boundary="alt-/m);
+    assert.equal(partOf(out.raw, 'text/plain').replace(/\r\n/g, '\n'), `Thursday 9am works. See you then!\n\n${sent.body.body.split('\n\n').at(-1)}`);
+    assert.match(partOf(out.raw, 'text/html'), /^<div style="font-family: Arial[^"]*">Thursday 9am works\. See you then!<br><br>/);
+    assert.ok(sent.body.body.startsWith('Thursday 9am works. See you then!\n\n'));
+    assert.match(sent.body.body, /UrbanMop$/);
     const stored = (await db.query('SELECT meta, external_id FROM messages WHERE id = $1', [sent.body.id])).rows[0];
     assert.equal(stored.meta.message_id, out.messageId);
     assert.equal(stored.meta.gmail_id, out.id);
@@ -273,6 +283,25 @@ describe('customer email conversations end to end (fake Gmail)', () => {
     assert.equal(gmail.sent.length, 1);
     const ch = await api('/api/channels');
     assert.equal(ch.body.email.read_only, false);
+  });
+
+  test('Cc, my own signature (bold and links) and the sender name from Support settings', async () => {
+    const sig = await api('/api/me/signature', { body: '**Sam Agent**\n[urbanmop.ca](https://urbanmop.ca) · <b>no html</b>' }, 'PUT');
+    assert.equal(sig.body.custom, true);
+    await api('/api/admin/settings', { email_from_name: 'UrbanMop Residential' }, 'PUT');
+    const sent = await api(`/api/conversations/${convId}/messages`, { body: 'Copying our team lead.', idempotency_key: 'em-cc', cc: ['lead@example.com', ' Lead@Example.com ', 'jane@example.com'] });
+    assert.equal(sent.status, 201);
+    const out = gmail.sent.at(-1);
+    assert.match(out.raw, /^Cc: lead@example\.com$/m); // once, and never the person it's addressed to
+    assert.match(out.raw, /^From: "?UrbanMop Residential"? <info@urbanmop\.ca>$/m);
+    const html = partOf(out.raw, 'text/html');
+    assert.match(html, /<strong>Sam Agent<\/strong><br><a href="https:\/\/urbanmop\.ca" target="_blank">urbanmop\.ca<\/a> · &lt;b&gt;no html&lt;\/b&gt;/);
+    assert.equal(partOf(out.raw, 'text/plain').replace(/\r\n/g, '\n'), 'Copying our team lead.\n\nSam Agent\nurbanmop.ca · <b>no html</b>');
+    assert.deepEqual(sent.body.meta.cc, ['lead@example.com']);
+    assert.equal((await api(`/api/conversations/${convId}/messages`, { body: 'x', idempotency_key: 'em-cc2', cc: ['not an address'] })).status, 400);
+    // Clearing the signature goes back to the default; the sender name back to EMAIL_FROM_NAME.
+    assert.equal((await api('/api/me/signature', { body: '' }, 'PUT')).body.custom, false);
+    await api('/api/admin/settings', { email_from_name: '' }, 'PUT');
   });
 
   test('files go with an email: one message with the text and each file, sent by upload', async () => {
@@ -326,7 +355,7 @@ describe('customer email conversations end to end (fake Gmail)', () => {
     assert.equal(await sync.run(), 1);
     const detail = await api(`/api/conversations/${convId}`);
     const msgs = detail.body.messages.filter((m) => m.kind === 'message');
-    assert.deepEqual(msgs.map((m) => m.direction), ['in', 'out', 'out', 'in']);
+    assert.deepEqual(msgs.map((m) => m.direction), ['in', 'out', 'out', 'out', 'in']);
     assert.equal(msgs.at(-1).body, 'Perfect, thanks!');
     const n = (await db.query("SELECT count(*)::int AS n FROM conversations WHERE channel = 'email'")).rows[0].n;
     assert.equal(n, 1);
@@ -349,7 +378,7 @@ describe('customer email conversations end to end (fake Gmail)', () => {
     gmail.deliver('info@urbanmop.ca', gmailMsg({ id: 'in3', threadId: `t-${out.id}`, from: 'raj@example.com', to: 'info@urbanmop.ca', subject: 'Re: Your Friday clean', messageId: '<raj-1@example.com>', text: 'Sure, ask away.' }));
     assert.equal(await sync.run(), 1);
     const detail = await api(`/api/conversations/${conv.body.id}`);
-    assert.deepEqual(detail.body.messages.filter((m) => m.kind === 'message').map((m) => m.body), ['Hi Raj, a quick question about Friday.', 'Sure, ask away.']);
+    assert.deepEqual(detail.body.messages.filter((m) => m.kind === 'message').map((m) => m.body.split('\n\n')[0]), ['Hi Raj, a quick question about Friday.', 'Sure, ask away.']);
     const full = await api(`/api/contacts/${contact.body.id}`);
     assert.equal(full.body.conversations.length, 1);
   });
