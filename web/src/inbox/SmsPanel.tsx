@@ -59,8 +59,12 @@ function ProviderPanel({ p, sandbox, isAdmin }: { p: SmsProviderStatus; sandbox:
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const name = LABEL[p.provider];
-  const act = async (a: 'check' | 'disconnect' | 'connect') => {
+  const elsewhere = p.health?.webhook_elsewhere || [];
+  const handedOver = p.handed_over || [];
+  const act = async (a: 'check' | 'disconnect' | 'connect' | 'take-over' | 'hand-back') => {
     if (a === 'disconnect' && !window.confirm(`Disconnect ${name} SMS? Its numbers will not send or receive texts until an admin reconnects. Texts that arrive meanwhile are picked up when you reconnect.`)) return;
+    if (a === 'take-over' && !window.confirm(`Send incoming texts for ${elsewhere.map(displayIdentity).join(', ')} straight to the portal?\n\nThey arrive in the Inbox within seconds instead of up to a minute later. Where they go now (for example Kustomer) stops receiving them. Where each number pointed is saved, and "Hand back" puts it back.`)) return;
+    if (a === 'hand-back' && !window.confirm(`Hand ${handedOver.map(displayIdentity).join(', ')} back to where their incoming texts went before?\n\nThe portal keeps finding their texts with the missed-text check, up to a minute late.`)) return;
     setBusy(true);
     setError(null);
     try {
@@ -94,7 +98,7 @@ function ProviderPanel({ p, sandbox, isAdmin }: { p: SmsProviderStatus; sandbox:
         <tbody>
           {p.numbers.map((n) => (
             <tr key={n.number}>
-              <td>{displayIdentity(n.number)}{h?.webhook_elsewhere?.includes(n.number) && <div className="error small">Its incoming texts are still sent somewhere else in Twilio.</div>}</td>
+              <td>{displayIdentity(n.number)}{h?.webhook_elsewhere?.includes(n.number) && <div className="error small">Its incoming texts are still sent somewhere else in Twilio, so they reach the Inbox up to a minute late.</div>}</td>
               <td>{n.can_send ? <span className="wl-pill wl-done">Yes</span> : <span className="wl-pill wl-on">No: not SMS-enabled</span>}</td>
               <td>{n.queue}</td>
             </tr>
@@ -115,6 +119,12 @@ function ProviderPanel({ p, sandbox, isAdmin }: { p: SmsProviderStatus; sandbox:
       {error && <div className="error small">{error}</div>}
       {isAdmin ? (
         <div className="backfill-actions">
+          {p.enabled && elsewhere.length > 0 && (
+            <button type="button" disabled={busy} onClick={() => act('take-over')}>Send incoming texts to the portal</button>
+          )}
+          {p.enabled && handedOver.length > 0 && (
+            <button type="button" className="secondary" disabled={busy} onClick={() => act('hand-back')}>Hand back</button>
+          )}
           <button type="button" className="secondary" disabled={busy} onClick={() => act('check')}>Check connection</button>
           {p.enabled ? (
             <button type="button" className="secondary" disabled={busy} onClick={() => act('disconnect')}>Disconnect {name}</button>

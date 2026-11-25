@@ -331,6 +331,7 @@ export interface SmsProviderStatus {
   configured_numbers: string[];
   numbers: { number: string; can_send: boolean; queue: string }[];
   receiving: string;
+  handed_over?: string[];
   last_webhook_at: string | null;
   last_received_at: string | null;
   last_reconcile_at: string | null;
@@ -514,7 +515,7 @@ export const inbox = {
   kustomerImport: () => call<KustomerImport>('POST', '/admin/kustomer/imports'),
   kustomerImportAction: (id: number, action: 'stop' | 'resume' | 'rollback') => call<KustomerImport>('POST', `/admin/kustomer/imports/${id}/${action}`),
   kustomerPurge: () => call<{ purged: boolean }>('POST', '/admin/kustomer/purge'),
-  smsAction: (provider: string, action: 'check' | 'disconnect' | 'connect') => call<ChannelStatus>('POST', `/admin/sms/${provider}/${action}`),
+  smsAction: (provider: string, action: 'check' | 'disconnect' | 'connect' | 'take-over' | 'hand-back') => call<ChannelStatus>('POST', `/admin/sms/${provider}/${action}`),
   counts: () => call<Counts>('GET', '/counts'),
   list: (params: { view?: string; status?: string; channel?: string; role?: string; q?: string; contact_id?: number; booking_id?: number }) => call<ConversationRow[]>('GET', `/conversations${qs(params)}`),
   get: (id: number) => call<ConversationDetail>('GET', `/conversations/${id}`),
