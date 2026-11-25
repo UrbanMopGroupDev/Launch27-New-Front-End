@@ -70,11 +70,22 @@ opted-out number are refused.
    - `L27_SYNC_EMAIL` / `L27_SYNC_PASSWORD` (already used elsewhere) for Launch27 matching
 3. Deploy. Support settings → Channels → **Text messages · Twilio** shows the incoming texts URL
    (`https://<production domain>/webhooks/twilio/sms`).
-4. **Switching a number over** (it may be connected to Kustomer today): in the Twilio console,
-   Phone Numbers → the number → Messaging → *A message comes in* → Webhook, `HTTP POST`, that URL.
-   Until then the Channels screen flags the number ("incoming texts are still sent somewhere
-   else"); replies from the inbox still work, but customers' texts won't arrive here. This app
-   never changes a number's settings in Twilio itself.
+4. **Switching the numbers over** (they may be connected to Kustomer today). Until a number is
+   switched, the Channels screen flags it ("incoming texts are still sent somewhere else") and
+   the portal finds its texts with the missed-text check, which then runs **every minute**
+   instead of every 5. Replies from the inbox work either way. Two ways to switch:
+   - **From the portal** (admins): Support settings → Channels → **Send incoming texts to the
+     portal**. For each flagged number it saves where the number pointed (URL, method, TwiML
+     app) and then points *A message comes in* at the portal. **Hand back** puts every saved
+     number back exactly as it was. Both are written to the audit log. The portal only touches
+     the numbers in `TWILIO_SMS_NUMBERS`, and only when an admin presses the button.
+   - **In the Twilio console**: Phone Numbers → the number → Messaging → *A message comes in* →
+     Webhook, `HTTP POST`, the incoming texts URL.
+
+   Whatever pointed there before (for example Kustomer) stops receiving that number's texts.
+   If a number belongs to a **Messaging Service**, the service's own incoming setting wins over
+   the number's: remove the number from the service (or point the service at the portal) in the
+   Twilio console. The sign it is needed: after switching, "Last webhook event" stays at never.
 
 Without `TWILIO_WEBHOOK_BASE_URL`, incoming texts arrive through the 5-minute check and
 delivery status by polling.

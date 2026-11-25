@@ -196,8 +196,8 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
   // Admins: check, disconnect or reconnect one provider (credentials stay in Railway).
   r.post('/admin/sms/:provider/:action', needRole('admin'), wrap(async (req, res) => {
     const provider = Object.hasOwn(smsProviders, req.params.provider) ? smsProviders[req.params.provider] : null;
-    const actions = { check: 'check', disconnect: 'disconnect', connect: 'connect' };
-    if (!provider || !Object.hasOwn(actions, req.params.action)) throw new svc.InboxError(404, 'Unknown SMS provider or action');
+    const actions = { check: 'check', disconnect: 'disconnect', connect: 'connect', 'take-over': 'takeOver', 'hand-back': 'handBack' };
+    if (!provider || !Object.hasOwn(actions, req.params.action) || typeof provider[actions[req.params.action]] !== 'function') throw new svc.InboxError(404, 'Unknown SMS provider or action');
     await provider[actions[req.params.action]]();
     await svc.audit(db, req.user.id, `sms.${req.params.action}`, 'channel', `sms:${req.params.provider}`, {});
     res.json(await channelStatus());
