@@ -140,7 +140,7 @@ describe('Twilio SMS', () => {
     assert.deepEqual(t.health.not_sms_capable, [T3]);
     assert.deepEqual(t.health.webhook_elsewhere, [T2]);
     assert.equal(t.webhook_url, `${BASE}/webhooks/twilio/sms`);
-    assert.deepEqual(t.numbers.map((n) => [n.number, n.can_send, n.queue]), [[HIRING, true, 'Hiring'], [T2, true, 'Fallback'], [T3, false, 'Fallback']]);
+    assert.deepEqual(t.numbers.map((n) => [n.number, n.can_send, n.queue]), [[HIRING, true, 'HR Queue'], [T2, true, 'Default Queue'], [T3, false, 'Default Queue']]);
     assert.ok(!JSON.stringify(ch).includes(AUTH) && !JSON.stringify(ch).includes(SID));
     assert.deepEqual(ch.problems, []); // nothing was turned down at start-up
     const meta = (await api('/api/meta')).body;
@@ -157,7 +157,7 @@ describe('Twilio SMS', () => {
     assert.equal((await db.query("SELECT count(*)::int AS n FROM sms_events WHERE provider = 'twilio'")).rows[0].n, 0);
   });
 
-  test("inbound: a cleaner's text to the Twilio hiring number lands in Hiring, matched to the cleaner", async () => {
+  test("inbound: a cleaner's text to the Twilio hiring number lands in HR, matched to the cleaner", async () => {
     const p = incoming(CASEY, HIRING, 'Can I pick up more shifts?');
     const res = await twilioPost('/webhooks/twilio/sms', p);
     assert.equal(res.status, 200);
@@ -165,7 +165,7 @@ describe('Twilio SMS', () => {
     assert.match(await res.text(), /<Response><\/Response>/); // no automatic reply
     await twilio.processEvents();
     const c = await convFor(CASEY, HIRING);
-    assert.equal(c.queue, 'hiring');
+    assert.equal(c.queue, 'hr');
     assert.equal(Number(c.l27_team_id), 4760);
     const msg = (await db.query("SELECT * FROM messages WHERE conversation_id = $1 AND kind = 'message'", [c.id])).rows[0];
     assert.equal(msg.body, 'Can I pick up more shifts?');
