@@ -503,7 +503,7 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       // Texts start from a number the SMS connector can really send from (the Twilio numbers).
       const smsNumbers = sendableIdentities(connectors, 'sms');
       const ours = from || (channel === 'email' ? (!sendable || sendable.includes(UM.info) ? UM.info : sendable[0]) : smsNumbers?.length && !smsNumbers.includes(UM.smsOttawa) ? smsNumbers[0] : UM.smsOttawa);
-      const queue = await one(q, 'SELECT id FROM queues WHERE slug = $1', [(contact.roles || []).includes('applicant') ? 'hiring' : 'operations']);
+      const queue = await one(q, 'SELECT id FROM queues WHERE slug = $1', [(contact.roles || []).includes('applicant') ? 'hr' : 'operations']);
       const conv = await one(q, "INSERT INTO conversations (contact_id, channel, our_identity, their_identity, subject, queue_id, owner_id, l27_booking_id, routed_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'Started by agent') RETURNING *", [contact.id, channel, channel === 'email' ? normalizeEmail(ours) : normalizePhone(ours), target, subject || null, queue?.id, req.user.id, l27_booking_id || null]);
       if (body) await svc.reply(q, req.user, conv.id, { body, channel, to: target, subject, from: conv.our_identity }, { connectors });
       return conv;

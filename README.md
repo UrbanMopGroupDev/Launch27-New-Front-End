@@ -36,6 +36,7 @@ real messages; only production touches the real Launch27.
 | [docs/email.md](docs/email.md) | Email channel: Gmail setup, threading, sandbox in dev/QA, troubleshooting |
 | [docs/sms.md](docs/sms.md) | SMS through Twilio: setup, matching, webhook and recovery, troubleshooting |
 | [docs/kustomer-migration.md](docs/kustomer-migration.md) | Kustomer history: encrypted export, dry-run matching report, the import (every conversation onto someone's Story) |
+| [docs/kustomer-routing.md](docs/kustomer-routing.md) | Queues, routing rules and teams taken from Kustomer: rule order, how conditions translate, what was left out |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Failed deploys, health checks, sign-in problems |
 | [docs/kpi.md](docs/kpi.md) | KPI scorecard: metric definitions, sources, refresh schedule, how to add a brand |
 | [docs/placement.md](docs/placement.md) | The placement API the Sales Hub books through: endpoints, setup, limits |
@@ -117,7 +118,7 @@ inside a conversation.
 | Booking actions | From the pinned booking: edit/reschedule (booking form), cancel, restore, new booking, text the assigned cleaner. Each change is logged on the conversation |
 | Composer | Reply by text or email from any UrbanMop identity, "/" for saved replies with `{{first_name}}`, internal notes with @mentions, SMS segment count, drafts kept per conversation, STOP-blocked numbers refused |
 | Work handling | Push routing to available agents, claim (race-safe), assign, move queue, snooze, done with who/reason/outcome, complaint record with cost to us |
-| Routing | 15 ordered rules rebuilt from the Kustomer audit (Kustomer had 14 queues and 72 rules), built in Support settings with menus and chips (no JSON): conditions, “or” options, queue / reply target / priority, drag to reorder, warnings for rules that can never match, and a “try a message” tester that uses unsaved changes |
+| Routing | Kustomer's queues, queue rules and teams ([docs/kustomer-routing.md](docs/kustomer-routing.md)), built in Support settings with menus and chips (no JSON): conditions, “or” options, queue / reply target / priority, drag to reorder, warnings for rules that can never match, and a “try a message” tester that uses unsaved changes |
 | Reply targets | Business-hours SLAs (Toronto hours, Ontario holidays, DST-safe), warnings and breach alerts, paused while snoozed, stopped only by human replies |
 | Supervisor (`/supervisor`) | Live queue depth, unassigned, late, oldest waiting, per-agent load, median first reply |
 | Workforce (Support settings) | Kustomer-style agent statuses (Available, Busy, Break, Lunch, Meeting, Training, Wrap-up, Offline: add your own, with time limits and keep-or-return-work), teams that work queues, per-agent and default capacity per channel, per-queue routing mode (least busy / round robin / manual), default reply target, business hours, overflow and priority, plus workspace routing policies (offline returns work, idle auto-offline, assign on reply, reopen to previous owner, required disposition, long-break alerts) |

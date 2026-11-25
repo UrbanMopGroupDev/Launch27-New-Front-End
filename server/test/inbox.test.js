@@ -54,15 +54,16 @@ describe('routing rules', () => {
   test('the audited cases land where Kustomer sent them', () => {
     assert.equal(q({}), 'operations');
     assert.equal(q({ to: UM.billing }), 'billing');
-    assert.equal(q({ subject: 'Cart Abandonment: Jane' }), 'sales');
+    assert.equal(q({ subject: 'Cart Abandonment: Jane' }), 'sales-overflow');
     assert.equal(q({ subject: 'Jane submitted an inquiry' }), 'sales');
-    assert.equal(q({ channel: 'sms', to: UM.smsHiring, from: '+16135550100' }), 'hiring');
+    assert.equal(q({ channel: 'sms', to: UM.smsHiring, from: '+16135550100' }), 'hr');
     assert.equal(q({ channel: 'sms', to: UM.smsOttawa, from: '+16135550100' }), 'operations');
     assert.equal(q({ channel: 'sms', to: UM.smsOttawa, roles: ['cleaner'] }), 'operations');
     assert.equal(route(rules, ctx({ channel: 'sms', to: UM.smsOttawa, roles: ['cleaner'] })).action.sla, 'cleaner');
     assert.equal(q({ body: 'Leslie for review: refund' }), 'management');
     assert.equal(q({ lead_stage: undefined, leadStage: 'Attempt #2' }), 'sales');
-    assert.equal(q({ channel: 'chat', to: null }), 'operations');
+    // Kustomer's Sales Queue Rule takes every chat (above its Operations - Chat Rule).
+    assert.equal(q({ channel: 'chat', to: null }), 'sales');
   });
   test('system notices are marked done; bank codes are redacted', () => {
     assert.equal(route(rules, ctx({ from: 'notifications@kustomerapp.com' })).action.mark_done, true);
@@ -182,7 +183,7 @@ describe('inbox service', () => {
     const a = await ingest({ channel: 'email', from: 'Pat <pat@example.com>', to: UM.billing, subject: 'Charge question', body: 'Why $200?', thread_key: 'gm:abc', at: t0 });
     const b = await ingest({ channel: 'email', from: 'pat@example.com', to: UM.billing, subject: 'Re: Charge question', body: 'Following up', thread_key: 'gm:abc', at: at(30) });
     assert.equal(a.conversationId, b.conversationId);
-    assert.equal((await conv(a.conversationId)).routed_by, 'Billing');
+    assert.equal((await conv(a.conversationId)).routed_by, 'Billing & Financial Operations Queue');
     // Two contacts share one email.
     await db.tx(async (q) => {
       await svc.createContact(q, { name: 'Sam A', identities: [{ kind: 'email', value: 'family@example.com' }] });
@@ -388,7 +389,7 @@ describe('/api end to end', () => {
     assert.equal(rules.body.rules.length, RULES.length);
     assert.deepEqual(rules.body.warnings, []);
     const dry = await api('/api/admin/rules/test', { channel: 'email', to: UM.billing, from: 'x@y.com', subject: 'Invoice' });
-    assert.equal(dry.body.rule, 'Billing');
+    assert.equal(dry.body.rule, 'Billing & Financial Operations Queue');
     const sup = await api('/api/supervisor');
     assert.equal(sup.status, 200);
     assert.ok(sup.body.queues.find((q) => q.slug === 'operations').open >= 1);
