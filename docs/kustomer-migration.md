@@ -4,10 +4,12 @@ Moves UrbanMop's communication history out of Kustomer so it can appear in each 
 **Story → Conversations**. Built in three steps, all switched on:
 
 1. **Export** (on): copy everything accessible in Kustomer into encrypted storage here.
-2. **Dry run** (on): match each Kustomer customer to a Launch27 customer and report what an
+2. **Dry run** (on): decide whose Story each Kustomer customer's history goes on (a Launch27
+   customer, a cleaner, a contact already in the inbox, or a new profile) and report what an
    import would do. Nothing in the live inbox changes.
 3. **Import** (on, approved): import the latest dry run's plan into the inbox as closed,
-   historical conversations, in batches, with progress, stop/resume and rollback.
+   historical conversations, in batches, with progress, stop/resume and rollback. Every
+   conversation goes on someone's Story.
 
 Everyone on the team (agents, supervisors and admins, signed in, whatever their queue access):
 Support settings → **Kustomer migration**.
@@ -18,6 +20,7 @@ Support settings → **Kustomer migration**.
 | --- | --- | --- |
 | Kustomer read | A **synthetic** Kustomer made from the environment's test data | The real Kustomer, `KUSTOMER_API_KEY` (read-only roles) |
 | Encryption key | Fixed test key (synthetic data only) | `KUSTOMER_EXPORT_KEY` (required) |
+| Launch27 read for matching (dry run) | The environment's synthetic Launch27 | `L27_SYNC_EMAIL` / `L27_SYNC_PASSWORD` (read-only staff login; lists every customer and cleaner). Without it the dry run, and so the import, can't run |
 
 ## Setting it up (production)
 
@@ -61,8 +64,9 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 | Encrypted storage (gzip + AES-256-GCM) | `server/src/kustomer-migration/vault.js` |
 | Export job (resumable) | `server/src/kustomer-migration/export.js` |
 | Matching and dry run | `server/src/kustomer-migration/dryrun.js` |
-| Import (importer + batched job) | `server/src/kustomer-migration/import.js`, `server/migrations/0027_kustomer_import.sql` |
+| Import (importer + batched job) | `server/src/kustomer-migration/import.js`, `server/migrations/0027_kustomer_import.sql`, `server/migrations/0035_kustomer_import_customers.sql` |
 | API / page | `server/src/kustomer-migration/api.js`, `web/src/inbox/KustomerMigrationPanel.tsx` |
+| Story (every conversation, paged) | `GET /api/contacts/:id/conversations` in `server/src/inbox/api.js`; `Story` in `web/src/inbox/Customer360.tsx`; the contact page (`web/src/pages/SupportPages.tsx`) |
 | Tables | `server/migrations/0026_kustomer_migration.sql` |
 
 **Storage.** Every Kustomer record is kept whole, compressed and encrypted, once per Kustomer id
@@ -73,25 +77,38 @@ stored in the clear, for progress and the report. Nothing is committed to GitHub
 only to the `kustomer_*` tables (enforced in code), and the dry run reads the live inbox through a
 SELECT-only handle. Tests compare every live table before and after.
 
-### Matching (Launch27 is the authority)
+### Matching (Launch27 is the authority): every profile gets a target
 
 1. The Kustomer customer's **email addresses**, primary first, against Launch27 customers' emails
    and the addresses agents have already linked to a support contact (that is how a second
    address matches).
-2. Then **phone numbers agents already linked** to a contact (an established relationship).
-3. A Launch27 customer's own phone number alone gives only **Review** (phones are shared).
+2. A Launch27 **cleaner** with one of those emails.
+3. **Phone numbers agents already linked** to a customer, then a Launch27 customer's own phone
+   number.
+4. A **contact already in the inbox** that isn't in Launch27, with the same email (or, when
+   Kustomer has no email for them, the same phone: a phone alone is often shared by a family).
+5. Nobody: a **new profile** made from the Kustomer details. Internal accounts (only our own
+   addresses) get one too.
 
-| Result | Meaning | Import would… |
+When an address or number is on several Launch27 customers, one is **picked by rule**: the
+primary address first; on a tie the customer agents already linked, otherwise the most recently
+created Launch27 customer. The match list shows the rule's reason and the other candidates.
+
+| Result | Meaning | Import puts the conversations on… |
 | --- | --- | --- |
-| Confident | one Launch27 customer (method: email, secondary email, linked contact) | attach to that customer's Story |
-| Review | phone number only | wait for a person |
-| Ambiguous | an address or number is on several Launch27 customers | wait for a person |
-| Conflict | the profile's addresses belong to different Launch27 customers | wait for a person |
-| Unmatched | nobody known | keep the conversations with their Kustomer customer id, unlinked |
-| Cleaner / Internal | a Launch27 cleaner / only our own addresses | not attach to a customer |
+| Confident | one Launch27 customer (method: email, secondary email, linked contact) | that customer's Story |
+| Phone | one Launch27 customer, by phone number only | that customer's Story |
+| Picked | several Launch27 customers matched; one was picked by rule | the picked customer's Story |
+| Cleaner | a Launch27 cleaner | the cleaner's profile (Messages) |
+| Inbox contact | a contact already in the inbox, not in Launch27 | that contact's Story |
+| Internal | only our own addresses | an internal profile (new, or the inbox contact with that address) |
+| New profile | nobody known | a new customer profile from Kustomer's name, emails and phones |
 
 Never by name or message text. Several Kustomer profiles for one Launch27 customer are counted as
-duplicate identities; they all attach to the same Story, and no customer is ever created.
+duplicate identities; they all attach to the same Story. **No Launch27 customer is ever created:**
+new profiles are support contacts in this app only (role *Customer*, listed under Contacts, with
+"Link to Launch27" on their page), so Launch27's lists, KPIs and segments don't change. A dry run
+made before this rule (no `plan_version` 2) can't be imported: run it again.
 
 ### Duplicates
 
@@ -111,19 +128,29 @@ or dry run runs at a time. When it finishes, the run is checked against the plan
 planned; missing; fewer messages or notes than planned) and the result shown. **Roll back**
 deletes everything one run imported (its conversations, their messages and notes); contacts it
 created for Launch27 customers stay (empty) so a re-import reuses them. Who started and who
-rolled back each run is recorded. `KUSTOMER_IMPORT_ENABLED = false` in `import.js` switches the
-import off again.
+rolled back each run is recorded. Rollback also deletes the **new profiles** the run made, when
+they are left empty and still not linked to Launch27; a profile that has since received a live
+message, or that an agent linked, is kept. `KUSTOMER_IMPORT_ENABLED = false` in `import.js`
+switches the import off again.
 
 For each planned conversation it:
 
 - creates one historical conversation: status *done*, original dates, **no queue, owner, reply
-  target or SLA clock**, linked to the matched customer's support contact (an existing one, or one
-  created once for that Launch27 customer);
+  target or SLA clock**, always on a support contact: the Launch27 customer's or cleaner's (an
+  existing one, or one created once for them), the inbox contact, or a new profile. Kustomer
+  profiles that share an email end up on one profile, and a later import reuses the profiles an
+  earlier one made (`kustomer_contacts`). A new profile never takes an email or phone another
+  contact already has, so live messages from a shared number keep going where they went;
 - adds its messages with original timestamps and direction (`delivery_state = historical`),
   skipping ones already in the inbox, and internal notes as notes (never customer-visible);
 - keeps Kustomer's status, tags, teams and owners in `conversations.source_meta`;
 - never calls the live intake or reply code, so nothing is routed, assigned, notified, reopened
-  or sent, and never changes an existing live conversation.
+  or sent, and never changes an existing live conversation or contact.
+
+Once imported, a new profile behaves like any contact: live email or texts from its addresses
+land on it (no "Who is this?" prompt), and an agent can link it to Launch27 from its page. Its
+contact page shows a **Story** of every conversation, loaded a page at a time, and a customer's
+Story and a cleaner's Messages page through all of theirs too (no 100-conversation cap).
 
 Safety: `conversations (source, source_id)` is unique and messages/notes use
 `kustomer:msg:<id>` / `kustomer:note:<id>` external ids, so re-running is a no-op. Each row
@@ -131,14 +158,13 @@ carries `import_run_id`: `rollback(run)` deletes a run's conversations (messages
 `reconcile(dryRun, run)` compares what was imported with the plan. Batches run one transaction
 each; a catch-up export plus a new dry run plan the conversations updated after the first import.
 
-Matching: only **Confident** matches are put on a customer's Story. Conversations of Review,
-Ambiguous, Conflict, Unmatched, Cleaner and Internal profiles are imported without a customer
-(closed, with Kustomer's customer id in `source_meta`), so nothing is guessed. Duplicates are
-checked again at import time against the live inbox (email Message-ID; SMS number, text and
-minute), not only from the dry run.
+The check after an import also counts conversations left **without a customer** (it should
+always be 0). Duplicates are checked again at import time against the live inbox (email
+Message-ID; SMS number, text and minute), not only from the dry run.
 
 **Before importing for real:** run a fresh export (or catch-up) and dry run, read its report,
-and check a few Stories by hand after the import; roll back if anything is wrong.
+look through **Picked** and **Phone** rows (the rule chose for you) and **New profiles**, and
+check a few Stories by hand after the import; roll back if anything is wrong.
 
 ## Limits and things to check on the real account
 

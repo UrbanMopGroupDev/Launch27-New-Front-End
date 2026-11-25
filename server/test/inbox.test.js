@@ -315,6 +315,27 @@ describe('/api end to end', () => {
     assert.ok(counts.leads >= 1 && counts.flagged >= 1);
   });
 
+  test('contacts: every conversation of a contact, newest first, a page at a time', async () => {
+    const who = (await api('/api/contacts', { name: 'Kim History', roles: ['customer'], email: 'kim.history@example.com' })).body;
+    // Five closed conversations over the years; two share a time, so the id breaks the tie.
+    const times = ['2019-01-01T10:00:00Z', '2021-06-01T10:00:00Z', '2021-06-01T10:00:00Z', '2023-03-03T10:00:00Z', '2025-05-05T10:00:00Z'];
+    const ids = [];
+    for (const t of times) ids.push(Number((await db.query("INSERT INTO conversations (contact_id, channel, status, subject, routed_by, last_message_at, created_at) VALUES ($1, 'email', 'done', 'Old', 'Imported from Kustomer', $2, $2) RETURNING id", [who.id, t])).rows[0].id));
+    const seen = [];
+    let next = null;
+    let pages = 0;
+    do {
+      const page = await api(`/api/contacts/${who.id}/conversations?limit=2${next ? `&before=${encodeURIComponent(next)}` : ''}`);
+      assert.equal(page.status, 200);
+      seen.push(...page.body.rows.map((r) => Number(r.id)));
+      next = page.body.next;
+      pages++;
+    } while (next && pages < 10);
+    assert.equal(pages, 3);
+    assert.deepEqual(seen, [ids[4], ids[3], ids[2], ids[1], ids[0]]);
+    assert.equal((await api('/api/contacts/abc/conversations')).status, 400);
+  });
+
   test('calls: a hidden caller can be saved by name alone; nothing at all is refused', async () => {
     const made = await api('/api/contacts', { name: 'Hidden caller about a quote', roles: [] });
     assert.equal(made.status, 201);
