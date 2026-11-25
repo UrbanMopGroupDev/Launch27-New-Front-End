@@ -25,7 +25,12 @@ const JANE = '+16135550122';
 const CASEY = '+16135550111';
 
 function fakeTwilio() {
-  const s = { accountStatus: 'active', sends: [], sendPlan: [], statuses: new Map(), inbox: [], seq: 1, gets: 0 };
+  const s = { accountStatus: 'active', sends: [], sendPlan: [], statuses: new Map(), inbox: [], seq: 1, gets: 0, updates: [] };
+  s.numbers = [
+    { sid: 'PN_hiring', phone_number: HIRING, capabilities: { sms: true, voice: true }, sms_url: `${BASE}/webhooks/twilio/sms`, sms_method: 'POST', sms_application_sid: '' },
+    { sid: 'PN_t2', phone_number: T2, capabilities: { sms: true }, sms_url: 'https://kustomer.example/twilio', sms_method: 'POST', sms_application_sid: '' },
+    { sid: 'PN_t3', phone_number: T3, capabilities: { sms: false, voice: true }, sms_url: '', sms_method: 'POST', sms_application_sid: '' },
+  ];
   const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
   s.fetchImpl = async (url, init = {}) => {
     assert.equal(init.headers.authorization, `Basic ${Buffer.from(`${SID}:${AUTH}`).toString('base64')}`);
@@ -35,14 +40,17 @@ function fakeTwilio() {
     if (method === 'GET') s.gets++;
     if (u.pathname === `${root}.json`) return json({ sid: SID, status: s.accountStatus, friendly_name: 'UrbanMop', type: 'Full' });
     if (u.pathname === `${root}/IncomingPhoneNumbers.json`)
-      return json({
-        incoming_phone_numbers: [
-          { phone_number: HIRING, capabilities: { sms: true, voice: true }, sms_url: `${BASE}/webhooks/twilio/sms` },
-          { phone_number: T2, capabilities: { sms: true }, sms_url: 'https://kustomer.example/twilio' },
-          { phone_number: T3, capabilities: { sms: false, voice: true }, sms_url: '' },
-        ],
-        next_page_uri: null,
-      });
+      return json({ incoming_phone_numbers: s.numbers.map((n) => ({ ...n })), next_page_uri: null });
+    const num = new RegExp(`^${root}/IncomingPhoneNumbers/(PN\\w+)\\.json$`).exec(u.pathname);
+    if (num && method === 'POST') {
+      const form = Object.fromEntries(new URLSearchParams(init.body));
+      const n = s.numbers.find((x) => x.sid === num[1]);
+      s.updates.push({ sid: num[1], ...form });
+      if ('SmsUrl' in form) n.sms_url = form.SmsUrl;
+      if ('SmsMethod' in form) n.sms_method = form.SmsMethod;
+      if ('SmsApplicationSid' in form) n.sms_application_sid = form.SmsApplicationSid;
+      return json({ ...n });
+    }
     if (u.pathname === `${root}/Messages.json` && method === 'POST') {
       const form = Object.fromEntries(new URLSearchParams(init.body));
       const plan = s.sendPlan.shift() || 'ok';
@@ -292,6 +300,30 @@ describe('Twilio SMS', () => {
     assert.equal(await twilio.reconcile(), 0);
     // Unknown senders go to "Who is this?".
     assert.equal((await convFor('+16135550888', HIRING)).needs_match, true);
+  });
+
+  test("admins move the numbers' incoming texts to the portal, and can hand them back exactly", async () => {
+    let t = await twilioDetail();
+    assert.deepEqual(t.health.webhook_elsewhere, [T2]);
+    assert.match(t.receiving, /every minute/); // texts pointed elsewhere are looked for every minute
+    tw.updates.length = 0;
+    t = (await api('/api/admin/sms/twilio/take-over', {})).body.sms.providers[0];
+    // Only T2 moves (HIRING is already ours, T3 can't text).
+    assert.deepEqual(tw.updates, [{ sid: 'PN_t2', SmsUrl: `${BASE}/webhooks/twilio/sms`, SmsMethod: 'POST', SmsApplicationSid: '' }]);
+    assert.deepEqual(t.health.webhook_elsewhere, []);
+    assert.deepEqual(t.handed_over, [T2]);
+    assert.match(t.receiving, /^webhook/);
+    // A second press changes nothing and keeps the original saved.
+    tw.updates.length = 0;
+    await api('/api/admin/sms/twilio/take-over', {});
+    assert.deepEqual(tw.updates, []);
+    // Hand back: T2 points where it pointed before.
+    t = (await api('/api/admin/sms/twilio/hand-back', {})).body.sms.providers[0];
+    assert.deepEqual(tw.updates, [{ sid: 'PN_t2', SmsUrl: 'https://kustomer.example/twilio', SmsMethod: 'POST', SmsApplicationSid: '' }]);
+    assert.deepEqual(t.health.webhook_elsewhere, [T2]);
+    assert.deepEqual(t.handed_over, []);
+    const audit = (await db.query("SELECT action FROM audit_log WHERE action LIKE 'sms.%' ORDER BY id")).rows.map((r) => r.action);
+    assert.ok(audit.includes('sms.take-over') && audit.includes('sms.hand-back'));
   });
 
   test('a suspended account stops sending; admins disconnect and reconnect Twilio', async () => {
