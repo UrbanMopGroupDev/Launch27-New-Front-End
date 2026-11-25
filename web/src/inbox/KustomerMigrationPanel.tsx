@@ -1,11 +1,12 @@
 // Support settings → Kustomer migration (everyone on the team). Export Kustomer's history
-// (read-only), preview which historical conversations would land on which customer's Story,
-// then import that plan into the inbox as closed, historical conversations (batches, progress,
-// stop/resume, rollback). Nothing is ever sent to a customer.
+// (read-only), preview whose Story each historical conversation would land on (every one goes to
+// someone: a Launch27 customer, a cleaner, an inbox contact, or a new profile), then import that
+// plan into the inbox as closed, historical conversations (batches, progress, stop/resume,
+// rollback). Nothing is ever sent to a customer.
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { inbox, type KustomerImport, type KustomerExport, type KustomerMatchKind, type KustomerTest, type KustomerScope } from './api';
+import { inbox, type KustomerImport, type KustomerExport, type KustomerMatch, type KustomerMatchKind, type KustomerTest, type KustomerScope } from './api';
 import { ago } from './util';
 
 const n = (v: number | null | undefined) => (v ?? 0).toLocaleString('en-CA');
@@ -13,14 +14,27 @@ const day = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleDat
 const STATUS: Record<KustomerExport['status'], string> = { queued: 'Starting', running: 'Exporting', paused: 'Paused', cancelled: 'Cancelled', completed: 'Finished', failed: 'Stopped by an error' };
 const IMPORT_STATUS: Record<KustomerImport['status'], string> = { running: 'Importing', stopped: 'Stopped', completed: 'Finished', failed: 'Stopped by an error', rolled_back: 'Rolled back' };
 const MATCH: Record<KustomerMatchKind, { label: string; cls: string; help: string }> = {
-  confident: { label: 'Confident', cls: 'wl-done', help: 'One Launch27 customer, by email or an identity agents already linked' },
-  review: { label: 'Review', cls: 'wl-refused', help: 'Matched by phone number only: confirm before importing' },
-  ambiguous: { label: 'Ambiguous', cls: 'wl-on', help: 'An address or number is on several Launch27 customers' },
-  conflict: { label: 'Conflict', cls: 'wl-on', help: "The profile's addresses belong to different Launch27 customers" },
-  unmatched: { label: 'Unmatched', cls: 'wl-blocked', help: 'No Launch27 customer with these addresses or numbers' },
-  cleaner: { label: 'Cleaner', cls: 'wl-blocked', help: 'A Launch27 cleaner, not a customer' },
-  internal: { label: 'Internal', cls: 'wl-blocked', help: 'Only our own addresses' },
+  confident: { label: 'Confident', cls: 'wl-done', help: "One Launch27 customer, by email or an identity agents already linked: their Story" },
+  phone: { label: 'Phone', cls: 'wl-done', help: "One Launch27 customer, by phone number only: their Story" },
+  picked: { label: 'Picked', cls: 'wl-refused', help: "Several Launch27 customers matched: one was picked by rule (primary address first; then the one agents linked, else the most recently created)" },
+  cleaner: { label: 'Cleaner', cls: 'wl-done', help: "A Launch27 cleaner: their cleaner profile" },
+  existing: { label: 'Inbox contact', cls: 'wl-done', help: 'A contact already in the inbox (not in Launch27) with the same email, or phone: their Story' },
+  internal: { label: 'Internal', cls: 'wl-blocked', help: 'Only our own addresses: an internal profile' },
+  new_profile: { label: 'New profile', cls: 'wl-blocked', help: "Nobody Launch27 or the inbox knows: a new customer profile from the Kustomer details" },
 };
+// A dry run from before every conversation got a customer can show other kinds.
+const matchInfo = (m: string) => MATCH[m as KustomerMatchKind] || { label: m, cls: 'wl-blocked', help: 'From an earlier dry run: run it again' };
+const k = (v: number | undefined) => v ?? 0;
+
+/** Where a profile's conversations go, in words, with a link. */
+function Destination({ row }: { row: KustomerMatch }) {
+  if (!row.conversations) return <span className="muted">nothing to import</span>;
+  if (row.target === 'customer' && row.l27_customer_id) return <>customer <Link to={`/customers/${row.l27_customer_id}`}>#{row.l27_customer_id}</Link>'s Story</>;
+  if (row.target === 'cleaner' && row.l27_team_id) return <>cleaner <Link to={`/cleaners/${row.l27_team_id}`}>#{row.l27_team_id}</Link>'s profile</>;
+  if (row.contact_id) return <>contact <Link to={`/contacts/${row.contact_id}`}>#{row.contact_id}</Link>'s Story</>;
+  if (row.target === 'new') return <>a new {row.match === 'internal' ? 'internal ' : ''}profile</>;
+  return <>—</>;
+}
 
 export function KustomerMigrationPanel() {
   const qc = useQueryClient();
@@ -58,7 +72,7 @@ export function KustomerMigrationPanel() {
     <div className="km">
       <section className="channel-block">
         <p className="small">
-          Copies Kustomer's customers, conversations, messages, internal notes and attachment details into encrypted storage here (Kustomer is only read), then previews which historical conversations would be attached to which customer's Story.{' '}
+          Copies Kustomer's customers, conversations, messages, internal notes and attachment details into encrypted storage here (Kustomer is only read), then previews whose Story each historical conversation would go on: every one goes to someone.{' '}
           <b>Exports and dry runs change nothing here.</b> Step 4 imports the dry run's plan into the inbox as closed, historical conversations: nothing is sent, assigned or notified, and existing conversations are never changed. An import can be rolled back.
           {d.source === 'synthetic' && <b> This environment reads a synthetic Kustomer made from its test data, never the real one.</b>}
         </p>
@@ -140,21 +154,23 @@ export function KustomerMigrationPanel() {
               <Stat label="Conversations" value={r.conversations} sub={`${n(r.new_conversations)} would be added · ${n(r.already_imported)} already imported`} />
               <Stat label="Messages" value={r.messages} sub={Object.entries(r.by_channel).map(([k, v]) => `${k} ${n(v)}`).join(' · ')} />
               <Stat label="Internal notes" value={r.notes} />
-              <Stat label="Confident matches" value={r.match.confident} tone="ok" sub={`${n(r.conversations_by_match.confident)} conversations`} />
-              <Stat label="Review / ambiguous / conflict" value={r.match.review + r.match.ambiguous + r.match.conflict} tone={r.match.review + r.match.ambiguous + r.match.conflict ? 'warn' : undefined} sub={`${n(r.match.review)} review · ${n(r.match.ambiguous)} ambiguous · ${n(r.match.conflict)} conflict`} />
-              <Stat label="Unmatched" value={r.match.unmatched} sub={`${n(r.conversations_by_match.unmatched)} conversations kept with their Kustomer customer`} />
+              <Stat label="To Launch27 customers" value={k(r.match.confident) + k(r.match.phone) + k(r.match.picked)} tone="ok" sub={`${n(k(r.conversations_by_match.confident) + k(r.conversations_by_match.phone) + k(r.conversations_by_match.picked))} conversations · ${n(r.match.phone)} by phone only`} />
+              <Stat label="Picked from several" value={k(r.match.picked)} tone={r.match.picked ? 'warn' : undefined} sub="an address or number on more than one Launch27 customer: check a few" />
+              <Stat label="Cleaners and inbox contacts" value={k(r.match.cleaner) + k(r.match.existing)} sub={`${n(r.match.cleaner)} cleaners · ${n(r.match.existing)} contacts not in Launch27`} />
+              <Stat label="New profiles" value={k(r.new_profiles)} sub={`about, for people nobody knows (${n(k(r.match.new_profile) + k(r.match.internal))} Kustomer profiles, ${n(r.match.internal)} internal) · ${n(k(r.conversations_by_match.new_profile) + k(r.conversations_by_match.internal))} conversations`} />
               <Stat label="Duplicates" value={r.duplicate_messages} sub={`messages already in the inbox · ${n(r.duplicate_identities)} Kustomer profiles for the same customer`} />
               <Stat label="Preview only" value={r.preview_only_messages} tone={r.preview_only_messages ? 'warn' : undefined} sub="Kustomer gave only the first part of the text" />
               <Stat label="Errors" value={r.errors.length} tone={r.errors.length ? 'warn' : undefined} />
             </div>
-            <p className="muted small">History from {day(r.oldest)} to {day(r.newest)} · {n(r.by_direction.in)} from customers, {n(r.by_direction.out)} from us · {n(r.attachments)} attachments (details only). Cleaners {n(r.match.cleaner)} · internal {n(r.match.internal)}.</p>
+            <p className="muted small">History from {day(r.oldest)} to {day(r.newest)} · {n(r.by_direction.in)} from customers, {n(r.by_direction.out)} from us · {n(r.attachments)} attachments (details only).</p>
+            {r.plan_version !== 2 && <p className="error small">This dry run was made before every conversation got a customer. Run it again before importing.</p>}
             {r.errors.length > 0 && <details className="small"><summary>Import error report ({r.errors.length})</summary><ul>{r.errors.map((e) => <li key={`${e.kind}${e.kustomer_id}`}>{e.kind} {e.kustomer_id}: {e.error}</li>)}</ul></details>}
             <Matches />
           </>
         )}
       </section>
 
-      <Imports imports={d.imports} enabled={d.import_enabled} canStart={!!r && !busy && d.available && !open} busy={busy} act={act} newConversations={r?.new_conversations ?? 0} dryRunId={run?.id ?? null} />
+      <Imports imports={d.imports} enabled={d.import_enabled} canStart={!!r && r.plan_version === 2 && !busy && d.available && !open} busy={busy} act={act} newConversations={r?.new_conversations ?? 0} newProfiles={r?.new_profiles ?? 0} dryRunId={run?.id ?? null} />
 
       <section className="channel-block">
         <h3>Exported data</h3>
@@ -167,20 +183,20 @@ export function KustomerMigrationPanel() {
   );
 }
 
-function Imports({ imports, enabled, canStart, busy, act, newConversations, dryRunId }: { imports: KustomerImport[]; enabled: boolean; canStart: boolean; busy: boolean; act: <T>(fn: () => Promise<T>) => Promise<void>; newConversations: number; dryRunId: number | null }) {
+function Imports({ imports, enabled, canStart, busy, act, newConversations, newProfiles, dryRunId }: { imports: KustomerImport[]; enabled: boolean; canStart: boolean; busy: boolean; act: <T>(fn: () => Promise<T>) => Promise<void>; newConversations: number; newProfiles: number; dryRunId: number | null }) {
   const running = imports.some((x) => x.status === 'running');
   return (
     <section className="channel-block">
       <h3>4. Import into the inbox</h3>
       <p className="small">
-        Imports the latest dry run's plan in batches of 50: each conversation goes onto its matched customer's Story as a closed conversation with its original dates, messages and internal notes. Conversations without a confident match are imported without a customer. Messages already in the inbox are skipped, and anything imported before is never imported twice.
+        Imports the latest dry run's plan in batches of 50. Every conversation goes onto someone's Story as a closed conversation with its original dates, messages and internal notes: its Launch27 customer's, a cleaner's profile, a contact already in the inbox, or a new profile made from the Kustomer name, emails and phones (internal accounts too). New profiles aren't added to Launch27. Messages already in the inbox are skipped, existing contacts aren't changed, and anything imported before is never imported twice.
       </p>
       {!enabled && <p className="error small">Importing is switched off in this version.</p>}
       <div className="backfill-actions">
         <button
           type="button"
           disabled={!enabled || !canStart || running || !newConversations}
-          onClick={() => window.confirm(`Import ${n(newConversations)} historical conversations from dry run #${dryRunId} into the inbox? Nothing is sent to customers, and the import can be rolled back.`) && act(inbox.kustomerImport)}
+          onClick={() => window.confirm(`Import ${n(newConversations)} historical conversations from dry run #${dryRunId} into the inbox, making about ${n(newProfiles)} new profiles? Nothing is sent to customers, and the import can be rolled back.`) && act(inbox.kustomerImport)}
         >
           Import {n(newConversations)} conversations
         </button>
@@ -198,7 +214,7 @@ function Imports({ imports, enabled, canStart, busy, act, newConversations, dryR
               {x.status === 'running' && <button type="button" className="secondary" disabled={busy} onClick={() => act(() => inbox.kustomerImportAction(x.id, 'stop'))}>Stop</button>}
               {['stopped', 'failed'].includes(x.status) && <button type="button" disabled={busy || running} onClick={() => act(() => inbox.kustomerImportAction(x.id, 'resume'))}>Resume</button>}
               {['stopped', 'failed', 'completed'].includes(x.status) && (
-                <button type="button" className="secondary" disabled={busy || running} onClick={() => window.confirm(`Roll back import #${x.id}? Its ${n(x.conversations)} imported conversations (and their messages and notes) are deleted from the inbox. Kustomer and the exported copy are not changed.`) && act(() => inbox.kustomerImportAction(x.id, 'rollback'))}>
+                <button type="button" className="secondary" disabled={busy || running} onClick={() => window.confirm(`Roll back import #${x.id}? Its ${n(x.conversations)} imported conversations (and their messages and notes) are deleted from the inbox, with the new profiles it made that are left empty. Kustomer and the exported copy are not changed.`) && act(() => inbox.kustomerImportAction(x.id, 'rollback'))}>
                   Roll back
                 </button>
               )}
@@ -209,18 +225,19 @@ function Imports({ imports, enabled, canStart, busy, act, newConversations, dryR
               </div>
             )}
             <p className="small">
-              {n(x.processed)} of {n(x.planned)} planned ({pct}%) · {n(x.batches)} batches · {n(x.conversations)} conversations, {n(x.messages)} messages and {n(x.notes)} notes imported · {n(x.skipped)} skipped
+              {n(x.processed)} of {n(x.planned)} planned ({pct}%) · {n(x.batches)} batches · {n(x.conversations)} conversations, {n(x.messages)} messages and {n(x.notes)} notes imported · {n(x.profiles)} new profiles · {n(x.skipped)} skipped
             </p>
             {x.last_error && <div className="error small">{x.last_error}</div>}
             {x.reconcile && (
-              <p className={`small${x.reconcile.missing || x.reconcile.different ? ' error' : ''}`}>
+              <p className={`small${x.reconcile.missing || x.reconcile.different || x.reconcile.without_customer ? ' error' : ''}`}>
                 Check against the plan: {n(x.reconcile.imported)} of {n(x.reconcile.planned)} conversations imported
                 {x.reconcile.missing ? ` · ${n(x.reconcile.missing)} missing (already imported earlier, or skipped)` : ''}
                 {x.reconcile.different ? ` · ${n(x.reconcile.different)} with fewer messages or notes than planned` : ''}
-                {!x.reconcile.missing && !x.reconcile.different ? ' · everything matches' : ''}
+                {x.reconcile.without_customer ? ` · ${n(x.reconcile.without_customer)} without a customer` : ''}
+                {!x.reconcile.missing && !x.reconcile.different && !x.reconcile.without_customer ? ' · everything matches, every conversation on a Story' : ''}
               </p>
             )}
-            {x.status === 'rolled_back' && <p className="muted small">Rolled back {ago(x.rolled_back_at!)}: {n(x.rolled_back_conversations)} conversations removed.</p>}
+            {x.status === 'rolled_back' && <p className="muted small">Rolled back {ago(x.rolled_back_at!)}: {n(x.rolled_back_conversations)} conversations and {n(x.rolled_back_profiles)} new profiles removed.</p>}
           </div>
         );
       })}
@@ -240,7 +257,7 @@ function Matches() {
         ))}
       </div>
       <table className="table wl-table">
-        <thead><tr><th>Kustomer customer</th><th>Match</th><th>Launch27 customer</th><th>Conversations</th><th>Messages</th><th>Notes</th><th /></tr></thead>
+        <thead><tr><th>Kustomer customer</th><th>Match</th><th>Goes to</th><th>Conversations</th><th>Messages</th><th>Notes</th><th /></tr></thead>
         <tbody>
           {(q.data?.rows || []).map((row) => (
             <MatchRow key={row.kustomer_customer_id} row={row} open={openId === row.kustomer_customer_id} onToggle={() => setOpenId(openId === row.kustomer_customer_id ? null : row.kustomer_customer_id)} />
@@ -253,15 +270,19 @@ function Matches() {
   );
 }
 
-function MatchRow({ row, open, onToggle }: { row: import('./api').KustomerMatch; open: boolean; onToggle: () => void }) {
+function MatchRow({ row, open, onToggle }: { row: KustomerMatch; open: boolean; onToggle: () => void }) {
   const convs = useQuery({ queryKey: ['inbox', 'kustomer', 'conv', row.kustomer_customer_id], queryFn: () => inbox.kustomerConversations(row.kustomer_customer_id), enabled: open });
-  const m = MATCH[row.match];
+  const m = matchInfo(row.match);
+  const others = row.candidates.filter((c) => c !== row.l27_customer_id);
   return (
     <>
       <tr>
         <td>{row.name || '—'}<div className="muted small mono">{row.kustomer_customer_id}</div></td>
         <td><span className={`wl-pill ${m.cls}`} title={m.help}>{m.label}</span>{row.method ? <span className="muted small"> · {row.method.replace('_', ' ')}</span> : null}{row.reason && <div className="muted small">{row.reason}</div>}</td>
-        <td>{row.l27_customer_id ? <Link to={`/customers/${row.l27_customer_id}`}>#{row.l27_customer_id}</Link> : row.candidates.length ? row.candidates.map((c) => <Link key={c} to={`/customers/${c}`} className="small">#{c} </Link>) : '—'}</td>
+        <td>
+          <Destination row={row} />
+          {others.length > 0 && <div className="muted small">also matched {others.map((c) => <Link key={c} to={`/customers/${c}`}>#{c} </Link>)}</div>}
+        </td>
         <td>{n(row.conversations)}</td>
         <td>{n(row.messages)}</td>
         <td>{n(row.notes)}</td>
@@ -278,7 +299,7 @@ function MatchRow({ row, open, onToggle }: { row: import('./api').KustomerMatch;
                   <td>{c.channels.join(', ')}</td>
                   <td>{n(c.messages)}{c.duplicate_messages ? <span className="muted small"> ({n(c.duplicate_messages)} already in the inbox)</span> : null}{c.preview_only_messages ? <span className="muted small"> · {n(c.preview_only_messages)} preview only</span> : null}</td>
                   <td>{n(c.notes)}</td>
-                  <td className="small">{c.action === 'new' ? (row.l27_customer_id && row.match === 'confident' ? `be added to customer #${row.l27_customer_id}'s Story` : 'be kept with its Kustomer customer (not linked yet)') : c.action === 'already_imported' ? 'already imported' : c.reason || 'be skipped'}</td>
+                  <td className="small">{c.action === 'new' ? <>be added to <Destination row={row} /></> : c.action === 'already_imported' ? 'already imported' : c.reason || 'be skipped'}</td>
                 </tr>
               ))}
             </tbody></table>

@@ -176,22 +176,54 @@ describe('matching', () => {
   const dir = buildDirectory({ ...L27, contacts, ourDomains: OURS });
   const m = (attrs) => matchCustomer(K.customer({ id: 'x', attributes: attrs }), dir);
 
-  test('email first, then secondary addresses, then identities agents linked; phones alone only for review', () => {
-    assert.deepEqual(m({ emails: [{ email: 'Alice@Example.com' }] }), { match: 'confident', l27_customer_id: 1, method: 'email', candidates: [1] });
+  test('email first, then secondary addresses, then identities agents linked, then phones', () => {
+    assert.deepEqual(m({ emails: [{ email: 'Alice@Example.com' }] }), { match: 'confident', target: 'customer', l27_customer_id: 1, method: 'email', candidates: [1] });
     assert.equal(m({ emails: [{ email: 'nobody@example.org' }, { email: 'dana.work@example.com' }] }).method, 'secondary_email');
-    assert.deepEqual(m({ phones: [{ phone: '613 555 0106' }] }), { match: 'confident', l27_customer_id: 6, method: 'contact', candidates: [6] });
+    assert.deepEqual(m({ phones: [{ phone: '613 555 0106' }] }), { match: 'confident', target: 'customer', l27_customer_id: 6, method: 'contact', candidates: [6] });
     const phone = m({ phones: [{ phone: '613-555-0101' }] });
-    assert.equal(phone.match, 'review');
+    assert.equal(phone.match, 'phone');
+    assert.equal(phone.target, 'customer'); // a phone match goes on that customer's Story too
     assert.equal(phone.l27_customer_id, 1);
   });
-  test('shared, conflicting, cleaner, internal and unknown are never guessed', () => {
-    assert.equal(m({ emails: [{ email: 'shared@example.com' }] }).match, 'ambiguous');
-    assert.deepEqual(m({ emails: [{ email: 'shared@example.com' }] }).candidates.sort(), [3, 4]);
-    assert.equal(m({ emails: [{ email: 'bob@example.com' }, { email: 'dana@example.com' }] }).match, 'conflict');
-    assert.equal(m({ emails: [{ email: 'casey@example.com' }] }).match, 'cleaner');
-    assert.equal(m({ emails: [{ email: 'ops@ourco.example' }] }).match, 'internal');
-    assert.equal(m({ emails: [{ email: 'stranger@example.org' }] }).match, 'unmatched');
-    assert.equal(m({ name: 'Alice' }).match, 'unmatched'); // never by name
+
+  test('several Launch27 customers: one is picked by rule, and the reason never names an address', () => {
+    const shared = m({ emails: [{ email: 'shared@example.com' }] });
+    assert.equal(shared.match, 'picked');
+    assert.equal(shared.target, 'customer');
+    assert.equal(shared.l27_customer_id, 4); // no creation dates: the highest id
+    assert.deepEqual(shared.candidates.sort(), [3, 4]);
+    assert.match(shared.reason, /primary address is on 2 Launch27 customers: picked the most recently created/);
+    // The most recently created wins…
+    const dated = buildDirectory({ customers: [{ id: 3, email: 'shared@example.com', created_at: '2024-01-01T00:00:00Z' }, { id: 4, email: 'shared@example.com', created_at: '2020-01-01T00:00:00Z' }], ourDomains: OURS });
+    assert.equal(matchCustomer(K.customer({ id: 'x', attributes: { emails: [{ email: 'shared@example.com' }] } }), dated).l27_customer_id, 3);
+    // …unless agents already linked one of them.
+    const linked = buildDirectory({ ...L27, contacts: [{ kind: 'email', value: 'shared@example.com', contact_id: 9, l27_customer_id: 3 }], ourDomains: OURS });
+    const l = matchCustomer(K.customer({ id: 'x', attributes: { emails: [{ email: 'shared@example.com' }] } }), linked);
+    assert.equal(l.l27_customer_id, 3);
+    assert.match(l.reason, /agents already linked/);
+    // Addresses on different customers: the primary address decides.
+    const conflict = m({ emails: [{ email: 'bob@example.com' }, { email: 'dana@example.com' }] });
+    assert.deepEqual([conflict.match, conflict.l27_customer_id, conflict.method], ['picked', 2, 'email']);
+    assert.deepEqual(conflict.candidates.sort(), [2, 5]);
+    for (const r of [shared.reason, l.reason, conflict.reason]) assert.ok(!r.includes('@'), r);
+  });
+
+  test('cleaners, inbox contacts, internal accounts and strangers all get a target', () => {
+    assert.deepEqual(m({ emails: [{ email: 'casey@example.com' }] }), { match: 'cleaner', target: 'cleaner', l27_team_id: 10, method: 'email', candidates: [], reason: 'a Launch27 cleaner' });
+    assert.equal(m({ phones: [{ phone: '613-555-0110' }] }).l27_team_id, 10);
+    assert.deepEqual([m({ emails: [{ email: 'ops@ourco.example' }] }).match, m({ emails: [{ email: 'ops@ourco.example' }] }).target], ['internal', 'new']);
+    assert.deepEqual([m({ emails: [{ email: 'stranger@example.org' }] }).match, m({ emails: [{ email: 'stranger@example.org' }] }).target], ['new_profile', 'new']);
+    assert.equal(m({ name: 'Alice' }).match, 'new_profile'); // never by name
+    assert.equal(m({ name: 'Alice' }).reason, 'no email or phone in Kustomer');
+    // A contact already in the inbox, not in Launch27: by email, or by phone when there's no email.
+    const inbox = buildDirectory({ ...L27, contacts: [...contacts, { kind: 'email', value: 'lead@example.org', contact_id: 7 }, { kind: 'phone', value: '+16135550177', contact_id: 8 }, { kind: 'email', value: 'jo@ourco.example', contact_id: 11 }], ourDomains: OURS });
+    const mi = (attrs) => matchCustomer(K.customer({ id: 'x', attributes: attrs }), inbox);
+    assert.deepEqual(mi({ emails: [{ email: 'lead@example.org' }] }), { match: 'existing', target: 'contact', contact_id: 7, method: 'email', candidates: [], reason: 'a contact already in the inbox, not in Launch27' });
+    assert.equal(mi({ phones: [{ phone: '613-555-0177' }] }).contact_id, 8);
+    assert.equal(mi({ emails: [{ email: 'new@example.org' }], phones: [{ phone: '613-555-0177' }] }).match, 'new_profile'); // a shared phone isn't enough when they have their own email
+    assert.deepEqual([mi({ emails: [{ email: 'jo@ourco.example' }] }).match, mi({ emails: [{ email: 'jo@ourco.example' }] }).contact_id], ['internal', 11]);
+    // Launch27 still comes first.
+    assert.equal(mi({ emails: [{ email: 'lead@example.org' }], phones: [{ phone: '613-555-0101' }] }).l27_customer_id, 1);
   });
 });
 
@@ -253,9 +285,12 @@ describe('export and dry run', () => {
     assert.equal(r.attachments, 1);
   });
 
-  test('dry run: each kind of match, and duplicate identities', () => {
+  test('dry run: each kind of match, every profile has a target, and duplicate identities', () => {
     const r = results.results;
-    assert.deepEqual(r.match, { confident: 4, review: 1, ambiguous: 1, conflict: 1, unmatched: 1, cleaner: 1, internal: 1 });
+    assert.equal(r.plan_version, 2);
+    assert.deepEqual(r.match, { confident: 4, phone: 1, picked: 2, cleaner: 1, existing: 0, internal: 1, new_profile: 1 });
+    assert.deepEqual(r.by_target, { customer: 7, cleaner: 1, contact: 0, new: 2 });
+    assert.equal(r.new_profiles, 2); // the internal account and the stranger
     assert.equal(r.duplicate_identities, 2); // Alice's second profile, and the phone-only profile that is also Alice
   });
 
@@ -266,12 +301,17 @@ describe('export and dry run', () => {
     assert.equal(new Date(plan[0].first_at).toISOString(), '2019-03-01T10:00:00.000Z');
   });
 
-  test('unmatched customers keep their Kustomer relationship in the plan', async () => {
+  test('people Launch27 does not know are planned onto a new profile', async () => {
     const p = (await db.query('SELECT * FROM kustomer_plan_conversations WHERE run_id = $1 AND kustomer_conversation_id = $2', [results.id, s.conv.chat.id])).rows[0];
     assert.equal(p.kustomer_customer_id, s.c.stranger.id);
     assert.equal(p.l27_customer_id, null);
-    assert.equal(p.match, 'unmatched');
+    assert.equal(p.match, 'new_profile');
     assert.equal(p.action, 'new');
+    const who = (await db.query('SELECT kustomer_customer_id, target, l27_customer_id, l27_team_id FROM kustomer_plan_customers WHERE run_id = $1 AND kustomer_customer_id = ANY($2::text[])', [results.id, [s.c.stranger.id, s.c.cleaner.id, s.c.shared.id]])).rows;
+    const by = Object.fromEntries(who.map((w) => [w.kustomer_customer_id, w]));
+    assert.equal(by[s.c.stranger.id].target, 'new');
+    assert.deepEqual([by[s.c.cleaner.id].target, Number(by[s.c.cleaner.id].l27_team_id)], ['cleaner', 10]);
+    assert.deepEqual([by[s.c.shared.id].target, Number(by[s.c.shared.id].l27_customer_id)], ['customer', 4]);
   });
 
   test('zero side effects: the live inbox is exactly as before', async () => {
@@ -372,13 +412,13 @@ describe('the import', () => {
     await dry.wait();
     const liveBefore = (await db.query('SELECT * FROM conversations WHERE id = $1', [fixtures.emailConversation])).rows[0];
     const notificationsBefore = (await db.query('SELECT count(*)::int AS n FROM notifications')).rows[0].n;
-    const plans = (await db.query('SELECT c.*, p.contact_id FROM kustomer_plan_conversations c JOIN kustomer_plan_customers p USING (run_id, kustomer_customer_id) WHERE c.run_id = $1 AND c.kustomer_customer_id = $2', [run.id, s.c.alice.id])).rows;
+    const plans = (await db.query('SELECT c.*, p.contact_id, p.target, p.l27_team_id FROM kustomer_plan_conversations c JOIN kustomer_plan_customers p USING (run_id, kustomer_customer_id) WHERE c.run_id = $1 AND c.kustomer_customer_id = $2', [run.id, s.c.alice.id])).rows;
     const imp = createKustomerImporter({ db, vault, enabled: true });
     const isDuplicate = (m) => m.email_message_id === '<already-1@example.com>' || m.body === 'Running late?';
     const first = await imp.importBatch(77, plans, { isDuplicate });
-    assert.deepEqual(first, { conversations: 2, messages: 3, notes: 1, skipped: 0 });
+    assert.deepEqual(first, { conversations: 2, messages: 3, notes: 1, skipped: 0, profiles: 0 });
     const again = await imp.importBatch(77, plans, { isDuplicate });
-    assert.deepEqual(again, { conversations: 0, messages: 0, notes: 0, skipped: 2 }); // idempotent
+    assert.deepEqual(again, { conversations: 0, messages: 0, notes: 0, skipped: 2, profiles: 0 }); // idempotent
     const convs = (await db.query("SELECT * FROM conversations WHERE source = 'kustomer' ORDER BY created_at")).rows;
     assert.equal(convs.length, 2);
     for (const c of convs) {
@@ -405,8 +445,87 @@ describe('the import', () => {
     const rec = await imp.reconcile(run.id, 77);
     assert.equal(rec.imported, 2);
     assert.deepEqual(rec.different, []);
-    assert.deepEqual(await imp.rollback(77), { conversations: 2 });
+    assert.equal(rec.without_customer, 0);
+    assert.deepEqual(await imp.rollback(77), { conversations: 2, profiles: 0 });
     assert.equal((await db.query("SELECT count(*)::int AS n FROM messages WHERE external_id LIKE 'kustomer:%'")).rows[0].n, 0);
+    await db.close();
+  });
+
+  test('every conversation goes to someone: customers, cleaners, inbox contacts and new profiles', async () => {
+    const db = await openDb();
+    await seed(db);
+    await liveFixtures(db);
+    // Someone the inbox already knows (not in Launch27), with an email and a phone.
+    const lead = await db.tx((q) => svc.createContact(q, { name: 'Lead', roles: [], identities: [{ kind: 'email', value: 'lead@example.org' }, { kind: 'phone', value: '+16135550177' }] }));
+    const s = scenario();
+    const extra = {
+      lead: s.customer({ name: 'Lead in Kustomer', emails: [{ email: 'lead@example.org' }] }),
+      twin: s.customer({ name: 'Stranger again', emails: [{ email: 'stranger@example.org' }], phones: [{ phone: '613-555-0199' }] }), // same person, second Kustomer profile
+      sharesPhone: s.customer({ name: 'Other', emails: [{ email: 'other@example.org' }], phones: [{ phone: '613-555-0177' }] }), // their own email; Lead's phone
+    };
+    for (const x of Object.values(extra)) s.conversation(x, { channel: 'email', at: '2024-02-02T09:00:00Z', msgs: [{ dir: 'in', text: 'Hi', at: '2024-02-02T09:00:00Z' }] });
+    s.customer({ name: 'No conversations', emails: [{ email: 'quiet@example.org' }] }); // nothing to import: no profile
+    const migration = createKustomerMigration({ db, config: { production: false, kustomerExportKey: KEY }, l27Directory, ourDomains: OURS, sourceOverride: sourceOf(createSyntheticKustomer(s.data)) });
+    const ex = await migration.startExport({ id: null }, {});
+    await migration._export.wait(ex.id);
+    await migration.startDryRun({ id: null });
+    await migration._dryRun.wait();
+    // A plan from before this change can't be imported.
+    await db.query("UPDATE kustomer_dry_runs SET results = results - 'plan_version'");
+    await assert.rejects(migration.startImport({ id: null }), /run the dry run again/);
+    await db.query("UPDATE kustomer_dry_runs SET results = jsonb_set(results, '{plan_version}', '2')");
+    const notificationsBefore = (await db.query('SELECT count(*)::int AS n FROM notifications')).rows[0].n;
+    const identitiesBefore = (await db.query('SELECT * FROM contact_identities ORDER BY id')).rows;
+
+    const started = await migration.startImport({ id: null });
+    await migration._imports.wait();
+    const run = await migration._imports.get(started.id);
+    assert.equal(run.status, 'completed', run.last_error);
+    assert.equal(run.conversations, 14);
+    assert.equal(run.reconcile.without_customer, 0);
+    assert.equal(run.reconcile.missing, 0);
+
+    const onContact = async (kustomerCustomer) => (await db.query("SELECT c.contact_id FROM conversations c WHERE c.source = 'kustomer' AND c.source_meta->>'kustomer_customer_id' = $1", [kustomerCustomer.id])).rows.map((r) => Number(r.contact_id));
+    const contactOf = async (col, id) => Number((await db.query(`SELECT id FROM contacts WHERE ${col} = $1 ORDER BY id LIMIT 1`, [id])).rows[0].id);
+    assert.equal((await db.query("SELECT count(*)::int AS n FROM conversations WHERE source = 'kustomer' AND (contact_id IS NULL OR needs_match)")).rows[0].n, 0);
+    // Launch27 customers: by email, a picked one of several, by phone only.
+    const alice = await contactOf('l27_customer_id', 1);
+    assert.deepEqual([...new Set([...(await onContact(s.c.alice)), ...(await onContact(s.c.aliceAgain)), ...(await onContact(s.c.phoneOnly))])], [alice]);
+    assert.deepEqual(await onContact(s.c.shared), [await contactOf('l27_customer_id', 4)]);
+    assert.deepEqual(await onContact(s.c.conflict), [await contactOf('l27_customer_id', 2)]);
+    // The cleaner's profile.
+    const casey = (await db.query('SELECT * FROM contacts WHERE l27_team_id = 10')).rows;
+    assert.equal(casey.length, 1);
+    assert.deepEqual(casey[0].roles, ['cleaner']);
+    assert.deepEqual(await onContact(s.c.cleaner), [Number(casey[0].id)]);
+    // A contact the inbox already had: used as it is.
+    assert.deepEqual(await onContact(extra.lead), [Number(lead.id)]);
+    // New profiles: the internal account, and the stranger (both Kustomer profiles on one).
+    const us = (await db.query("SELECT c.*, k.kind FROM contacts c JOIN kustomer_contacts k ON k.contact_id = c.id WHERE c.name = 'Us'")).rows[0];
+    assert.deepEqual([us.kind, us.roles, us.l27_customer_id], ['internal', ['customer'], null]);
+    assert.deepEqual(await onContact(s.c.internal), [Number(us.id)]);
+    const stranger = (await db.query("SELECT * FROM contacts WHERE name = 'Stranger'")).rows;
+    assert.equal(stranger.length, 1);
+    assert.deepEqual([...(await onContact(s.c.stranger)), ...(await onContact(extra.twin))], [Number(stranger[0].id), Number(stranger[0].id)]);
+    assert.equal((await db.query("SELECT count(*)::int AS n FROM contacts WHERE name = 'Stranger again'")).rows[0].n, 0);
+    // A new profile never takes an identity another contact has: Lead keeps getting their texts.
+    const other = (await db.query("SELECT id FROM contacts WHERE name = 'Other'")).rows[0];
+    assert.deepEqual((await db.query('SELECT kind, value FROM contact_identities WHERE contact_id = $1', [other.id])).rows, [{ kind: 'email', value: 'other@example.org' }]);
+    assert.deepEqual((await db.query('SELECT * FROM contact_identities WHERE id = ANY($1::bigint[]) ORDER BY id', [identitiesBefore.map((i) => i.id)])).rows, identitiesBefore); // existing contacts unchanged
+    assert.equal(run.profiles, 3);
+    assert.equal((await migration._dryRun.latest()).results.new_profiles, 3); // the dry run's estimate
+    assert.equal((await db.query("SELECT count(*)::int AS n FROM contacts WHERE name = 'No conversations'")).rows[0].n, 0);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM notifications')).rows[0].n, notificationsBefore);
+
+    // A new profile that has since received a live email is kept by a rollback; the others go.
+    const live = await db.tx((q) => svc.ingestInbound(q, { channel: 'email', from: 'stranger@example.org', to: 'help@ourco.example', subject: 'Back again', body: 'Hello again', external_id: 'email:<back@example.org>' }));
+    const conv = (await db.query('SELECT contact_id FROM conversations WHERE id = $1', [live.conversationId])).rows[0];
+    assert.equal(Number(conv.contact_id), Number(stranger[0].id));
+    const rolled = await migration.importAction({ id: null }, run.id, 'rollback');
+    assert.equal(rolled.rolled_back_conversations, 14);
+    assert.equal(rolled.rolled_back_profiles, 2);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM contacts WHERE id = ANY($1::bigint[])', [[us.id, other.id]])).rows[0].n, 0);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM contacts WHERE id = ANY($1::bigint[])', [[stranger[0].id, lead.id, casey[0].id]])).rows[0].n, 3);
     await db.close();
   });
 });
