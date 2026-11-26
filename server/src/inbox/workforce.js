@@ -34,6 +34,9 @@ export const DEFAULT_SETTINGS = {
   // 'admins'. Roles, active/inactive, teams and private queues are always admins only,
   // because they decide who can see restricted conversations.
   settings_editors: 'everyone',
+  // The name customers see on our emails ("UrbanMop Residential <info@…>"). Empty: the
+  // EMAIL_FROM_NAME setting on the server (else "UrbanMop").
+  email_from_name: '',
 };
 
 export const SETTINGS_EDITORS = ['everyone', 'supervisors', 'admins'];
@@ -57,12 +60,28 @@ export const DEFAULT_STATUSES = [
   { slug: 'offline', name: 'Offline', kind: 'offline', color: '#6b7280', keeps_work: false, max_minutes: null },
 ];
 
+// Kustomer's teams that have a routing profile, with the queues each profile works (routing
+// export of Nov 25, 2026). Members are added in Support settings → Agents or Teams.
+// Kustomer's per-team capacity is per agent here (Agents tab and default capacity).
 export const DEFAULT_TEAMS = [
-  { name: 'Customer care', description: 'Bookings, arrivals, changes, ratings', queues: ['operations', 'customer-success', 'fallback'] },
-  { name: 'Sales', description: 'Quotes, new inquiries, lead follow-up', queues: ['sales'] },
-  { name: 'Finance', description: 'Charges, declined cards, payroll', queues: ['billing', 'payroll'] },
-  { name: 'People', description: 'Applicants, hiring and HR', queues: ['hiring', 'hr'] },
-  { name: 'Management', description: 'Escalations and disputes', queues: ['management'] },
+  { name: '(8AM-6PM)Operations Team', description: 'Daytime operations', queues: ['fallback', 'operations'] },
+  { name: '(After 6PM & Weekend)Operations Team', description: 'Evenings and weekends: operations and sales', queues: ['fallback', 'operations', 'sales'] },
+  { name: 'Sales Team', description: 'Quotes, new inquiries, lead follow-up', queues: ['sales'] },
+  { name: 'Sales Squad', description: 'Quotes, new inquiries, lead follow-up', queues: ['sales'] },
+  { name: 'Sales Overflow', description: 'Cart abandonment', queues: ['sales-overflow'] },
+  { name: 'Sales Master', description: 'Sales and cart abandonment', queues: ['sales', 'sales-overflow'] },
+  { name: 'Customer Success', description: 'Retention and customer success', queues: ['customer-success'] },
+  { name: 'Customer Success & Sales Queue', description: 'Customer success, sales and cart abandonment', queues: ['customer-success', 'sales', 'sales-overflow'] },
+  { name: 'Billing & Financial Operations', description: 'Daily charges, failed payments, billing and invoices', queues: ['financial-operations', 'billing'] },
+  { name: 'Financial Operations & Billing Team', description: 'Billing and invoices', queues: ['billing'] },
+  { name: 'Payroll Team', description: 'Payroll inquiries', queues: ['payroll'] },
+  { name: 'HR Team', description: 'HR, careers and hiring', queues: ['hr'] },
+  { name: 'Management Team', description: 'Escalations and disputes', queues: ['management'] },
+  { name: 'Jose Queue', description: "Jose's email", queues: ['jose'] },
+  { name: 'Admin', description: 'Dead-end queue for conversations moved out of Management or Operations', queues: ['admin'] },
+  { name: 'Email Team', description: 'No queues in Kustomer', queues: [] },
+  { name: 'Voice Team', description: 'No queues in Kustomer', queues: [] },
+  { name: 'Scheduling Team', description: 'No queues in Kustomer', queues: [] },
 ];
 
 export const DEFAULT_SCHEDULES = [
@@ -113,7 +132,11 @@ export function validateSettings(patch) {
       if (!Number.isFinite(n) || n < 0) throw new Error(`${k} must be a number 0 or more`);
       out[k] = n;
     } else if (k === 'default_capacity') out[k] = normalizeCapacity(v, def);
-    else if (k === 'settings_editors') {
+    else if (k === 'email_from_name') {
+      const name = String(v ?? '').replace(/[\r\n<>"]/g, ' ').replace(/\s+/g, ' ').trim();
+      if (name.length > 60) throw new Error('The sender name can be up to 60 characters');
+      out[k] = name;
+    } else if (k === 'settings_editors') {
       if (!SETTINGS_EDITORS.includes(v)) throw new Error('settings_editors must be everyone, supervisors or admins');
       out[k] = v;
     }

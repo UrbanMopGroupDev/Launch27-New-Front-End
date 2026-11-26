@@ -104,6 +104,8 @@ export function createTwilioClient({ accountSid, authToken, apiKeySid = null, ap
     account: () => call('GET', `${root}.json`),
     /** The account's phone numbers with capabilities and where each sends incoming texts. */
     incomingNumbers: () => pages(`${base}${root}/IncomingPhoneNumbers.json?PageSize=1000`, 'incoming_phone_numbers'),
+    /** Change where one of our numbers sends its incoming texts (SmsUrl, SmsMethod, SmsApplicationSid). */
+    updateNumber: (sid, form) => call('POST', `${root}/IncomingPhoneNumbers/${encodeURIComponent(sid)}.json`, { form, maxRetries: 2 }),
     sendSms: ({ from, to, body, statusCallback }) => call('POST', `${root}/Messages.json`, { form: { From: from, To: to, Body: body, StatusCallback: statusCallback || undefined }, maxRetries: 2 }),
     message: (sid) => call('GET', `${root}/Messages/${encodeURIComponent(sid)}.json`),
     /** Inbound texts to one of our numbers since a time (Twilio filters by day; we filter by time). */

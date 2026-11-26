@@ -9,11 +9,12 @@ import { DurationInput, Switch } from '../inbox/settingsUi';
 import { formatMinutes } from '../lib/routingRules';
 import { RulesEditor } from './RoutingRules';
 import { SmsPanel } from '../inbox/SmsPanel';
+import { MySignature, SenderName } from '../inbox/EmailSettings';
 import { KustomerMigrationPanel } from '../inbox/KustomerMigrationPanel';
 import { BrandsSettings } from '../brands/BrandsSettings';
 import { AgentsSettings, HoursSettings, PoliciesSettings, QaCopySettings, QueuesSettings, StatusesSettings, TeamsSettings } from './WorkforceSettings';
 
-type Tab = 'kustomer' | 'channels' | 'rules' | 'queues' | 'sla' | 'hours' | 'policies' | 'agents' | 'teams' | 'statuses' | 'canned' | 'history' | 'writes' | 'qa' | 'brands' | 'placement';
+type Tab = 'kustomer' | 'signature' | 'channels' | 'rules' | 'queues' | 'sla' | 'hours' | 'policies' | 'agents' | 'teams' | 'statuses' | 'canned' | 'history' | 'writes' | 'qa' | 'brands' | 'placement';
 
 const SECTIONS: { title: string; items: { id: Tab; label: string; desc: string }[] }[] = [
   {
@@ -38,6 +39,7 @@ const SECTIONS: { title: string; items: { id: Tab; label: string; desc: string }
     title: 'Replies',
     items: [
       { id: 'channels', label: 'Channels', desc: 'Email and text: what is connected' },
+      { id: 'signature', label: 'My email signature', desc: 'The end of every email you send' },
       { id: 'canned', label: 'Saved replies', desc: 'Shortcuts for common answers' },
     ],
   },
@@ -127,7 +129,8 @@ export function InboxSettingsPage() {
           {tab === 'agents' && <AgentsSettings canEdit={canEdit} isAdmin={isAdmin} />}
           {tab === 'teams' && <TeamsSettings canEdit={isAdmin} />}
           {tab === 'statuses' && <StatusesSettings canEdit={canEdit} />}
-          {tab === 'channels' && <ChannelsPanel isAdmin={isAdmin} />}
+          {tab === 'channels' && <ChannelsPanel isAdmin={isAdmin} canEdit={canEdit} />}
+          {tab === 'signature' && <MySignature />}
           {tab === 'canned' && <CannedEditor canEdit={canEdit} />}
           {tab === 'history' && <HistoryPanel />}
           {tab === 'brands' && <BrandsSettings canEdit={isAdmin} />}
@@ -444,7 +447,7 @@ const CHANNEL_STATE: Record<ChannelState, { label: string; cls: string; text: st
   not_connected: { label: 'Not connected', cls: 'wl-blocked', text: 'Replies are saved but not sent. An admin sets this up on the server (see docs/email.md).' },
 };
 
-function ChannelsPanel({ isAdmin }: { isAdmin: boolean }) {
+function ChannelsPanel({ isAdmin, canEdit }: { isAdmin: boolean; canEdit: boolean }) {
   const q = useQuery({ queryKey: ['inbox', 'channels'], queryFn: inbox.channels, refetchInterval: 30_000 });
   if (q.isLoading) return <div className="muted">Loading…</div>;
   if (q.isError || !q.data) return <div className="muted">Couldn't load the channels.</div>;
@@ -460,6 +463,7 @@ function ChannelsPanel({ isAdmin }: { isAdmin: boolean }) {
         )}
         {email.read_only && email.state !== 'not_connected' && <p className="muted small">Reading mail: {email.state === 'live' ? 'Gmail, checked every minute' : 'sandbox (Channel simulator only)'}.</p>}
         {!email.read_only && email.send_from && email.state !== 'not_connected' && <p className="muted small">Agents can send from: {email.send_from.join(', ')}</p>}
+        <SenderName canEdit={canEdit} />
       </section>
       {email.accounts.length > 0 && (
         <table className="table wl-table">

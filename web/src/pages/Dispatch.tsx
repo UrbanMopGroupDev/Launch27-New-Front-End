@@ -14,6 +14,7 @@ import {
   isProjected,
   rankCandidates,
   workingWindow,
+  fmtWindow,
   type AvailabilityRow,
   type Block,
   type BlockStatus,
@@ -190,7 +191,7 @@ export function DispatchPage() {
     const all = [...board.values()].flat();
     const by = (s: BlockStatus) => all.filter((b) => b.status === s).length;
     const working = rows.filter((r) => r.win && r.win !== 'off');
-    const availMin = working.reduce((s, r) => s + (r.win && r.win !== 'off' ? r.win.end - r.win.start : 0), 0);
+    const availMin = working.reduce((s, r) => s + (r.win && r.win !== 'off' ? r.win.end - r.win.start - (r.win.breaks || []).reduce((m, [a, b]) => m + b - a, 0) : 0), 0);
     const bookedMin = rows.reduce((s, r) => s + r.bookedMin, 0);
     return {
       bookings: bookings.length,
@@ -418,7 +419,7 @@ export function DispatchPage() {
                   <span className="tl-name-text">
                     {cleanName(team.title)}
                     <span className="muted small">
-                      {win === 'off' ? 'Day off' : win ? `${fmtClock(win.start)}–${fmtClock(win.end)}` : 'No hours set'} · {blocks.length} job{blocks.length === 1 ? '' : 's'} · {(bookedMin / 60).toFixed(1)}h
+                      {win === 'off' ? 'Day off' : win ? fmtWindow(win) : 'No hours set'} · {blocks.length} job{blocks.length === 1 ? '' : 's'} · {(bookedMin / 60).toFixed(1)}h
                       {routesByTeam.get(team.id)?.km ? ` · ~${fmtKm(routesByTeam.get(team.id)!.km)}` : ''}
                     </span>
                   </span>
@@ -432,6 +433,7 @@ export function DispatchPage() {
                     <>
                       {win.start > DAY_START && <span className="tl-off" style={{ left: 0, width: pctWidth(DAY_START, win.start) }} />}
                       {win.end < DAY_END && <span className="tl-off" style={{ left: pctLeft(win.end), width: pctWidth(win.end, DAY_END) }} />}
+                      {(win.breaks || []).map(([a, b]) => <span key={a} className="tl-off" title={`Not available ${fmtClock(a)}–${fmtClock(b)}`} style={{ left: pctLeft(a), width: pctWidth(a, b) }} />)}
                     </>
                   )}
                   {isToday && nowMin > DAY_START && nowMin < DAY_END && <span className="tl-now" style={{ left: pctLeft(nowMin) }} />}

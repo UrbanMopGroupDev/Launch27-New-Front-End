@@ -1,17 +1,16 @@
 // The Kustomer migration as its page sees it (open to everyone signed in): connection test,
 // export scope, the export job, the dry run and its report, and the import of a dry run's plan
-// with progress, stop/resume and rollback. Production reads the real Kustomer (KUSTOMER_API_KEY,
+// (every conversation onto someone's Story) with progress, stop/resume and rollback. Production reads the real Kustomer (KUSTOMER_API_KEY,
 // a key with read-only roles); development and QA read a synthetic Kustomer built from their
 // synthetic Launch27, so real messages never reach them.
 import { createKustomerClient } from '../complaints/sources/kustomer.js';
 import { createVault } from './vault.js';
 import { createKustomerSource } from './source.js';
 import { createKustomerExport, MigrationError, migrationDb } from './export.js';
-import { createKustomerDryRun } from './dryrun.js';
+import { MATCHES, PLAN_VERSION, createKustomerDryRun } from './dryrun.js';
 import { createSyntheticKustomer, generateKustomerData } from './synthetic.js';
 import { KUSTOMER_IMPORT_ENABLED, createKustomerImporter, createKustomerImportJob } from './import.js';
 
-const MATCHES = ['confident', 'review', 'ambiguous', 'conflict', 'unmatched', 'cleaner', 'internal'];
 const csv = (v) => {
   const s = v == null ? '' : Array.isArray(v) ? v.join(' ') : String(v);
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -125,6 +124,7 @@ export function createKustomerMigration({ db, config, fetchImpl = fetch, l27Dire
       if (dryRun.isActive()) throw new MigrationError(409, 'Wait for the dry run to finish before importing');
       const run = await dryRun.latest();
       if (!run || run.status !== 'completed') throw new MigrationError(409, 'Run a dry run first: the import follows its plan');
+      if (run.results?.plan_version !== PLAN_VERSION) throw new MigrationError(409, 'This dry run was made before every conversation got a customer: run the dry run again');
       return imports.start(user, run);
     },
     importAction: async (user, id, action) => {
@@ -143,7 +143,7 @@ export function createKustomerMigration({ db, config, fetchImpl = fetch, l27Dire
       if (!run || run.status !== 'completed') return { run, rows: [] };
       const rows = (
         await store.query(
-          `SELECT p.kustomer_customer_id, p.match, p.method, p.l27_customer_id, p.contact_id, p.candidates, p.reason, p.conversations, p.messages, p.notes
+          `SELECT p.kustomer_customer_id, p.match, p.target, p.method, p.l27_customer_id, p.l27_team_id, p.contact_id, p.candidates, p.reason, p.conversations, p.messages, p.notes
            FROM kustomer_plan_customers p WHERE p.run_id = $1 AND ($2::text IS NULL OR p.match = $2)
            ORDER BY (p.match = 'confident'), p.messages DESC, p.kustomer_customer_id LIMIT $3 OFFSET $4`,
           [run.id, MATCHES.includes(match) ? match : null, Math.min(500, limit), offset],
@@ -175,18 +175,18 @@ export function createKustomerMigration({ db, config, fetchImpl = fetch, l27Dire
       if (!run || run.status !== 'completed') throw new MigrationError(409, 'Run a dry run first');
       const rows = (
         await store.query(
-          `SELECT c.kustomer_conversation_id, c.kustomer_customer_id, p.match, p.method, c.l27_customer_id, c.action, c.channels, c.messages, c.notes,
+          `SELECT c.kustomer_conversation_id, c.kustomer_customer_id, p.match, p.target, p.method, c.l27_customer_id, p.l27_team_id, p.contact_id, c.action, c.channels, c.messages, c.notes,
                   c.duplicate_messages, c.preview_only_messages, c.first_at, c.last_at, COALESCE(c.reason, p.reason) AS reason
            FROM kustomer_plan_conversations c JOIN kustomer_plan_customers p ON p.run_id = c.run_id AND p.kustomer_customer_id = c.kustomer_customer_id
            WHERE c.run_id = $1 ORDER BY c.l27_customer_id NULLS LAST, c.first_at`,
           [run.id],
         )
       ).rows;
-      const head = ['kustomer_conversation_id', 'kustomer_customer_id', 'match', 'method', 'l27_customer_id', 'action', 'channels', 'messages', 'notes', 'duplicate_messages', 'preview_only_messages', 'first_at', 'last_at', 'reason'];
+      const head = ['kustomer_conversation_id', 'kustomer_customer_id', 'match', 'target', 'method', 'l27_customer_id', 'l27_team_id', 'contact_id', 'action', 'channels', 'messages', 'notes', 'duplicate_messages', 'preview_only_messages', 'first_at', 'last_at', 'reason'];
       const lines = [head.join(',')].concat(rows.map((r) => head.map((h) => csv(r[h] instanceof Date ? r[h].toISOString() : r[h])).join(',')));
       return { filename: `kustomer-dry-run-${run.id}.csv`, csv: `${lines.join('\n')}\n`, summary: run.results };
     },
-    /** Delete everything exported (and the dry runs). Kustomer itself, and anything already imported, are untouched. */
+    /** Delete everything exported (and the dry runs). Kustomer itself, anything already imported, and the record of contacts imports made are untouched. */
     async purge() {
       need();
       if (await exporter.isActive()) throw new MigrationError(409, 'Cancel the export first');

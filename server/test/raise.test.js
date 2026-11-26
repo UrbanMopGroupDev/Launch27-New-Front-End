@@ -394,7 +394,7 @@ describe('Cleaner reports 2.0 next to Leslie\'s', () => {
     assert.equal(row.drill.no_shows.length, rs.no_shows, 'each number opens the rows behind it');
     assert.equal(row.drill.late_cancels.length, rs.late_cancels);
     assert.equal(rs.issues, rs.no_shows + rs.late_cancels + rs.short_notice + rs.missing_checks);
-    assert.equal(rs.score, Math.round((1 - rs.issues / (row.visits + 2)) * 1000) / 1000);
+    assert.equal(rs.score, Math.round((1 - rs.issues / (row.visits + rs.no_shows + rs.late_cancels + rs.short_notice)) * 1000) / 1000);
     assert.equal(row.complaints_n, 2);
     // Re-cleans come from Launch27 (the synthetic data has free "Reclean" visits).
     assert.ok(v2.rows.reduce((a, r) => a + r.recleans, 0) > 0, 'some re-cleans found in the synthetic Launch27 data');
@@ -481,7 +481,8 @@ describe('Pay adjustments sheet', () => {
     assert.equal(before.adjustments.connected, true);
     assert.ok(before.rows.every((r) => r.reliability_score.drops_known), 'with the sheet, reliability is known for the whole period');
     const someone = before.rows.find((r) => r.visits >= 20);
-    const today = new Date().toISOString().slice(0, 10);
+    // Inside the report's period, which ends yesterday (Toronto): two days ago is always in it.
+    const today = new Date(Date.now() - 2 * 86_400_000).toISOString().slice(0, 10);
     await db.query("INSERT INTO pay_adjustments (row_no, cleaner_name, kind, amount, on_date, customer) VALUES (900, $1, 'no_show', -100, $2, 'Test Client'), (901, $1, 'google_review', 10, $2, 'Happy Client'), (902, 'Nobody Known', 'late_cancel', -30, $2, 'X')", [someone.name.split(' ')[0] === someone.name ? someone.name : someone.name, today]);
     const after = await reports.cleaners2('13w', { admin: true });
     const row = after.rows.find((r) => r.id === someone.id);

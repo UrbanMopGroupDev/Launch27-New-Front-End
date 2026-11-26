@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useBrand } from '../brands/useBrand';
 import { BrandPill, brandLabel } from '../brands/ui';
 import { segmentsApi } from '../segments/api';
-import { scheduleApi, type Candidate, type Change, type ChangeKind, type Overview, type Series, type Slot, type Visit } from '../schedule/api';
+import { assignAsking, scheduleApi, type Candidate, type Change, type ChangeKind, type ClientPrefs, type Overview, type Series, type Slot, type Visit } from '../schedule/api';
 import { FreqPill, Reasons, ScheduleStatus, niceDate, CleanerDot } from '../schedule/ui';
 import { DROP_REASONS, reportsApi } from '../reports/api';
 
@@ -90,7 +90,7 @@ function NotLoaded({ message }: { message: string }) {
 function useAssign(onDone?: (msg: string) => void) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ keys, cleaner, recommended }: { keys: string[]; cleaner: number; recommended?: boolean }) => scheduleApi.assign(keys, cleaner, recommended),
+    mutationFn: ({ keys, cleaner, recommended }: { keys: string[]; cleaner: number; recommended?: boolean }) => assignAsking(keys, cleaner, recommended),
     onSuccess: (r) => {
       const parts = [`Assigned ${r.assigned} visit${r.assigned === 1 ? '' : 's'} to ${r.cleaner}.`];
       if (r.projected) parts.push(`${r.projected} projected visit${r.projected === 1 ? '' : 's'} follow the series in Launch27.`);
@@ -247,9 +247,7 @@ const REC_LABEL: Partial<Record<ChangeKind, string>> = {
   cleaner_changed: 'Recommended cleaner',
 };
 
-function ClientWants({ client }: { client: Change['client'] }) {
-  if (!client) return null;
-  const p = client.prefs;
+function wishChips(p: ClientPrefs) {
   const chips: { text: string; tone: 'good' | 'warn' | 'neutral' }[] = [];
   if (p.female_only) chips.push({ text: 'Female cleaner only', tone: 'warn' });
   else if (p.prefers_female) chips.push({ text: 'Prefers a female cleaner', tone: 'neutral' });
@@ -257,6 +255,14 @@ function ClientWants({ client }: { client: Change['client'] }) {
   if (p.consistent) chips.push({ text: 'Wants the same cleaner every time', tone: 'neutral' });
   for (const n of p.prefers) chips.push({ text: `Asks for ${n}`, tone: 'good' });
   for (const n of p.avoid) chips.push({ text: `Never send ${n}`, tone: 'warn' });
+  for (const n of p.unmatched || []) chips.push({ text: `Couldn't match "${n}" to any cleaner: check the tag's spelling`, tone: 'warn' });
+  for (const a of p.ambiguous || []) chips.push({ text: `"${a.name}" matches ${a.cleaners.length} cleaners (${a.cleaners.join(', ')}): add a last initial to the tag`, tone: 'warn' });
+  return chips;
+}
+
+function ClientWants({ client }: { client: Change['client'] }) {
+  if (!client) return null;
+  const chips = wishChips(client.prefs);
   return (
     <div className="sch-wants">
       <span className="eyebrow">What the client wants</span>
@@ -388,7 +394,7 @@ function BulkAssign({ series, onDone }: { series: Series[]; onDone: (msg: string
     let visits = 0;
     try {
       for (const s of chosen) {
-        const r = await scheduleApi.assign(s.visits.map((v) => v.key), picked[s.key]!);
+        const r = await assignAsking(s.visits.map((v) => v.key), picked[s.key]!);
         visits += r.assigned;
       }
       onDone(`Assigned ${visits} visits across ${chosen.length} series.`);
@@ -627,6 +633,16 @@ export function FindSlotTab({ presetCustomer, reschedule }: { presetCustomer?: {
       {slots.isError && <div className="error">{(slots.error as Error).message}</div>}
       {slots.data && (
         <section className="sch-list">
+          {slots.data.wishes && (() => {
+            const chips = wishChips(slots.data.wishes.prefs);
+            return (
+              <div className="sch-wants">
+                <span className="eyebrow">Client tags applied to these results</span>
+                {chips.length > 0 ? <div className="sch-reasons">{chips.map((x) => <span key={x.text} className={`sch-reason t-${x.tone}`}>{x.text}</span>)}</div> : <span className="muted small">No cleaner preferences on this client's profile.</span>}
+                <span className="muted small">{slots.data.wishes.source === 'profile' ? 'Read from the Launch27 profile just now.' : 'From the last sync: Launch27 could not be reached for the latest tags.'}</span>
+              </div>
+            );
+          })()}
           <p className="muted small">
             {slots.data.cleaner === 'same' ? (
               slots.data.slots.length
@@ -636,7 +652,8 @@ export function FindSlotTab({ presetCustomer, reschedule }: { presetCustomer?: {
               <>
                 {slots.data.no_usual && `${slots.data.customer?.name || 'This client'} has no usual cleaner yet, so these are open to any cleaner. `}
                 {slots.data.slots.length ? `Best ${slots.data.frequency.toLowerCase()} slots. Recurring slots are free on every date for the next 8 weeks.` : 'No cleaner is free for that. Try other days, a shorter clean, or a later start date.'}
-                {slots.data.customer?.main && (slots.data.slots.some((x) => x.cleaner.name === slots.data!.customer!.main)
+                {slots.data.asked_for.some((n) => n !== slots.data!.customer?.main) && ` ${slots.data.asked_for.join(', ')} (asked for on the client's tags) come${slots.data.asked_for.length === 1 ? 's' : ''} first where free.`}
+                {slots.data.customer?.main && !slots.data.asked_for.some((n) => n !== slots.data!.customer?.main) && (slots.data.slots.some((x) => x.cleaner.name === slots.data!.customer!.main)
                   ? ` ${slots.data.customer.main} (usual cleaner) is ranked first where free.`
                   : ` ${slots.data.customer.main} (usual cleaner) isn't free at those times: try other days or times to keep them.`)}
               </>

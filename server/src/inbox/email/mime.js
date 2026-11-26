@@ -42,11 +42,12 @@ export const newMessageId = (from) => `<${randomUUID()}@${(normalizeEmail(from) 
 // email is then multipart/alternative, the plain text first for mail apps without HTML.
 // attachments: [{ filename, type, data: Buffer }]; the message is then multipart/mixed with
 // the text first and each file after it.
-export function buildMessage({ from, fromName, to, subject, body, html = null, attachments = [], messageId = newMessageId(from), inReplyTo = null, references = [], date = new Date() }) {
+export function buildMessage({ from, fromName, to, cc = [], subject, body, html = null, attachments = [], messageId = newMessageId(from), inReplyTo = null, references = [], date = new Date() }) {
   const refs = [...new Set([...(references || []), inReplyTo].filter(Boolean).map(clean))].slice(-20);
   const lines = [
     `From: ${formatAddress(from, fromName)}`,
     `To: ${clean(to)}`,
+    cc?.length && `Cc: ${cc.map(clean).join(', ')}`,
     `Subject: ${encodeHeader(subject || '(no subject)')}`,
     `Date: ${date.toUTCString().replace('GMT', '+0000')}`,
     `Message-ID: ${clean(messageId)}`,

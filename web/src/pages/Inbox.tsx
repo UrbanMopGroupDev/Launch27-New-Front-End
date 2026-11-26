@@ -304,7 +304,7 @@ function WorkList({ view, setView, activeId }: { view: string; setView: (v: stri
                       <span className="ws-name-text">{c.contact_name || displayIdentity(c.their_identity)}</span>
                       {c.contact_roles?.filter((r) => r !== 'customer').map((r) => <span key={r} className={`chip role-${r}`}>{ROLE_LABEL[r]}</span>)}
                     </span>
-                    <span className="muted small mono" title={`${ago(c.last_message_at, now)} ago`}>{rowTime(c.last_message_at, now)}</span>
+                    <span className="muted small wl-time" title={`${ago(c.last_message_at, now)} ago`}>{rowTime(c.last_message_at, now)}</span>
                   </div>
                   <div className="ws-preview">{c.subject ? <b>{c.subject} · </b> : null}{c.last_preview}</div>
                   <div className="ws-row-meta">

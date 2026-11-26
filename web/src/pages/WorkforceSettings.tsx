@@ -60,7 +60,7 @@ export function AgentsSettings({ canEdit, isAdmin }: { canEdit: boolean; isAdmin
     <section className="card no-pad">
       <div className="ws-intro">
         <p className="muted small">
-          Who works the inbox, what they can do and how much they can take at once. People appear after they first sign in. Capacity is the most open conversations per channel before routing skips them; blank uses the workspace default ({d.channels.map((c) => `${CH_LABEL[c]} ${d.settings.default_capacity[c] ?? '∞'}`).join(', ')}).
+          Who works the inbox, what they can do and how much they can take at once. People appear after they first sign in, or once they've been added for them. Capacity is the most open conversations per channel before routing skips them; blank uses the workspace default ({d.channels.map((c) => `${CH_LABEL[c]} ${d.settings.default_capacity[c] ?? '∞'}`).join(', ')}).
         </p>
         <Status error={error} saved={saved} />
       </div>

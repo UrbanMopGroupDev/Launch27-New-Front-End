@@ -1,6 +1,6 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { l27, l27All } from '../api';
 import type { Booking, Customer, Tag, TimeTracking } from '../types';
 import type { RatedBooking } from '../lib/feedbackModel';
@@ -20,12 +20,25 @@ const TZ = 'America/New_York';
 
 // Customer 360: what's happening now, who they are, how it's going. Two layouts:
 // the compact panel beside a conversation, and the full customer page (`full`).
-type Props = { contact: Contact; conversationId?: number; pinnedBookingId?: number | null; onInsert?: (text: string) => void; full?: boolean; actions?: ReactNode };
+// hideHistory: the page shows this contact's Story itself, so the unlinked panel leaves out its list.
+type Props = { contact: Contact; conversationId?: number; pinnedBookingId?: number | null; onInsert?: (text: string) => void; full?: boolean; actions?: ReactNode; hideHistory?: boolean };
 
 export function Customer360(props: Props) {
   const cid = props.contact.l27_customer_id;
-  if (!cid) return <LinkToLaunch27 contact={props.contact} />;
+  if (!cid) return <LinkToLaunch27 contact={props.contact} hideHistory={props.hideHistory} />;
   return <CustomerView cid={cid} {...props} />;
+}
+
+/** Every conversation of a contact, newest first, loaded a page at a time (years of Kustomer history included). */
+export function useContactConversations(contactId: number | undefined, pageSize = 100) {
+  return useInfiniteQuery({
+    queryKey: ['inbox', 'contact', contactId, 'conversations', pageSize],
+    queryFn: ({ pageParam }) => inbox.contactConversations(contactId!, pageParam, pageSize),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => last.next,
+    enabled: !!contactId,
+    staleTime: 15_000,
+  });
 }
 
 function useCustomerData(cid: number, contactId: number) {
@@ -229,7 +242,7 @@ function CustomerView({ cid, contact, conversationId, pinnedBookingId, onInsert,
             )
           )}
           {seg.data && <Journey seg={seg.data} />}
-          <Story past={data.past.data || []} contact={data.contactFull.data} customer={c} loading={data.past.isLoading} currentId={conversationId} />
+          <Story past={data.past.data || []} contactId={contact.id} customer={c} loading={data.past.isLoading} currentId={conversationId} />
         </div>
 
         <aside className="c360-side">
@@ -540,9 +553,15 @@ interface StoryItem {
   tone?: string;
 }
 
-function Story({ past, contact, customer, loading, currentId }: { past: RatedBooking[]; contact?: Contact; customer?: Customer; loading: boolean; currentId?: number }) {
+// A customer's timeline: visits, ratings, money and every conversation. conversationsOnly is for
+// someone who isn't in Launch27 (an inbox profile, e.g. made by the Kustomer import): just their
+// conversations. Conversations load a page at a time; while older ones are still to come, the
+// timeline stops at the oldest one loaded so visits never jump ahead of missing conversations.
+export function Story({ past = [], contactId, customer, loading = false, currentId, conversationsOnly = false }: { past?: RatedBooking[]; contactId: number; customer?: Customer; loading?: boolean; currentId?: number; conversationsOnly?: boolean }) {
   const [filter, setFilter] = useState<'all' | StoryKind>('all');
   const [shown, setShown] = useState(12);
+  const convs = useContactConversations(contactId);
+  const conversations = useMemo(() => convs.data?.pages.flatMap((p) => p.rows) || [], [convs.data]);
   const items = useMemo(() => {
     const out: StoryItem[] = [];
     for (const b of past) {
@@ -612,7 +631,7 @@ function Story({ past, contact, customer, loading, currentId }: { past: RatedBoo
         out.push({ key: `o${b.id}`, at: b.service_date || '', kind: 'money', icon: 'money', tone: 'warn', title: <strong>Not yet collected</strong>, sub: <>{dayLabel(b.service_date)} visit · #{b.id}</>, amount: fmtMoney(b.charges?.outstanding) });
       }
     }
-    for (const c of contact?.conversations || []) {
+    for (const c of conversations) {
       out.push({
         key: `m${c.id}`,
         at: c.last_message_at,
@@ -638,15 +657,23 @@ function Story({ past, contact, customer, loading, currentId }: { past: RatedBoo
     }
     if (customer?.notes) out.push({ key: 'note', at: '9999', kind: 'note', icon: 'note', title: <><strong>Customer notes</strong> · {customer.notes}</>, sub: 'Pinned from Launch27' });
     return out.sort((a, b) => b.at.localeCompare(a.at));
-  }, [past, contact, customer, currentId]);
-  const rows = items.filter((i) => filter === 'all' || i.kind === filter);
-  const FILTERS: { key: 'all' | StoryKind; label: string }[] = [
-    { key: 'all', label: 'Everything' },
-    { key: 'visit', label: 'Visits' },
-    { key: 'conversation', label: 'Conversations' },
-    { key: 'rating', label: 'Ratings' },
-    { key: 'money', label: 'Money' },
-  ];
+  }, [past, conversations, customer, currentId]);
+  const more = !!convs.hasNextPage;
+  const cutoff = more && conversations.length ? new Date(conversations[conversations.length - 1].last_message_at).getTime() : null;
+  const rows = items.filter((i) => (filter === 'all' || i.kind === filter) && !(cutoff != null && new Date(i.at).getTime() < cutoff));
+  const FILTERS: { key: 'all' | StoryKind; label: string }[] = conversationsOnly
+    ? []
+    : [
+        { key: 'all', label: 'Everything' },
+        { key: 'visit', label: 'Visits' },
+        { key: 'conversation', label: 'Conversations' },
+        { key: 'rating', label: 'Ratings' },
+        { key: 'money', label: 'Money' },
+      ];
+  const earlier = () => {
+    setShown(shown + 25);
+    if (more && shown + 25 >= rows.length && !convs.isFetchingNextPage) convs.fetchNextPage();
+  };
   return (
     <section className="card story">
       <div className="story-head">
@@ -669,8 +696,8 @@ function Story({ past, contact, customer, loading, currentId }: { past: RatedBoo
           ))}
         </div>
       </div>
-      {loading && <div className="muted">Loading…</div>}
-      {!loading && !rows.length && <div className="muted">Nothing yet.</div>}
+      {(loading || convs.isLoading) && <div className="muted">Loading…</div>}
+      {!loading && !convs.isLoading && !rows.length && <div className="muted">{conversationsOnly ? 'No conversations yet.' : 'Nothing yet.'}</div>}
       {rows.slice(0, shown).map((i) => (
         <div key={i.key} className="ev">
           <span className={`ev-dot ${i.kind}${i.tone ? ` ${i.tone}` : ''}`}>
@@ -683,9 +710,9 @@ function Story({ past, contact, customer, loading, currentId }: { past: RatedBoo
           {i.amount && <span className="mono ev-amt">{i.amount}</span>}
         </div>
       ))}
-      {rows.length > shown && (
-        <button type="button" className="secondary wide" onClick={() => setShown(shown + 25)}>
-          Show earlier ({rows.length - shown} more)
+      {(rows.length > shown || more) && (
+        <button type="button" className="secondary wide" onClick={earlier} disabled={convs.isFetchingNextPage}>
+          {convs.isFetchingNextPage ? 'Loading…' : rows.length > shown ? `Show earlier (${rows.length - shown}${more ? '+' : ''} more)` : 'Show earlier'}
         </button>
       )}
     </section>
@@ -791,13 +818,19 @@ export function lateness(b: Booking, now = Date.now()) {
 }
 
 export function ConversationHistory({ contact, currentId }: { contact: Contact; currentId?: number }) {
-  const full = useQuery({ queryKey: ['inbox', 'contact', contact.id], queryFn: () => inbox.contact(contact.id), staleTime: 15_000 });
-  const rows = (full.data?.conversations || []).filter((c) => c.id !== currentId);
-  if (full.isLoading) return <div className="muted small">Loading…</div>;
+  const [shown, setShown] = useState(12);
+  const convs = useContactConversations(contact.id, 50);
+  const rows = (convs.data?.pages.flatMap((p) => p.rows) || []).filter((c) => c.id !== currentId);
+  if (convs.isLoading) return <div className="muted small">Loading…</div>;
   if (!rows.length) return <div className="muted small">No other conversations.</div>;
+  const more = rows.length > shown || !!convs.hasNextPage;
+  const showMore = () => {
+    setShown(shown + 25);
+    if (convs.hasNextPage && shown + 25 >= rows.length && !convs.isFetchingNextPage) convs.fetchNextPage();
+  };
   return (
     <div className="mini-list">
-      {rows.slice(0, 12).map((c) => (
+      {rows.slice(0, shown).map((c) => (
         <Link key={c.id} to={`/inbox/${c.id}`} className="mini-row link-row">
           <Icon name={c.channel} />
           <span className="clip">{c.subject || c.last_preview}</span>
@@ -806,12 +839,17 @@ export function ConversationHistory({ contact, currentId }: { contact: Contact; 
           </span>
         </Link>
       ))}
+      {more && (
+        <button type="button" className="link small" onClick={showMore} disabled={convs.isFetchingNextPage}>
+          {convs.isFetchingNextPage ? 'Loading…' : 'Show more'}
+        </button>
+      )}
     </div>
   );
 }
 
 // Unlinked contact: find their Launch27 customer by phone, email or name.
-function LinkToLaunch27({ contact }: { contact: Contact }) {
+function LinkToLaunch27({ contact, hideHistory = false }: { contact: Contact; hideHistory?: boolean }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const location = useLocation();
@@ -860,10 +898,12 @@ function LinkToLaunch27({ contact }: { contact: Contact }) {
           {error && <div className="error small">{error}</div>}
         </div>
       </section>
-      <section className="rail-block">
-        <div className="eyebrow">Conversations</div>
-        <ConversationHistory contact={contact} />
-      </section>
+      {!hideHistory && (
+        <section className="rail-block">
+          <div className="eyebrow">Conversations</div>
+          <ConversationHistory contact={contact} />
+        </section>
+      )}
     </div>
   );
 }

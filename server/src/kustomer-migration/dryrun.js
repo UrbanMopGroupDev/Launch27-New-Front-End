@@ -1,15 +1,18 @@
-// Dry run: match every exported Kustomer customer to a Launch27 customer and decide what an
-// import would do with each conversation, without changing anything. Live data (contacts,
-// conversations, messages) is read through a SELECT-only handle; results go to the
-// kustomer_dry_runs / kustomer_plan_* tables only.
+// Dry run: decide where every exported Kustomer customer's history goes, without changing
+// anything. Live data (contacts, conversations, messages) is read through a SELECT-only
+// handle; results go to the kustomer_dry_runs / kustomer_plan_* tables only.
 //
-// Matching (Launch27 is the authority; identities agents already linked count as established):
-//   1. the customer's emails, primary first: Launch27 customer emails + support-contact emails
-//   2. then phone numbers that agents already linked to a contact (established relationship)
-//   3. a Launch27 customer's own phone number alone is only a "review" match (phones are shared)
-// One customer → confident. Several from one address → ambiguous. Different addresses of the
-// same Kustomer profile pointing at different customers → conflict. Cleaners and our own
-// addresses are classified separately. Nothing is guessed from names or message text.
+// Every profile gets a target (Launch27 is the authority; identities agents already linked
+// count as established):
+//   1. its emails, primary first: Launch27 customer emails + support-contact emails
+//   2. a Launch27 cleaner with one of those emails → the cleaner's profile
+//   3. phone numbers agents already linked to a customer, then Launch27's own phone field
+//   4. a contact already in the inbox (not in Launch27) with the same email, or the same phone
+//      when Kustomer has no email for them
+//   5. nobody: a new customer profile from the Kustomer details (internal accounts too)
+// When an address or number is on several Launch27 customers, one is picked by rule: the
+// primary address first; on a tie the customer agents already linked, else the most recently
+// created. Nothing is decided from names or message text.
 import { normalizeEmail, normalizePhone } from '../inbox/normalize.js';
 import * as K from './normalize.js';
 import { migrationDb, sanitize } from './export.js';
@@ -30,11 +33,14 @@ const domainOf = (e) => String(e).split('@')[1] || '';
 export function buildDirectory({ customers = [], teams = [], contacts = [], ourDomains = [] }) {
   const byEmail = new Map();
   const byPhone = new Map();
+  const created = new Map(); // Launch27 customer id -> when it was created (ms), for ties
   const slot = (map, key) => {
-    if (!map.has(key)) map.set(key, { customers: new Set(), teams: new Set(), contacts: new Set(), established: new Set() });
+    if (!map.has(key)) map.set(key, { customers: new Set(), teams: new Set(), contacts: new Set(), established: new Set(), unlinked: new Set() });
     return map.get(key);
   };
   for (const c of customers) {
+    const at = Date.parse(c.created_at || '');
+    created.set(Number(c.id), Number.isNaN(at) ? null : at);
     const e = !c.has_generated_email && normalizeEmail(c.email);
     if (e) slot(byEmail, e).customers.add(Number(c.id));
     const p = normalizePhone(c.phone);
@@ -46,7 +52,9 @@ export function buildDirectory({ customers = [], teams = [], contacts = [], ourD
     const p = normalizePhone(t.phone);
     if (p) slot(byPhone, p).teams.add(Number(t.id));
   }
-  // Identities on support contacts: confirmed by agents (or by Launch27 when the contact was made).
+  // Identities on support contacts: confirmed by agents (or by Launch27 when the contact was
+  // made). Contacts linked to neither a customer nor a cleaner are "unlinked": people the inbox
+  // already knows who aren't in Launch27.
   for (const row of contacts) {
     const key = row.kind === 'email' ? normalizeEmail(row.value) : normalizePhone(row.value);
     if (!key) continue;
@@ -57,51 +65,89 @@ export function buildDirectory({ customers = [], teams = [], contacts = [], ourD
       s.established.add(Number(row.l27_customer_id));
     }
     if (row.l27_team_id) s.teams.add(Number(row.l27_team_id));
+    if (!row.l27_customer_id && !row.l27_team_id) s.unlinked.add(Number(row.contact_id));
   }
   const domains = new Set(ourDomains.map((d) => d.toLowerCase()));
-  return { email: (e) => byEmail.get(e), phone: (p) => byPhone.get(p), internal: (e) => domains.has(domainOf(e)) };
+  // The most recently created of several Launch27 customers (unknown dates last), then the highest id.
+  const newest = (ids) => [...ids].sort((a, b) => (created.get(b) ?? -Infinity) - (created.get(a) ?? -Infinity) || b - a)[0];
+  return { email: (e) => byEmail.get(e), phone: (p) => byPhone.get(p), internal: (e) => domains.has(domainOf(e)), newest };
 }
 
-/** Which Launch27 customer a Kustomer customer is, and how sure we are. */
+/**
+ * Where a Kustomer customer's history goes, and why. Every profile gets a target:
+ *   customer (l27_customer_id) · cleaner (l27_team_id) · contact (contact_id) · new (a new profile)
+ * The match says how: confident | phone | picked | cleaner | existing | internal | new_profile.
+ */
 export function matchCustomer(kc, dir) {
-  const emails = kc.emails.map((e) => e.email).filter((e) => !dir.internal(e));
-  if (!emails.length && !kc.phones.length) return kc.emails.length ? { match: 'internal', reason: 'only our own addresses' } : { match: 'unmatched', reason: 'no email or phone in Kustomer' };
-  const perEmail = emails.map((e) => ({ e, s: dir.email(e) }));
-  const fromEmails = new Set();
-  const teams = new Set();
-  let ambiguousAddress = null;
-  for (const { e, s } of perEmail) {
-    if (!s) continue;
-    for (const t of s.teams) teams.add(t);
-    if (s.customers.size > 1) ambiguousAddress = e;
-    for (const c of s.customers) fromEmails.add(c);
+  const emails = kc.emails.map((e) => e.email);
+  const external = emails.filter((e) => !dir.internal(e));
+  // On a tie: the customer agents already linked, else the most recently created.
+  const pick = (ids, established) => {
+    const linked = [...ids].filter((id) => established.has(id));
+    if (linked.length === 1) return { id: linked[0], why: 'the one agents already linked' };
+    return { id: dir.newest(linked.length ? linked : ids), why: 'the most recently created' };
+  };
+  const customer = (match, id, method, candidates, reason) => ({ match, target: 'customer', l27_customer_id: id, method, candidates, ...(reason ? { reason } : {}) });
+
+  // 1. Launch27 customers by email, primary first. (Never addresses in a reason: the report is sanitized.)
+  const hits = external.map((e, i) => ({ i, s: dir.email(e) })).filter((h) => h.s?.customers.size);
+  if (hits.length) {
+    const all = [...new Set(hits.flatMap((h) => [...h.s.customers]))];
+    const { i, s } = hits[0];
+    const method = i === 0 ? 'email' : 'secondary_email';
+    if (all.length === 1) return customer('confident', all[0], method, all);
+    const where = i === 0 ? 'the primary address' : 'the first address that matches';
+    if (s.customers.size > 1) {
+      const p = pick(s.customers, s.established);
+      return customer('picked', p.id, method, all, `${where} is on ${s.customers.size} Launch27 customers: picked ${p.why}`);
+    }
+    return customer('picked', [...s.customers][0], method, all, `its addresses belong to ${all.length} Launch27 customers: picked the one with ${where}`);
   }
-  if (ambiguousAddress) return { match: 'ambiguous', candidates: [...fromEmails], reason: 'an address is on several Launch27 customers' };
-  if (fromEmails.size > 1) return { match: 'conflict', candidates: [...fromEmails], reason: 'its addresses belong to different Launch27 customers' };
-  if (fromEmails.size === 1) {
-    const id = [...fromEmails][0];
-    const firstHit = perEmail.find(({ s }) => s?.customers.has(id));
-    return { match: 'confident', l27_customer_id: id, method: firstHit.e === emails[0] ? 'email' : 'secondary_email', candidates: [id] };
+  // 2. A Launch27 cleaner by email.
+  for (const e of external) {
+    const s = dir.email(e);
+    if (s?.teams.size) return { match: 'cleaner', target: 'cleaner', l27_team_id: Math.min(...s.teams), method: 'email', candidates: [], reason: 'a Launch27 cleaner' };
   }
-  if (teams.size) return { match: 'cleaner', reason: 'a Launch27 cleaner' };
-  // No email match: phones agents already linked, then Launch27's own phone field (review only).
+  // 3. Phones: numbers agents already linked to a customer, then Launch27's own phone field.
   const established = new Set();
   const byField = new Set();
+  let team = null;
   for (const p of kc.phones) {
     const s = dir.phone(p);
     if (!s) continue;
-    if (s.teams.size && !s.customers.size) teams.add([...s.teams][0]);
     for (const c of s.established) established.add(c);
     for (const c of s.customers) byField.add(c);
+    if (team == null && s.teams.size && !s.customers.size) team = Math.min(...s.teams);
   }
-  if (established.size === 1) return { match: 'confident', l27_customer_id: [...established][0], method: 'contact', candidates: [...established] };
-  if (established.size > 1 || byField.size > 1) return { match: 'ambiguous', candidates: [...new Set([...established, ...byField])], reason: 'the phone number is on several Launch27 customers' };
-  if (byField.size === 1) return { match: 'review', l27_customer_id: [...byField][0], method: 'phone', candidates: [...byField], reason: 'matched by phone number only: confirm before importing' };
-  if (teams.size) return { match: 'cleaner', reason: 'a Launch27 cleaner' };
-  return { match: 'unmatched', reason: 'no Launch27 customer with these addresses or numbers' };
+  if (established.size === 1) return customer('confident', [...established][0], 'contact', [...established]);
+  if (established.size > 1) return customer('picked', dir.newest(established), 'contact', [...established], `the phone number is linked to ${established.size} Launch27 customers: picked the most recently created`);
+  if (byField.size === 1) return customer('phone', [...byField][0], 'phone', [...byField], 'matched by phone number only');
+  if (byField.size > 1) return customer('picked', dir.newest(byField), 'phone', [...byField], `the phone number is on ${byField.size} Launch27 customers: picked the most recently created`);
+  if (team != null) return { match: 'cleaner', target: 'cleaner', l27_team_id: team, method: 'phone', candidates: [], reason: 'a Launch27 cleaner' };
+
+  // 4. A contact already in the inbox, not in Launch27: by email, or by phone when Kustomer has no
+  // email for them (a phone alone is often shared by a family).
+  const internal = !external.length && emails.length > 0;
+  const existing = (contactId, method) => ({ match: internal ? 'internal' : 'existing', target: 'contact', contact_id: contactId, method, candidates: [], reason: internal ? 'only our own addresses: an existing contact' : 'a contact already in the inbox, not in Launch27' });
+  for (const e of emails) {
+    const s = dir.email(e);
+    if (s?.unlinked.size) return existing(Math.min(...s.unlinked), 'email');
+  }
+  if (!emails.length) {
+    for (const p of kc.phones) {
+      const s = dir.phone(p);
+      if (s?.unlinked.size) return existing(Math.min(...s.unlinked), 'phone');
+    }
+  }
+  // 5. Nobody known: a new customer profile from the Kustomer details.
+  if (internal) return { match: 'internal', target: 'new', candidates: [], reason: 'only our own addresses: a new internal profile' };
+  return { match: 'new_profile', target: 'new', candidates: [], reason: emails.length || kc.phones.length ? 'no Launch27 customer, cleaner or contact with these addresses or numbers' : 'no email or phone in Kustomer' };
 }
 
-const MATCHES = ['confident', 'review', 'ambiguous', 'conflict', 'unmatched', 'cleaner', 'internal'];
+export const MATCHES = ['confident', 'phone', 'picked', 'cleaner', 'existing', 'internal', 'new_profile'];
+export const TARGETS = ['customer', 'cleaner', 'contact', 'new'];
+// Plans made before every conversation got a target can't be imported (run the dry run again).
+export const PLAN_VERSION = 2;
 
 export function createKustomerDryRun({ db, vault, l27Directory, ourDomains = [], log = () => {}, chunk = 200 }) {
   const store = migrationDb(db);
@@ -144,9 +190,14 @@ export function createKustomerDryRun({ db, vault, l27Directory, ourDomains = [],
     const contacts = (await ro.query('SELECT i.kind, i.value, c.id AS contact_id, c.l27_customer_id, c.l27_team_id FROM contact_identities i JOIN contacts c ON c.id = i.contact_id')).rows;
     const dir = buildDirectory({ customers, teams, contacts, ourDomains });
     const contactFor = new Map((await ro.query('SELECT DISTINCT ON (l27_customer_id) l27_customer_id, id FROM contacts WHERE l27_customer_id IS NOT NULL ORDER BY l27_customer_id, id')).rows.map((r) => [Number(r.l27_customer_id), Number(r.id)]));
+    const contactForTeam = new Map((await ro.query('SELECT DISTINCT ON (l27_team_id) l27_team_id, id FROM contacts WHERE l27_team_id IS NOT NULL ORDER BY l27_team_id, id')).rows.map((r) => [Number(r.l27_team_id), Number(r.id)]));
+    // Profiles an earlier import already made for a Kustomer customer: the import adds to them.
+    const madeBefore = new Map((await ro.query("SELECT kustomer_customer_id, min(contact_id) AS contact_id FROM kustomer_contacts WHERE kind IN ('profile', 'internal') GROUP BY kustomer_customer_id")).rows.map((r) => [r.kustomer_customer_id, Number(r.contact_id)]));
     const imported = new Set((await ro.query("SELECT source_id FROM conversations WHERE source = 'kustomer'")).rows.map((r) => r.source_id));
-    const totals = { customers: 0, conversations: 0, messages: 0, notes: 0, attachments: 0, duplicate_messages: 0, preview_only_messages: 0, new_conversations: 0, already_imported: 0, match: Object.fromEntries(MATCHES.map((m) => [m, 0])), conversations_by_match: Object.fromEntries(MATCHES.map((m) => [m, 0])), by_channel: {}, by_direction: { in: 0, out: 0, unknown: 0 }, oldest: null, newest: null, duplicate_identities: 0, l27_customers: 0, errors: [] };
+    const zero = (keys) => Object.fromEntries(keys.map((k) => [k, 0]));
+    const totals = { plan_version: PLAN_VERSION, customers: 0, conversations: 0, messages: 0, notes: 0, attachments: 0, duplicate_messages: 0, preview_only_messages: 0, new_conversations: 0, already_imported: 0, match: zero(MATCHES), conversations_by_match: zero(MATCHES), by_target: zero(TARGETS), new_profiles: 0, by_channel: {}, by_direction: { in: 0, out: 0, unknown: 0 }, oldest: null, newest: null, duplicate_identities: 0, l27_customers: 0, errors: [] };
     const l27Seen = new Map(); // l27 id -> kustomer customers mapped to it
+    const profileKeys = new Set(); // emails/phones of the new profiles counted so far (several Kustomer profiles may share one)
     const ids = (await ro.query("SELECT kustomer_id FROM kustomer_records WHERE kind = 'customer' ORDER BY kustomer_id")).rows.map((r) => r.kustomer_id);
     for (let i = 0; i < ids.length; i += chunk) {
       const part = ids.slice(i, i + chunk);
@@ -187,8 +238,12 @@ export function createKustomerDryRun({ db, vault, l27Directory, ourDomains = [],
       for (const [kid, g] of byCustomer) {
         if (!g.customer) continue;
         const m = matchCustomer(g.customer, dir);
+        // The support contact the import would use (null: made by the import).
+        const contactId = m.target === 'customer' ? contactFor.get(m.l27_customer_id) ?? null : m.target === 'cleaner' ? contactForTeam.get(m.l27_team_id) ?? null : m.target === 'contact' ? m.contact_id : madeBefore.get(kid) ?? null;
         totals.customers++;
         totals.match[m.match]++;
+        totals.by_target[m.target]++;
+        let toImport = 0;
         if (m.l27_customer_id) {
           if (l27Seen.has(m.l27_customer_id)) totals.duplicate_identities++;
           l27Seen.set(m.l27_customer_id, (l27Seen.get(m.l27_customer_id) || 0) + 1);
@@ -211,7 +266,10 @@ export function createKustomerDryRun({ db, vault, l27Directory, ourDomains = [],
           totals.attachments += c.attachments;
           totals.duplicate_messages += dup;
           totals.preview_only_messages += preview;
-          if (action === 'new') totals.new_conversations++;
+          if (action === 'new') {
+            totals.new_conversations++;
+            toImport++;
+          }
           if (action === 'already_imported') totals.already_imported++;
           for (const x of sorted) {
             totals.by_channel[x.channel] = (totals.by_channel[x.channel] || 0) + 1;
@@ -222,14 +280,22 @@ export function createKustomerDryRun({ db, vault, l27Directory, ourDomains = [],
           nMsg += sorted.length;
           nNote += c.notes.length;
         }
-        custRows.push({ id: kid, ...m, contact_id: m.l27_customer_id ? contactFor.get(m.l27_customer_id) ?? null : null, conversations: [...g.convs.values()].filter((c) => c.conv).length, messages: nMsg, notes: nNote });
+        if (m.target === 'new' && contactId == null && toImport) {
+          // About how many profiles the import will make. Like the import: a profile with an email
+          // joins one that already has it (without emails, by phone), and takes its phones too.
+          const emailKeys = g.customer.emails.map((e) => `e:${e.email}`);
+          const phoneKeys = g.customer.phones.map((p) => `p:${p}`);
+          if (!(emailKeys.length ? emailKeys : phoneKeys).some((k) => profileKeys.has(k))) totals.new_profiles++;
+          for (const k of [...emailKeys, ...phoneKeys]) profileKeys.add(k);
+        }
+        custRows.push({ id: kid, ...m, contact_id: contactId, conversations: [...g.convs.values()].filter((c) => c.conv).length, messages: nMsg, notes: nNote });
       }
       await store.tx(async (q) => {
         for (const c of custRows) {
           await q.query(
-            `INSERT INTO kustomer_plan_customers (run_id, kustomer_customer_id, match, method, l27_customer_id, contact_id, candidates, reason, conversations, messages, notes)
-             VALUES ($1,$2,$3,$4,$5,$6,$7::bigint[],$8,$9,$10,$11)`,
-            [runId, c.id, c.match, c.method || null, c.l27_customer_id ?? null, c.contact_id, c.candidates || [], c.reason || null, c.conversations, c.messages, c.notes],
+            `INSERT INTO kustomer_plan_customers (run_id, kustomer_customer_id, match, target, method, l27_customer_id, l27_team_id, contact_id, candidates, reason, conversations, messages, notes)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::bigint[],$10,$11,$12,$13)`,
+            [runId, c.id, c.match, c.target, c.method || null, c.l27_customer_id ?? null, c.l27_team_id ?? null, c.contact_id, c.candidates || [], c.reason || null, c.conversations, c.messages, c.notes],
           );
         }
         for (const c of convRows) {
