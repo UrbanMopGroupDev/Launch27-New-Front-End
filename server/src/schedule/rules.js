@@ -133,20 +133,75 @@ export function customerPrefs(tags = []) {
     avoid,
   };
 }
-const firstWord = (s) => String(s || '').toLowerCase().split(/\s+/)[0] || '';
-export const nameMatches = (cleanerName, wanted) => {
-  const w = String(wanted || '').toLowerCase().trim();
-  if (!w) return false;
-  const n = String(cleanerName || '').toLowerCase();
-  return n === w || firstWord(n) === firstWord(w) || n.includes(w);
+// ---------- matching a name on a tag to a cleaner ----------
+// Tags are typed by hand ("do not assign Silvia", "prefers Caysi P"). A lone letter after the
+// first name is a last initial and narrows the match; anything else after it is ignored.
+const plain = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z' -]/g, ' ').trim();
+const nameParts = (s) => {
+  const words = plain(s).split(/\s+/).filter(Boolean);
+  return { first: words[0] || '', second: words[1] || '', last: words.length > 1 ? words.at(-1) : '' };
 };
+// One letter added, dropped or swapped.
+function oneLetterApart(a, b) {
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  if (a.length === b.length) return a.slice(i + 1) === b.slice(i + 1);
+  return a.length > b.length ? a.slice(i + 1) === b.slice(i) : a.slice(i) === b.slice(i + 1);
+}
+// Silvia / Sylvia, Catherine / Katherine: the same name spelled another way.
+const soundsSame = (a, b) => {
+  const fold = (x) => x.replace(/y/g, 'i');
+  return fold(a) === fold(b) || (Math.min(a.length, b.length) >= 6 && oneLetterApart(a, b));
+};
+const initialFits = (cleaner, wanted) => wanted.second.length !== 1 || !cleaner.last || cleaner.last[0] === wanted.second;
+// "Do not assign": errs toward ruling out. Same first name (or a near spelling), every cleaner
+// who has it; the office can still assign anyway.
+export const nameMatches = (cleanerName, wanted) => {
+  const w = nameParts(wanted);
+  if (!w.first) return false;
+  const c = nameParts(cleanerName);
+  return (c.first === w.first || soundsSame(c.first, w.first) || plain(cleanerName).includes(plain(wanted))) && initialFits(c, w);
+};
+// "Prefers": exact first name only (and last initial when given).
+export const nameIs = (cleanerName, wanted) => {
+  const w = nameParts(wanted);
+  const c = nameParts(cleanerName);
+  return !!w.first && c.first === w.first && initialFits(c, w);
+};
+// Work out, against the actual cleaners, who a client's wishes rule out and who they ask for.
+// A "prefers" name counts only when it points at exactly one cleaner (one taking bookings, when
+// several share the name); names matching nobody, or more than one, are reported, not guessed.
+export function resolvePrefs(prefs, cleaners = []) {
+  const avoidIds = new Set();
+  const preferIds = new Set();
+  const unmatched = [];
+  const ambiguous = [];
+  for (const n of prefs.avoid) {
+    const hit = cleaners.filter((c) => nameMatches(c.name, n));
+    if (!hit.length) unmatched.push(n);
+    for (const c of hit) avoidIds.add(c.id);
+  }
+  for (const n of prefs.prefers) {
+    const all = cleaners.filter((c) => nameIs(c.name, n));
+    const hit = all.length > 1 && all.some((c) => c.assignable) ? all.filter((c) => c.assignable) : all;
+    if (!hit.length) unmatched.push(n);
+    else if (hit.length > 1) ambiguous.push({ name: n, cleaners: hit.map((c) => c.name) });
+    else preferIds.add(hit[0].id);
+  }
+  return { ...prefs, avoidIds, preferIds, unmatched, ambiguous };
+}
+// With resolved wishes use the ids; plain customerPrefs fall back to the names.
+export const rulesOut = (prefs, c) => (prefs?.avoidIds ? prefs.avoidIds.has(c.id) : !!prefs?.avoid?.some((n) => nameMatches(c.name, n)));
+export const askedFor = (prefs, c) => (prefs?.preferIds ? prefs.preferIds.has(c.id) : !!prefs?.prefers?.some((n) => nameIs(c.name, n)));
 
 // ---------- availability ----------
 // Launch27 rows: weekly (date null, weekday 0-6) and date-specific overrides; plus dates the
 // office marked unavailable in this app.
 // A date row only overrides the weekly hours when it says something: a day off, or its own times
 // (Launch27 can return a row for a date with neither). A day can have several blocks (8–12 and
-// 1–5): the window runs from the first start to the last end.
+// 1–5): the window runs from the first start to the last end, and the closed stretches between
+// blocks are kept on it as window.breaks ([[from, to], …]) so nothing is booked across them.
 const hasTimes = (r) => r.start_time && r.end_time && toMinutes(r.end_time) > toMinutes(r.start_time);
 function dayRows(rows, d) {
   const dated = rows.filter((r) => r.date && String(r.date).slice(0, 10) === d && (r.dayoff || hasTimes(r)));
@@ -159,8 +214,26 @@ export function workingWindow(rows = [], d, unavailableDates = null) {
   if (list.some((r) => r.dayoff && !hasTimes(r)) && !list.some((r) => !r.dayoff && hasTimes(r))) return null;
   const open = list.filter((r) => !r.dayoff && hasTimes(r));
   if (!open.length) return null;
-  return [Math.min(...open.map((r) => toMinutes(r.start_time))), Math.max(...open.map((r) => toMinutes(r.end_time)))];
+  const blocks = [];
+  for (const [a, b] of open.map((r) => [toMinutes(r.start_time), toMinutes(r.end_time)]).sort((x, y) => x[0] - y[0])) {
+    const lastBlock = blocks.at(-1);
+    if (lastBlock && a <= lastBlock[1]) lastBlock[1] = Math.max(lastBlock[1], b);
+    else blocks.push([a, b]);
+  }
+  const w = [blocks[0][0], blocks.at(-1)[1]];
+  if (blocks.length > 1) w.breaks = blocks.slice(1).map((b, i) => [blocks[i][1], b[0]]);
+  return w;
 }
+// The open blocks of a window, in order: [[480, 780], [855, 1080]] for 8–1 and 2:15–6.
+export function windowBlocks(w) {
+  if (!w) return [];
+  const edges = [w[0], ...(w.breaks || []).flat(), w[1]];
+  return edges.reduce((out, x, i) => (i % 2 ? [...out, [edges[i - 1], x]] : out), []);
+}
+// Minutes open inside a window (breaks taken out).
+export const openMinutes = (w) => windowBlocks(w).reduce((m, [a, b]) => m + b - a, 0);
+// The break a visit would run into, if any.
+export const breakHit = (w, start, end) => (w?.breaks || []).find(([a, b]) => start < b && end > a) || null;
 // Minutes a cleaner is open on a date: the sum of that day's blocks (a split day counts its gap as closed).
 export function workingMinutes(rows = [], d, unavailableDates = null) {
   if (!workingWindow(rows, d, unavailableDates)) return 0;
@@ -207,6 +280,7 @@ export function areaOf(p) {
 export function fitsDay({ window, busy = [], start, duration, place, transit = false, ignoreKeys = null }) {
   if (!window) return { ok: false, reason: 'not working' };
   if (start < window[0] || start + duration > window[1]) return { ok: false, reason: 'outside hours' };
+  if (breakHit(window, start, start + duration)) return { ok: false, reason: 'outside hours' };
   let travel = null;
   for (const v of busy) {
     if (ignoreKeys?.has(v.key)) continue;
@@ -224,7 +298,7 @@ export function fitsDay({ window, busy = [], start, duration, place, transit = f
 // Open stretches of a day (at least `min` minutes) after bookings.
 export function openGaps(window, busy = [], min = 120) {
   if (!window) return [];
-  const sorted = [...busy].sort((a, b) => a.start - b.start);
+  const sorted = [...busy, ...(window.breaks || []).map(([start, end]) => ({ start, end }))].sort((a, b) => a.start - b.start);
   const gaps = [];
   let t = window[0];
   for (const v of sorted) {
@@ -243,7 +317,7 @@ export function rankCleaners(job, cleaners, ctx, { limit = 5, ignoreKeys = null 
   const out = [];
   for (const c of cleaners) {
     if (!c.assignable) continue;
-    if (job.prefs?.avoid?.some((n) => nameMatches(c.name, n))) continue;
+    if (rulesOut(job.prefs, c)) continue;
     if (job.prefs?.femaleOnly && c.gender !== 'F') continue;
     if (c.rules.noShort && job.duration <= 120) continue;
     const homeKm = km(c, job.place);
@@ -272,8 +346,10 @@ export function rankCleaners(job, cleaners, ctx, { limit = 5, ignoreKeys = null 
       score += Math.min(seen * 5, 25);
       reasons.push({ text: `Cleaned here ${seen} time${seen === 1 ? '' : 's'} before`, tone: 'good' });
     } else reasons.push({ text: 'New to this client', tone: 'neutral' });
-    if (job.prefs?.prefers?.some((n) => nameMatches(c.name, n))) {
-      score += 40;
+    // The client's own ask comes before the usual cleaner (who is only inferred from past visits).
+    const preferred = askedFor(job.prefs, c);
+    if (preferred) {
+      score += 80;
       reasons.push({ text: 'Client asked for them', tone: 'good' });
     }
     const ratio = fits / job.dates.length;
@@ -312,9 +388,9 @@ export function rankCleaners(job, cleaners, ctx, { limit = 5, ignoreKeys = null 
     }
     if (c.isNew) reasons.push({ text: 'New hire', tone: 'neutral' });
     if (c.rules.confirmFirst) reasons.push({ text: 'Call or text to confirm first', tone: 'warn' });
-    out.push({ cleaner_id: c.id, name: c.name, color: c.color, status: c.status, score: Math.round(Math.min(score / 160, 1) * 100) / 100, fits, total: job.dates.length, travel, reasons, misses });
+    out.push({ cleaner_id: c.id, name: c.name, color: c.color, status: c.status, preferred, score: Math.round(Math.min(score / 160, 1) * 100) / 100, fits, total: job.dates.length, travel, reasons, misses });
   }
-  return out.sort((a, b) => b.score - a.score).slice(0, limit);
+  return out.sort((a, b) => Number(b.preferred) - Number(a.preferred) || b.score - a.score).slice(0, limit);
 }
 
 // The client's main cleaner: who did most of their last 6 assigned visits.
