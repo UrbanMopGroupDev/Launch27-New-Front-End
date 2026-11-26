@@ -255,6 +255,8 @@ function wishChips(p: ClientPrefs) {
   if (p.consistent) chips.push({ text: 'Wants the same cleaner every time', tone: 'neutral' });
   for (const n of p.prefers) chips.push({ text: `Asks for ${n}`, tone: 'good' });
   for (const n of p.avoid) chips.push({ text: `Never send ${n}`, tone: 'warn' });
+  for (const n of p.unmatched || []) chips.push({ text: `Couldn't match "${n}" to any cleaner: check the tag's spelling`, tone: 'warn' });
+  for (const a of p.ambiguous || []) chips.push({ text: `"${a.name}" matches ${a.cleaners.length} cleaners (${a.cleaners.join(', ')}): add a last initial to the tag`, tone: 'warn' });
   return chips;
 }
 
@@ -650,7 +652,8 @@ export function FindSlotTab({ presetCustomer, reschedule }: { presetCustomer?: {
               <>
                 {slots.data.no_usual && `${slots.data.customer?.name || 'This client'} has no usual cleaner yet, so these are open to any cleaner. `}
                 {slots.data.slots.length ? `Best ${slots.data.frequency.toLowerCase()} slots. Recurring slots are free on every date for the next 8 weeks.` : 'No cleaner is free for that. Try other days, a shorter clean, or a later start date.'}
-                {slots.data.customer?.main && (slots.data.slots.some((x) => x.cleaner.name === slots.data!.customer!.main)
+                {slots.data.asked_for.some((n) => n !== slots.data!.customer?.main) && ` ${slots.data.asked_for.join(', ')} (asked for on the client's tags) come${slots.data.asked_for.length === 1 ? 's' : ''} first where free.`}
+                {slots.data.customer?.main && !slots.data.asked_for.some((n) => n !== slots.data!.customer?.main) && (slots.data.slots.some((x) => x.cleaner.name === slots.data!.customer!.main)
                   ? ` ${slots.data.customer.main} (usual cleaner) is ranked first where free.`
                   : ` ${slots.data.customer.main} (usual cleaner) isn't free at those times: try other days or times to keep them.`)}
               </>

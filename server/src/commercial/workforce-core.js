@@ -12,7 +12,7 @@
 // The rules come from the Commercial lead's planner (docs/commercial-workforce.md); here they
 // run on live Launch27 data (hours, days off, every booking with its address) instead of CSV
 // exports. Nothing here writes anywhere.
-import { addDays, fitsDay, km, travelMinutes, weekday, nameMatches } from '../schedule/rules.js';
+import { addDays, fitsDay, km, openMinutes, rulesOut, travelMinutes, weekday } from '../schedule/rules.js';
 
 export const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 export const dayIndex = (d) => (weekday(d) + 6) % 7; // 0 = Monday
@@ -172,7 +172,7 @@ export function planWeek(ctx, weekStart) {
     let avail = 0;
     for (let i = 0; i < 7; i++) {
       const w = windowFor(c, addDays(weekStart, i));
-      if (w) avail += w[1] - w[0];
+      if (w) avail += openMinutes(w);
     }
     cap.set(t.id, { id: t.id, name: t.name, avail, com: 0, res: 0, added: 0, has_hours: t.has_hours, last_day: t.last_day });
   }
@@ -188,7 +188,7 @@ export function planWeek(ctx, weekStart) {
     const c = byId.get(id);
     if (!c || !c.assignable || !worksIn(id, s.location_id)) return false;
     const prefs = ctx.prefsFor?.(s.customer_id);
-    if (prefs?.avoid?.some((n) => nameMatches(c.name, n))) return false;
+    if (rulesOut(prefs, c)) return false;
     if (prefs?.femaleOnly && c.gender !== 'F') return false;
     const last = lastDayOf(id);
     for (const o of occs) {

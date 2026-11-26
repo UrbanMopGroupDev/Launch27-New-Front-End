@@ -5,8 +5,8 @@ import { torontoInstant } from '../reports/raise.js';
 import { clientId, clientLabel, harmonizePartners, noteHints, partnerOf } from '../commercial/partners.js';
 import {
   FREQ_LABEL, STATUS_LABEL, addDays, areaOf, customerPrefs, cycleWeek, cycleWeeks, daysBetween, fitsDay, frequencyKind,
-  isPrepaid, km, nameMatches, localDate, localMinutes, mainCleaner, mondayOf, openGaps, parseCleaner, rankCleaners, seriesDates,
-  weekday, weeklyHours, workingWindow, toMinutes as toMinutesHM, travelMinutes,
+  isPrepaid, km, localDate, localMinutes, mainCleaner, mondayOf, openGaps, openMinutes, breakHit, windowBlocks, resolvePrefs, rulesOut, parseCleaner, rankCleaners, seriesDates,
+  weekday, weeklyHours, workingWindow, travelMinutes,
 } from './rules.js';
 
 const PAST_DAYS = 91;
@@ -27,6 +27,8 @@ const DAYNAME = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const pad = (n) => String(n).padStart(2, '0');
 const dateStr = (v) => (v == null ? null : typeof v === 'string' ? v.slice(0, 10) : `${v.getFullYear()}-${pad(v.getMonth() + 1)}-${pad(v.getDate())}`);
 const nice = (d) => new Date(`${d}T12:00:00Z`).toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+// A day's hours, every block: "8am–1pm, 2:15pm–6pm".
+const hoursText = (w) => windowBlocks(w).map(([a, b]) => `${clock(a)}–${clock(b)}`).join(', ');
 const clock = (min) => {
   const h = Math.floor(min / 60) % 24;
   const m = min % 60;
@@ -208,7 +210,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       c.main = mainCleaner(c.past.filter((v) => v.kind !== 'one')) || mainCleaner(c.past) || (recurring ? mainCleaner(c.future) : null);
       c.history = new Map();
       for (const v of c.past) for (const id of v.team_ids) c.history.set(id, (c.history.get(id) || 0) + 1);
-      c.prefs = customerPrefs(c.tags || []);
+      c.prefs = resolvePrefs(customerPrefs(c.tags || []), cleaners);
     }
     return { ...data, byId, future, past, busy, customers };
   }
@@ -224,7 +226,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     let min = 0;
     for (let d = from; d <= to; d = addDays(d, 1)) {
       const w = windowFor(c, d);
-      if (w) min += w[1] - w[0];
+      if (w) min += openMinutes(w);
     }
     return min / 60;
   }
@@ -274,8 +276,8 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
           continue;
         }
         const w = windowFor(c, v.date);
-        if (!w || v.start < w[0] || v.end > w[1]) {
-          out.push({ ...base, cleaner_id: id, kind: 'outside_hours', key: `outside_hours:${v.key}:${id}`, title: `Outside ${c.name}'s hours: ${v.customer} · ${when}`, detail: { hours: w ? `${clock(w[0])}–${clock(w[1])}` : 'not working that day' } });
+        if (!w || v.start < w[0] || v.end > w[1] || breakHit(w, v.start, v.end)) {
+          out.push({ ...base, cleaner_id: id, kind: 'outside_hours', key: `outside_hours:${v.key}:${id}`, title: `Outside ${c.name}'s hours: ${v.customer} · ${when}`, detail: { hours: w ? hoursText(w) : 'not working that day' } });
         }
         const same = (s.busy.get(`${id}|${v.date}`) || []).filter((o) => o.key !== v.key && o.start < v.end && v.start < o.end);
         if (same.length && same.every((o) => o.key > v.key)) {
@@ -285,7 +287,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       if (cust?.main && v.kind !== 'one' && !v.team_ids.includes(cust.main.id)) {
         // Only when the usual cleaner could take it back: that is the one dispatch can act on.
         const main = s.byId.get(cust.main.id);
-        const allowed = main && !cust.prefs.avoid.some((n) => nameMatches(main.name, n)) && !(cust.prefs.femaleOnly && main.gender !== 'F');
+        const allowed = main && !rulesOut(cust.prefs, main) && !(cust.prefs.femaleOnly && main.gender !== 'F');
         const free = allowed && main?.assignable && fitsDay({ window: windowFor(main, v.date), busy: busyFor(s)(main.id, v.date), start: v.start, duration: v.duration, place: v, transit: main.rules.transit, ignoreKeys: new Set([v.key]) }).ok;
         if (main && free) out.push({ ...base, cleaner_id: cust.main.id, kind: 'different_cleaner', key: `different_cleaner:${v.key}:${v.team_ids.join('-')}`, title: `${main.name} is free to take back ${v.customer} · ${when}`, detail: { main: main.name, booked: v.team_ids.map((id) => s.byId.get(id)?.name || 'Unknown') } });
       }
@@ -329,7 +331,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       if (sig(old) === sig(c) && !statusChanged) continue;
       const affected = next.future.filter((v) => v.team_ids.includes(c.id)).filter((v) => {
         const w = windowFor(c, v.date);
-        return !c.assignable || !w || v.start < w[0] || v.end > w[1];
+        return !c.assignable || !w || v.start < w[0] || v.end > w[1] || !!breakHit(w, v.start, v.end);
       });
       out.push({ kind: 'availability', key: `availability:${c.id}:${sig(c).length}:${c.status}`, due: affected[0]?.date || t, cleaner_id: c.id, title: statusChanged ? `${c.name} is now ${STATUS_LABEL[c.status].toLowerCase()}: ${affected.length} upcoming visit${affected.length === 1 ? '' : 's'} affected` : `${c.name}'s hours changed: ${affected.length} upcoming visit${affected.length === 1 ? '' : 's'} no longer fit`, detail: { affected: affected.slice(0, 20).map((v) => v.key) } });
     }
@@ -815,10 +817,10 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     }
     if (!live) return cu ? { prefs: cu.prefs, source: 'synced' } : null;
     // Snapshots from before note wishes were kept apart: keep everything synced, to be safe.
-    return { prefs: customerPrefs([...live, ...(cu ? cu.noteTags ?? cu.tags ?? [] : [])]), source: 'profile' };
+    return { prefs: resolvePrefs(customerPrefs([...live, ...(cu ? cu.noteTags ?? cu.tags ?? [] : [])]), s.cleaners), source: 'profile' };
   }
   // Why this cleaner must not be sent to a client with these wishes (null = fine).
-  const blockedWhy = (prefs, c) => (prefs?.avoid?.some((n) => nameMatches(c.name, n)) ? 'Client asked never to have them' : prefs?.femaleOnly && c.gender !== 'F' ? 'Client wants a female cleaner only' : null);
+  const blockedWhy = (prefs, c) => (rulesOut(prefs, c) ? 'Client asked never to have them' : prefs?.femaleOnly && c.gender !== 'F' ? 'Client wants a female cleaner only' : null);
   // For screens that pick a cleaner by hand (the booking form): the wishes, and who they rule in or out.
   async function clientWishesOut(customerId, bearer) {
     const s = await need();
@@ -828,7 +830,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       prefs: prefsOut(w.prefs),
       source: w.source,
       blocked: s.cleaners.map((c) => ({ id: c.id, name: c.name, reason: blockedWhy(w.prefs, c) })).filter((x) => x.reason),
-      asked_for: s.cleaners.filter((c) => w.prefs.prefers.some((n) => nameMatches(c.name, n))).map((c) => c.id),
+      asked_for: [...w.prefs.preferIds],
     };
   }
 
@@ -842,6 +844,9 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     consistent: p.consistent,
     prefers: p.prefers.map(titleCase),
     avoid: p.avoid.map(titleCase),
+    // Names on tags that point at no cleaner, or at several (then nobody is boosted).
+    unmatched: (p.unmatched || []).map(titleCase),
+    ambiguous: (p.ambiguous || []).map((a) => ({ name: titleCase(a.name), cleaners: a.cleaners })),
   });
   function clientOut(s, customerId) {
     const cu = customerId != null ? s.customers.get(customerId) : null;
@@ -879,7 +884,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       const c = r.cleaner_id != null ? s.byId.get(Number(r.cleaner_id)) : null;
       const day = v?.date || dateStr(r.due);
       const w = c && day ? windowFor(c, day) : null;
-      const cleaner = c ? { id: c.id, location_ids: c.location_ids || [], name: c.name, status: STATUS_LABEL[c.status], hours: w ? `${clock(w[0])}–${clock(w[1])}` : null, working: !!w } : null;
+      const cleaner = c ? { id: c.id, location_ids: c.location_ids || [], name: c.name, status: STATUS_LABEL[c.status], hours: w ? hoursText(w) : null, working: !!w } : null;
       const detail = { ...(r.detail || {}) };
       if (r.kind === 'availability' && Array.isArray(detail.affected)) detail.affected_visits = detail.affected.map((k) => s.visits.find((x) => x.key === k)).filter(Boolean).map((x) => visitOut(s, x));
       if (r.kind === 'moved' && detail.from) detail.from_label = `${nice(detail.from.date)} at ${clock(detail.from.start)}`;
@@ -961,10 +966,10 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
         const job = { dates, start: picked, duration: dur, place, kind: k, prefs, mainCleanerId: cu?.main?.id, history: cu?.history, firstDate: d };
         const [rank] = rankCleaners(job, [c], rankCtx, { limit: 1, ignoreKeys: ignore });
         if (!rank || rank.fits < dates.length) continue; // recurring: must be free every time
-        found.push({ date: d, day: DAYNAME[weekday(d)], start: picked, time: clock(picked), end: clock(picked + dur), cycle: cycleWeek(d), weeks: cycleWeeks(k, d), repeats: dates.length, cleaner: { id: c.id, name: c.name, color: c.color, is_new: c.isNew }, score: rank.score - i * 0.004, reasons: rank.reasons, travel: rank.travel });
+        found.push({ date: d, day: DAYNAME[weekday(d)], start: picked, time: clock(picked), end: clock(picked + dur), cycle: cycleWeek(d), weeks: cycleWeeks(k, d), repeats: dates.length, cleaner: { id: c.id, name: c.name, color: c.color, is_new: c.isNew }, preferred: rank.preferred, score: rank.score - i * 0.004, reasons: rank.reasons, travel: rank.travel });
       }
     }
-    found.sort((a, b) => b.score - a.score);
+    found.sort((a, b) => Number(b.preferred) - Number(a.preferred) || b.score - a.score);
     const seen = new Set();
     const slots = [];
     for (const f of found) {
@@ -985,6 +990,8 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       frequency: FREQ_LABEL[k],
       duration: dur,
       customer: cu ? { id: cu.id, name: cu.name, main: main?.name || null } : null,
+      // Who the client's tags ask for (ranked ahead of the usual cleaner).
+      asked_for: prefs ? s.cleaners.filter((c) => prefs.preferIds.has(c.id)).map((c) => c.name) : [],
       cleaner: sameApplies ? 'same' : 'any',
       no_usual: wantSame && !main,
       any_count: anyCount,
@@ -1099,7 +1106,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       const d = addDays(weekStart, (wd + 6) % 7);
       const w = windowFor(c, d);
       const booked = (s.busy.get(`${c.id}|${d}`) || []).reduce((m, v) => m + v.duration / Math.max(v.team_ids.length, 1), 0);
-      return { date: d, day: DAYNAME[wd], past: d < t, working: !!w, unavailable: !!unavailable.get(c.id)?.has(d), capacity_h: w ? Math.round((w[1] - w[0]) / 6) / 10 : 0, booked_h: Math.round(booked / 6) / 10 };
+      return { date: d, day: DAYNAME[wd], past: d < t, working: !!w, unavailable: !!unavailable.get(c.id)?.has(d), capacity_h: w ? Math.round(openMinutes(w) / 6) / 10 : 0, booked_h: Math.round(booked / 6) / 10 };
     });
     // Today: their day in order, with drive estimates between visits and any problems.
     const w0 = windowFor(c, t);
@@ -1110,18 +1117,20 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       if (!w0) issues.push('Not a working day for them');
       else if (v.end > w0[1]) issues.push(`Ends after their ${clock(w0[1])} finish`);
       else if (v.start < w0[0]) issues.push(`Starts before their ${clock(w0[0])} start`);
+      else if (breakHit(w0, v.start, v.end)) issues.push(`Runs into their ${breakHit(w0, v.start, v.end).map(clock).join('–')} break`);
       if (prev && prev.end + (drive || 0) > v.start) issues.push('Tight: not enough time to get there');
       prev = v;
       const cu = s.customers.get(v.customer_id);
       return { ...visitOut(s, v), end: clock(v.end), services: v.services, drive_before: drive, issues, note: cu?.prefs.consistent ? 'wants the same cleaner every time' : null };
     });
     // Clients who asked never to have them; usual hours as plain text.
-    const avoidedBy = [...s.customers.values()].filter((cu) => cu.prefs.avoid.some((n) => nameMatches(c.name, n))).length;
+    const avoidedBy = [...s.customers.values()].filter((cu) => rulesOut(cu.prefs, c)).length;
     const rows = c.availability || [];
     const groups = [];
     for (const wd of [1, 2, 3, 4, 5, 6, 0]) {
-      const r = rows.find((x) => !x.date && Number(x.weekday) === wd);
-      const label = r && !r.dayoff && r.start_time && r.end_time ? `${clock(toMinutesHM(r.start_time))} – ${clock(toMinutesHM(r.end_time))}` : 'Off';
+      // Every block of a split day (8am – 1pm, 2:15pm – 6pm), not just the first.
+      const usual = workingWindow(rows.filter((x) => !x.date), addDays(weekStart, (wd + 6) % 7));
+      const label = usual ? windowBlocks(usual).map(([a, b]) => `${clock(a)} – ${clock(b)}`).join(', ') : 'Off';
       const g = groups.at(-1);
       if (g && g.label === label) g.days.push(DAYNAME[wd]);
       else groups.push({ label, days: [DAYNAME[wd]] });
