@@ -59,7 +59,7 @@ export async function identifyCaller(phone: string, simulated = false, canSave =
     if (!canSave) return false;
     const loose = all.filter((c) => !c.l27_customer_id && !c.l27_team_id && !c.caller_flag && !c.roles.includes('applicant'));
     const done = await Promise.all(loose.map((c) => linkToCustomer(c, customerId)));
-    return done.some(Boolean);
+    return done.some((id) => id !== null);
   };
   out.open = who?.open || [];
   out.contactId = contact?.id ?? null;
@@ -93,11 +93,13 @@ export async function identifyCaller(phone: string, simulated = false, canSave =
 }
 
 // Link a portal contact to its Launch27 customer. A lead that is still open becomes "Booked".
+// If the customer already has a contact, the two become one (theirs is kept). Returns the id of
+// the contact to open from now on, or null if linking failed.
 const OPEN_LEAD = /^(new|attempt|contacted)/i;
-export async function linkToCustomer(contact: { id: number; roles: string[]; lead_stage: string | null }, customerId: number): Promise<boolean> {
+export async function linkToCustomer(contact: { id: number; roles: string[]; lead_stage: string | null }, customerId: number): Promise<number | null> {
   const roles = [...new Set([...contact.roles, 'customer'])] as ('customer' | 'cleaner' | 'applicant' | 'system')[];
   const patch = { l27_customer_id: customerId, roles, ...(contact.lead_stage && OPEN_LEAD.test(contact.lead_stage) ? { lead_stage: 'Booked' } : {}) };
-  return inbox.updateContact(contact.id, patch).then(() => true, () => false);
+  return inbox.updateContact(contact.id, patch).then((r) => r.merged_into ?? contact.id, () => null);
 }
 
 // The label on the call card.

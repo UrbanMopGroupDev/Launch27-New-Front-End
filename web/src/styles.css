@@ -701,6 +701,16 @@ label.check, label.inline { flex-direction: row; align-items: center; gap: 6px; 
 .card.no-pad { padding: 0; }
 .table-wrap.flat { border: 0; border-radius: 0; }
 .contact-grid { align-items: start; }
+.contacts-search { display: flex; align-items: center; gap: 8px; max-width: 420px; margin-bottom: 12px; padding: 0 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--muted); }
+.contacts-search input { flex: 1; border: 0; background: none; padding: 8px 0; min-width: 0; }
+.contacts-search input:focus { outline: none; }
+.contact-id { display: inline-flex; align-items: center; gap: 4px; margin-right: 10px; white-space: nowrap; }
+.contact-details { margin-bottom: 6px; }
+.identity-editor .row-line { align-items: center; flex-wrap: wrap; }
+.identity-editor .row-line > .actions { gap: 10px; }
+.id-edit input { flex: 1 1 140px; min-width: 0; }
+.identity-editor form.actions input { flex: 1 1 140px; min-width: 0; }
+.add-contact h2 { margin-top: 0; }
 
 @media (max-width: 1200px) {
   .workspace { grid-template-columns: 280px minmax(0, 1fr); }

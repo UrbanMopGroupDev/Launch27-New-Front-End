@@ -69,14 +69,15 @@ export function createInboundQueue({ db, provider, allowed = [], identify = asyn
     const from = normalizePhone(t.from);
     if (!from) return { status: 'ignored', reason: 'no sender number' };
     if (allowed.length && !allowed.includes(to)) return { status: 'ignored', reason: 'not one of our SMS numbers' };
-    // Who is it in Launch27? Only for numbers we haven't seen (network call outside the transaction).
+    // Who is it in Launch27? Only for numbers we haven't seen (network call outside the
+    // transaction). Someone Launch27 doesn't know becomes a new contact.
     const known = await contactsByIdentity(db, 'phone', from);
     const found = known.length ? { contact: null, ambiguous: null } : await identify(from);
     const res = await db.tx((q) =>
       ingestInbound(
         q,
         { channel: 'sms', from, to, body: t.body || '', external_id: `${provider}:sms:${ev.message_key}`, at: t.at || undefined, meta: { provider, ...(t.meta || {}) } },
-        { lookup: found.contact, ambiguousCandidates: found.ambiguous, flagUnmatched: true, now: new Date(now()) },
+        { lookup: found.contact, l27Shared: found.ambiguous, now: new Date(now()) },
       ),
     );
     await onReceived();

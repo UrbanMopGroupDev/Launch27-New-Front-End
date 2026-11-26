@@ -258,14 +258,20 @@ describe('Twilio SMS', () => {
     assert.equal((await api(`/api/conversations/${c.id}/messages`, { body: 'Welcome back', idempotency_key: 't-9' })).status, 201);
   });
 
-  test('a number shared by two customers goes to "Who is this?", never guessed', async () => {
+  test('a number shared by two customers becomes its own contact, never guessed; the ids are noted', async () => {
     await twilioPost('/webhooks/twilio/sms', incoming(SHARED, HIRING, 'Need to reschedule'));
     await twilio.processEvents();
     const shared = await convFor(SHARED, HIRING);
-    assert.equal(shared.needs_match, true);
+    assert.equal(shared.needs_match, false);
+    assert.ok(shared.contact_id, 'a new contact');
     assert.equal(shared.l27_customer_id, null);
-    const ev = (await db.query("SELECT meta FROM messages WHERE conversation_id = $1 AND kind = 'event' AND meta->>'type' = 'needs_match'", [shared.id])).rows[0];
+    const ev = (await db.query("SELECT meta FROM messages WHERE conversation_id = $1 AND kind = 'event' AND meta->>'type' = 'l27_shared'", [shared.id])).rows[0];
     assert.deepEqual(ev.meta.l27_candidates, [81, 82]);
+    // The next text from it joins the same contact.
+    await twilioPost('/webhooks/twilio/sms', incoming(SHARED, T2, 'Hello again'));
+    await twilio.processEvents();
+    assert.equal(Number((await convFor(SHARED, T2)).contact_id), Number(shared.contact_id));
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM contact_identities WHERE value = $1', [SHARED])).rows[0].n, 1);
   });
 
   test('an incoming text that fails to process is retried later, then lands', async () => {
@@ -290,8 +296,10 @@ describe('Twilio SMS', () => {
     assert.ok(await convFor('+16135550888', HIRING));
     assert.ok(await convFor('+16135550889', T2));
     assert.equal(await twilio.reconcile(), 0);
-    // Unknown senders go to "Who is this?".
-    assert.equal((await convFor('+16135550888', HIRING)).needs_match, true);
+    // Unknown senders become new contacts (no "Who is this?").
+    const unknown = await convFor('+16135550888', HIRING);
+    assert.equal(unknown.needs_match, false);
+    assert.ok(unknown.contact_id);
   });
 
   test('a suspended account stops sending; admins disconnect and reconnect Twilio', async () => {

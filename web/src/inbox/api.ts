@@ -180,7 +180,6 @@ export interface ConversationRow {
   sla_breached_at: string | null;
   awaiting_reply_since: string | null;
   l27_booking_id: number | null;
-  needs_match: boolean;
   their_identity: string | null;
   our_identity: string | null;
   snooze_until: string | null;
@@ -261,18 +260,40 @@ export interface CallLogRow {
   callback: 'open' | 'tried' | 'called_back' | null;
 }
 
-export type ContactList = 'leads' | 'applicants' | 'other' | 'number_only' | 'flagged';
+export type ContactList = 'all' | 'leads' | 'applicants' | 'other' | 'number_only' | 'flagged';
 export interface ContactListRow {
   id: number;
   name: string | null;
   roles: Role[];
+  l27_customer_id: number | null;
+  l27_team_id: number | null;
   lead_stage: string | null;
   lead_source: string | null;
   caller_flag: 'spam' | 'wrong_number' | null;
   notes: string | null;
   created_at: string;
   last_activity: string | null;
-  identities: { kind: 'phone' | 'email'; value: string }[];
+  identities: { kind: 'phone' | 'email'; value: string; opted_out?: boolean }[];
+}
+
+// What "Add contact" may set. An email or phone already on a contact reuses that contact.
+export interface NewContactInput {
+  name: string;
+  roles: Role[];
+  email?: string;
+  phone?: string;
+  notes?: string;
+  lead_stage?: string;
+  lead_source?: string;
+}
+export type ContactSummary = { id: number; name: string | null; l27_customer_id: number | null; l27_team_id: number | null };
+
+// The contact that already has an email or phone, from a 409 answer (or the several contacts
+// the details given are spread over).
+export function contactsInConflict(err: unknown): ContactSummary[] {
+  if (!(err instanceof ApiError) || err.status !== 409) return [];
+  const f = (err.fields || {}) as { contact?: ContactSummary; contacts?: ContactSummary[] };
+  return f.contacts || (f.contact ? [f.contact] : []);
 }
 
 export interface Contact {
@@ -298,7 +319,6 @@ export interface ConversationDetail {
   queue: Queue | null;
   owner: { id: number; name: string | null; email: string; presence: Presence } | null;
   sla_policy: SlaPolicy | null;
-  candidates: Contact[];
   // The linked booking's cleaner, when the conversation has no Cleaner set yet.
   cleaner_from_booking?: { id: number; name: string } | null;
 }
@@ -439,7 +459,6 @@ export interface Counts {
   mine: number;
   unassigned: number;
   breached: number;
-  needs_match: number;
   mentions: number;
   queues: Record<string, number>;
 }
@@ -530,16 +549,21 @@ export const inbox = {
   personHistory: (id: number) => call<{ messages: Message[]; conversations: number }>('GET', `/conversations/${id}/history`),
   suggested: () => call<{ recent: SuggestedContact[]; frequent: SuggestedContact[] }>('GET', '/contacts/suggested'),
   addEvent: (id: number, text: string, meta: Record<string, unknown> = {}) => call<Message>('POST', `/conversations/${id}/events`, { text, meta }),
-  patch: (id: number, patch: Partial<{ status: Status; snooze_until: string; disposition: Disposition; queue_id: number; priority: number; l27_booking_id: number | null; complaint: Complaint | null; subject: string; cleaner_id: number | null; cleaner_name: string | null }>) => call<Conversation>('PATCH', `/conversations/${id}`, patch),
+  patch: (id: number, patch: Partial<{ status: Status; snooze_until: string; disposition: Disposition; queue_id: number; priority: number; l27_booking_id: number | null; complaint: Complaint | null; subject: string; cleaner_id: number | null; cleaner_name: string | null; contact_id: number }>) => call<Conversation>('PATCH', `/conversations/${id}`, patch),
   claim: (id: number) => call<Conversation>('POST', `/conversations/${id}/claim`),
   assign: (id: number, userId: number | null, reason?: string) => call<Conversation>('POST', `/conversations/${id}/assign`, { user_id: userId, reason }),
-  match: (id: number, contactId: number) => call<Conversation>('POST', `/conversations/${id}/match`, { contact_id: contactId }),
   start: (body: { contact_id: number; channel: 'email' | 'sms'; to?: string; from?: string; subject?: string; body?: string; l27_booking_id?: number }) => call<Conversation>('POST', '/conversations', body),
   contact: (id: number) => call<Contact>('GET', `/contacts/${id}`),
   findContacts: (q: string) => call<Contact[]>('GET', `/contacts${qs({ q })}`),
-  createContact: (body: { name: string; roles: Role[]; email?: string; phone?: string }) => call<Contact>('POST', '/contacts', body),
-  updateContact: (id: number, patch: Partial<Omit<Contact, 'id' | 'identities' | 'conversations'>>) => call<Contact>('PATCH', `/contacts/${id}`, patch),
+  createContact: (body: NewContactInput) => call<Contact & { existing: boolean }>('POST', '/contacts', body),
+  // merged_into: linking to a Launch27 customer or cleaner who already had a contact merged
+  // this one into theirs (the id to open from now on).
+  updateContact: (id: number, patch: Partial<Omit<Contact, 'id' | 'identities' | 'conversations'>>) => call<Contact & { merged_into: number | null }>('PATCH', `/contacts/${id}`, patch),
+  deleteContact: (id: number) => call<{ id: number; conversations: number }>('DELETE', `/contacts/${id}`),
+  mergeContact: (id: number, otherId: number) => call<Contact>('POST', `/contacts/${id}/merge`, { contact_id: otherId }),
   addIdentity: (id: number, kind: 'email' | 'phone', value: string, label?: string) => call<Identity>('POST', `/contacts/${id}/identities`, { kind, value, label }),
+  updateIdentity: (identityId: number, patch: { value?: string; label?: string | null; opted_out?: boolean }) => call<Identity>('PATCH', `/identities/${identityId}`, patch),
+  removeIdentity: (identityId: number) => call<Identity>('DELETE', `/identities/${identityId}`),
   setOptOut: (identityId: number, optedOut: boolean) => call<Identity>('PATCH', `/identities/${identityId}`, { opted_out: optedOut }),
   fromL27: (body: { customer_id?: number; team_id?: number }) => call<Contact>('POST', '/contacts/from-l27', body),
   search: (q: string) => call<{ contacts: (Pick<Contact, 'id' | 'name' | 'roles' | 'l27_customer_id' | 'l27_team_id'> & { identities: string | null })[]; conversations: { id: number; channel: Channel; status: Status; subject: string | null; contact_name: string | null; snippet: string | null; last_message_at: string }[] }>('GET', `/search${qs({ q })}`),
@@ -556,7 +580,7 @@ export const inbox = {
   simulate: (body: { channel: Channel; from: string; to?: string; subject?: string; body: string; from_name?: string; thread_key?: string }) => call<{ conversationId: number; isNew: boolean; reopened: boolean }>('POST', '/simulate/inbound', body),
   logCall: (body: Record<string, unknown>) => call<{ conversationId?: number; saved?: boolean; hidden?: boolean }>('POST', '/calls', body),
   callLog: (days: number) => call<{ days: number; rows: CallLogRow[] }>('GET', `/calls${qs({ days })}`),
-  contactList: (list: ContactList) => call<{ rows: ContactListRow[]; counts: Record<ContactList, number> }>('GET', `/contact-list${qs({ list })}`),
+  contactList: (list: ContactList, q?: string) => call<{ rows: ContactListRow[]; counts: Record<ContactList, number>; limit: number }>('GET', `/contact-list${qs({ list, q })}`),
   callerChoice: (phone: string) => call<{ l27_customer_id: number | null }>('GET', `/caller-choice${qs({ phone })}`),
   rememberCallerChoice: (phone: string, customerId: number) => call<{ saved: boolean }>('PUT', '/caller-choice', { phone, l27_customer_id: customerId }),
   lookup: (kind: 'phone' | 'email', value: string, simulated = false) => call<{ contacts: Contact[]; open: { id: number; channel: Channel; subject: string | null }[]; l27: { name: string; roles: Role[]; l27_customer_id?: number | null; l27_team_id?: number | null } | null }>('GET', `/lookup${qs({ kind, value, ...(simulated ? { simulated: '1' } : {}) })}`),

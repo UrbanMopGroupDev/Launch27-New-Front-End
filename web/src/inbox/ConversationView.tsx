@@ -112,7 +112,6 @@ export function ConversationView({ id, composerRef, assist, onShowPerson }: { id
       {panel === 'snooze' && <SnoozePanel onCancel={() => setPanel(null)} onSave={(until) => act.mutate(() => inbox.patch(id, { status: 'snoozed', snooze_until: until }))} />}
       {panel === 'assign' && <AssignPanel detail={d} onCancel={() => setPanel(null)} onAssign={(userId, reason) => act.mutate(() => inbox.assign(id, userId, reason))} onMove={(queueId) => act.mutate(() => inbox.patch(id, { queue_id: queueId }))} />}
       {panel === 'complaint' && <ComplaintPanel initial={c.complaint} bookingId={c.l27_booking_id} onCancel={() => setPanel(null)} onSave={(complaint) => act.mutate(() => inbox.patch(id, { complaint }))} />}
-      {c.needs_match && <MatchPanel detail={d} onMatch={(contactId) => act.mutate(() => inbox.match(id, contactId))} />}
 
       {d.contact && (d.others.length > 0 || (history.data?.conversations || 0) > 1) && (
         <div className="tl-scope small">
@@ -764,26 +763,6 @@ function ComplaintPanel({ initial, bookingId, onCancel, onSave }: { initial: Com
         <button className="secondary" onClick={onCancel}>Cancel</button>
         <button onClick={() => onSave(c)}>Save complaint</button>
       </div>
-    </div>
-  );
-}
-
-function MatchPanel({ detail, onMatch }: { detail: ConversationDetail; onMatch: (contactId: number) => void }) {
-  const [q, setQ] = useState('');
-  const found = useQuery({ queryKey: ['inbox', 'contacts', q], queryFn: () => inbox.findContacts(q), enabled: q.length >= 2 });
-  const list = q.length >= 2 ? found.data || [] : detail.candidates;
-  return (
-    <div className="inline-panel warn-panel">
-      <div className="small"><b>Who is this?</b> {displayIdentity(detail.conversation.their_identity)} matches {detail.candidates.length || 'no'} contacts. Pick the right person; nothing is merged automatically.</div>
-      <input className="full" placeholder="Search contacts" value={q} onChange={(e) => setQ(e.target.value)} />
-      <div className="assign-list">
-        {list.map((c) => (
-          <button key={c.id} className="assign-item" onClick={() => onMatch(c.id)}>
-            {c.name || 'Unnamed'} {c.roles?.map((r) => <span key={r} className={`role-badge ${r}`}>{ROLE_LABEL[r]}</span>)}
-          </button>
-        ))}
-      </div>
-      <div className="muted small">Not listed? Open their Launch27 customer or cleaner page and use "Message" to create the contact.</div>
     </div>
   );
 }

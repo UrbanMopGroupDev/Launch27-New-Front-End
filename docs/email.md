@@ -42,11 +42,12 @@ Threading: a new message joins an existing conversation when it is in the same G
 second rule catches replies that arrive in a different mailbox. Otherwise a new email is a
 new conversation (a "done" one reopens if the reply comes within 14 days).
 
-Who is it: the sender's address is matched to a contact. Someone new is looked up in
-Launch27 (cleaners first, then customers) with the `L27_SYNC_EMAIL` login, so their
-conversation shows their bookings straight away. A new address for a known Launch27 customer
-is added to their existing contact. Opening a customer's page also copies any new email or
-phone from Launch27 onto their contact.
+Who is it: the sender's address is matched to a contact (an address is on one contact only).
+Someone new is looked up in Launch27 (cleaners first, then customers) with the `L27_SYNC_EMAIL`
+login, so their conversation shows their bookings straight away; someone Launch27 doesn't know
+becomes a new contact. A new address for a known Launch27 customer is added to their existing
+contact. Opening a customer's page also copies any new email or phone from Launch27 onto their
+contact, except one an agent removed from it or one that is on another contact.
 
 Not changed in Gmail: nothing is deleted, labelled or marked as read, so the team can keep
 using Gmail alongside the inbox during the switch. Mail from our own addresses, drafts, spam

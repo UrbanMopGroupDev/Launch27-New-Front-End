@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { l27, l27All } from '../api';
 import type { Booking, Customer, Tag, TimeTracking } from '../types';
@@ -813,13 +813,20 @@ export function ConversationHistory({ contact, currentId }: { contact: Contact; 
 // Unlinked contact: find their Launch27 customer by phone, email or name.
 function LinkToLaunch27({ contact }: { contact: Contact }) {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [error, setError] = useState<string | null>(null);
   const seed = contact.identities.find((i) => i.kind === 'email')?.value || contact.identities[0]?.value.slice(-10) || contact.name || '';
   const [query, setQuery] = useState(seed);
   const results = useQuery({ queryKey: ['l27-customer-search', query], queryFn: () => l27<Customer[]>('/v1/staff/customers', { query, limit: 8 }), enabled: query.length >= 3 });
   // Linking a lead to the customer they became also moves an open lead to "Booked".
+  // If the customer already had a contact, this one was merged into it: open that one instead.
   const link = async (customerId: number) => {
-    await linkToCustomer(contact, customerId);
+    setError(null);
+    const kept = await linkToCustomer(contact, customerId);
     queryClient.invalidateQueries({ queryKey: ['inbox'] });
+    if (kept === null) setError("Couldn't link this contact. Try again.");
+    else if (kept !== contact.id && location.pathname === `/contacts/${contact.id}`) navigate(`/contacts/${kept}`, { replace: true });
   };
   const label = contact.name || displayIdentity(contact.identities[0]?.value) || 'Unknown';
   return (
@@ -850,6 +857,7 @@ function LinkToLaunch27({ contact }: { contact: Contact }) {
             </div>
           ))}
           {results.data?.length === 0 && <div className="muted small">No Launch27 customer matches.</div>}
+          {error && <div className="error small">{error}</div>}
         </div>
       </section>
       <section className="rail-block">
