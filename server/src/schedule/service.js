@@ -13,10 +13,20 @@ const PAST_DAYS = 91;
 const AHEAD_DAYS = 56;
 // How cleaners' hours are read. Bump when that changes: the next look at the planner then re-reads
 // everyone's hours instead of waiting for the hourly refresh.
-const HOURS_VERSION = 4; // 3: one-day changes kept HISTORY_DAYS back; 4: 13 weeks back
+const HOURS_VERSION = 5; // 3: one-day changes kept HISTORY_DAYS back; 4: 13 weeks back; 5: booking exclusions
 // How far back cleaners' one-day changes, closed dates and days marked unavailable are kept, so
 // Utilization can look at past weeks (visits go back PAST_DAYS).
 export const HISTORY_DAYS = 91;
+// How far back Launch27's booking exclusions (Daily spots) are read; older days use the daily record.
+const EXCLUDED_BACK_DAYS = 14;
+const exclusionMap = (list = []) => {
+  const m = new Map();
+  for (const x of list) {
+    if (!m.has(x.cleaner_id)) m.set(x.cleaner_id, new Set());
+    m.get(x.cleaner_id).add(x.date);
+  }
+  return m;
+};
 const AVAIL_CHUNK = 28; // days per availability request (Launch27's calendar asks for 42)
 const NEAR_DAYS = 14; // problems are raised for this many days ahead
 const NEAR_EVERY_MS = 3 * 60_000; // next 14 days of bookings
@@ -219,7 +229,8 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
   const busyFor = (s) => (id, d) => (s.busy.get(`${id}|${d}`) || []).map((v) => ({ start: v.start, end: v.end, lat: v.lat, lng: v.lng, key: v.key }));
   function bookedHours(s, id, from, to) {
     let min = 0;
-    for (const v of s.visits) if (v.date >= from && v.date <= to && v.team_ids.includes(id)) min += v.team_hours?.[id] ? v.team_hours[id] * 60 : v.duration / Math.max(v.team_ids.length, 1);
+    // Each cleaner on a booking is there for its full scheduled Duration (not their share, not time on site).
+    for (const v of s.visits) if (v.date >= from && v.date <= to && v.team_ids.includes(id)) min += v.duration;
     return min / 60;
   }
   function capacityHours(c, from, to) {
@@ -463,6 +474,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     }
     const visits = await pullRange(bearer, addDays(t, -PAST_DAYS), addDays(t, AHEAD_DAYS));
     const holidays = await closedDates(bearer, cleaners, t);
+    const excluded = await bookingExclusions(bearer, cleaners, t);
     if (refused) log.warn("schedule: Launch27 refused some cleaners' hours; kept the last ones read", { refused, cleaners: teams.length, first_error: firstError });
     // What Launch27 sent, in short, for cleaners who come out with no working hours at all (names
     // and row shapes only), so a wrong reading can be compared with Launch27's Team Availability.
@@ -476,7 +488,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     });
     const iso = new Date(now()).toISOString();
     // cleaners_by: whose login read the cleaners' hours ("sync login" or a person who opened the planner).
-    return { taken_at: iso, full_at: iso, today: t, cycle_anchor: '2026-11-02', cleaners, visits, holidays, cleaners_by: byPerson ? 'person' : 'sync', hours_v: HOURS_VERSION };
+    return { taken_at: iso, full_at: iso, today: t, cycle_anchor: '2026-11-02', cleaners, visits, holidays, excluded, cleaners_by: byPerson ? 'person' : 'sync', hours_v: HOURS_VERSION };
   }
 
   // Company closed dates (Launch27 "closed dates", per location) in the planner's window.
@@ -492,6 +504,41 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       }
     }
     return out;
+  }
+
+  // Dates a cleaner is excluded from booking in Launch27's Daily spots (e.g. off the schedule for one
+  // day without a day off in their hours): excluded from every spot they appear in that day, in
+  // every location. Read-only; if Launch27 refuses, there are none. -> [{ date, cleaner_id }]
+  async function bookingExclusions(bearer, cleaners, t) {
+    const locs = [...new Set(cleaners.flatMap((c) => c.location_ids || []))];
+    const seen = new Map(); // `${date}|${id}` -> { out, in }
+    const end = addDays(t, AHEAD_DAYS);
+    for (const loc of locs) {
+      for (let from = addDays(t, -EXCLUDED_BACK_DAYS); from <= end; from = addDays(from, 7)) {
+        const to = addDays(from, 6) < end ? addDays(from, 6) : end;
+        const res = await get(bearer, `/v1/staff/locations/${loc}/spots`, { from, to }).catch(() => null);
+        for (const day of res?.days || []) {
+          const date = String(day.date || '').slice(0, 10);
+          if (!date) continue;
+          for (const sp of day.spots || []) {
+            for (const id of sp.teams?.excluded_ids || []) {
+              const k = `${date}|${id}`;
+              const x = seen.get(k) || { out: 0, in: 0 };
+              x.out++;
+              seen.set(k, x);
+            }
+            for (const id of sp.teams?.available_ids || []) {
+              const k = `${date}|${id}`;
+              const x = seen.get(k) || { out: 0, in: 0 };
+              x.in++;
+              seen.set(k, x);
+            }
+          }
+        }
+      }
+    }
+    const known = new Set(cleaners.map((c) => c.id));
+    return [...seen].filter(([, x]) => x.out > 0 && x.in === 0).map(([k]) => ({ date: k.split('|')[0], cleaner_id: Number(k.split('|')[1]) })).filter((x) => known.has(x.cleaner_id));
   }
 
   async function nearData(bearer, prev, t) {
@@ -512,7 +559,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     }
     const replaced = new Set([...freshKeys, ...extra.map((v) => v.key), ...gone]);
     const kept = prev.visits.filter((v) => !(v.date >= t && v.date <= until) && !replaced.has(v.key));
-    return { taken_at: new Date(now()).toISOString(), full_at: prev.full_at || prev.taken_at, today: t, cycle_anchor: prev.cycle_anchor, cleaners: prev.cleaners, holidays: prev.holidays || [], cleaners_by: prev.cleaners_by || null, hours_v: prev.hours_v || null, visits: [...kept, ...fresh, ...extra] };
+    return { taken_at: new Date(now()).toISOString(), full_at: prev.full_at || prev.taken_at, today: t, cycle_anchor: prev.cycle_anchor, cleaners: prev.cleaners, holidays: prev.holidays || [], excluded: prev.excluded || [], cleaners_by: prev.cleaners_by || null, hours_v: prev.hours_v || null, visits: [...kept, ...fresh, ...extra] };
   }
 
   async function sync({ bearer, trigger = 'manual', kind = 'full' } = {}) {
@@ -1105,7 +1152,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     const week = [1, 2, 3, 4, 5, 6, 0].map((wd) => {
       const d = addDays(weekStart, (wd + 6) % 7);
       const w = windowFor(c, d);
-      const booked = (s.busy.get(`${c.id}|${d}`) || []).reduce((m, v) => m + v.duration / Math.max(v.team_ids.length, 1), 0);
+      const booked = (s.busy.get(`${c.id}|${d}`) || []).reduce((m, v) => m + v.duration, 0);
       return { date: d, day: DAYNAME[wd], past: d < t, working: !!w, unavailable: !!unavailable.get(c.id)?.has(d), capacity_h: w ? Math.round(openMinutes(w) / 6) / 10 : 0, booked_h: Math.round(booked / 6) / 10 };
     });
     // Today: their day in order, with drive estimates between visits and any problems.
@@ -1146,7 +1193,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       week: { days: week, booked_h: Math.round(week.reduce((a, d) => a + d.booked_h, 0) * 10) / 10, capacity_h: Math.round(week.reduce((a, d) => a + d.capacity_h, 0) * 10) / 10 },
       today,
       today_drive_min: today.reduce((a, v) => a + (v.drive_before || 0), 0),
-      next14: { cleans: next14.length, hours: Math.round(next14.reduce((a, v) => a + v.duration / Math.max(v.team_ids.length, 1), 0) / 6) / 10 },
+      next14: { cleans: next14.length, hours: Math.round(next14.reduce((a, v) => a + v.duration, 0) / 6) / 10 },
       rules: [
         c.rules.maxTravelMin ? `Max ${c.rules.maxTravelMin} minutes travel to a booking` : null,
         ...c.rules.doNotPair.map((n) => `Never paired with ${n.replace(/\b\w/g, (x) => x.toUpperCase())} on a booking`),
@@ -1206,6 +1253,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       visits: s.visits.filter((v) => v.date >= addDays(s.today, -HISTORY_DAYS)),
       holidays: s.holidays || [],
       unavailable,
+      excluded: exclusionMap(s.excluded),
     };
   }
 
@@ -1214,7 +1262,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
   // the hours they had set for that day, the day's visits, closed dates and days marked unavailable.
   // Past weeks in Utilization use these instead of rebuilding from cleaners' current hours.
   // Never fails a refresh.
-  const VISIT_FIELDS = ['key', 'id', 'date', 'start', 'end', 'duration', 'team_ids', 'team_hours', 'location_id', 'customer_id', 'customer', 'kind', 'freq', 'addr', 'lat', 'lng'];
+  const VISIT_FIELDS = ['key', 'id', 'date', 'start', 'end', 'duration', 'team_ids', 'team_hours', 'location_id', 'customer_id', 'customer', 'kind', 'freq', 'addr', 'lat', 'lng', 'partner_kind', 'partner_name', 'account_name'];
   function dayRecord(s, d) {
     return {
       v: 1,
@@ -1227,6 +1275,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       visits: s.visits.filter((v) => v.date === d).map((v) => Object.fromEntries(VISIT_FIELDS.map((k) => [k, v[k] ?? null]))),
       holidays: (s.holidays || []).filter((h) => h.date === d),
       unavailable: [...unavailable].filter(([, days]) => days.has(d)).map(([id]) => id),
+      excluded: (s.excluded || []).filter((x) => x.date === d).map((x) => x.cleaner_id),
     };
   }
   async function recordDays(s) {

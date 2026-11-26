@@ -28,9 +28,9 @@ const VISITS = [
   visit('v7', '2026-11-14', 600, 660, [3]), // on a cleaner not taking bookings
 ];
 const HOLIDAYS = [{ date: '2026-11-12', start_time: '00:00', end_time: '23:59', location_id: 1 }];
-const facts = (locations = null) => utilizationFacts({ today: TODAY, cleaners: [A, B, OFF], visits: VISITS, holidays: HOLIDAYS, locations, until: '2026-11-15' });
+const facts = (locations = null, mode = 'all') => utilizationFacts({ today: TODAY, cleaners: [A, B, OFF], visits: VISITS, holidays: HOLIDAYS, locations, mode, until: '2026-11-15' });
 
-const report = (locations = null) => utilizationReport({ facts: facts(locations), from: TODAY, to: '2026-11-15', maxTo: '2026-11-15' });
+const report = (locations = null, mode = 'all') => utilizationReport({ facts: facts(locations, mode), from: TODAY, to: '2026-11-15', maxTo: '2026-11-15' });
 
 describe('utilization: the arithmetic, by hand', () => {
   test('available − assigned − unassigned − not taking − travel = left; Sundays out', () => {
@@ -57,11 +57,24 @@ describe('utilization: the arithmetic, by hand', () => {
     assert.equal(t.room_bookings, 15);
   });
 
-  test('brand view: the shared cleaner loses the hours booked for the other brand', () => {
+  test('all work (default): a shared cleaner keeps their full hours; commercial is committed, shown on its own', () => {
     const t = report([1]).totals;
-    assert.equal(t.available_h, 81); // B's Wednesday 9–12 went to the other brand
+    assert.equal(t.available_h, 84); // B's Wednesday 9–12 for commercial is not taken off
     assert.equal(t.assigned_h, 9);
-    assert.equal(t.travel_h, 0.8); // B's Wednesday route is the other brand's
+    assert.equal(t.commercial_h, 3);
+    assert.equal(t.commercial_visits, 1);
+    assert.equal(t.travel_h, 1); // the drives to and from the commercial visit count too
+    assert.equal(t.spoken_h, 9 + 3 + 2 + 1 + 1);
+    assert.equal(t.left_h, 84 - 16);
+    assert.equal(t.customers, 2);
+  });
+
+  test('residential only: the shared cleaner loses the hours booked for commercial', () => {
+    const t = report([1], 'residential').totals;
+    assert.equal(t.available_h, 81); // B's Wednesday 9–12 went to commercial
+    assert.equal(t.assigned_h, 9);
+    assert.equal(t.commercial_h, 0);
+    assert.equal(t.travel_h, 0.8); // B's Wednesday route is commercial's
     assert.equal(t.customers, 2);
   });
 
@@ -98,15 +111,16 @@ describe('utilization: on the sample Launch27', () => {
     const src = await schedule.utilizationSource();
     const t0 = src.today;
     const add = (d, n) => new Date(Date.parse(`${d}T12:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
-    for (const locations of [null, [1], [167, 168]]) {
+    for (const [locations, mode] of [[null, 'all'], [[1], 'all'], [[1], 'residential'], [[167, 168], 'all'], [[167, 168], 'residential']]) {
       for (const [from, to] of [[t0, add(t0, 6)], [add(t0, 3), add(t0, 3)], [t0, add(t0, 55)], [add(t0, 10), add(t0, 24)]]) {
-        const r = await reports.utilization({ from, to, locations });
-        const label = `${from}..${to} ${locations || 'both'}`;
+        const r = await reports.utilization({ from, to, locations, mode });
+        const label = `${from}..${to} ${locations || 'both'} ${mode}`;
+        assert.equal(r.mode, mode);
         assert.ok(r.reconcile.capacity.ties, `capacity ${label}`);
         assert.ok(r.reconcile.booked.ties, `booked ${label}`);
         assert.ok(r.reconcile.unassigned.ties, `unassigned ${label}`);
         const t = r.totals;
-        assert.ok(Math.abs(t.left_h - (t.available_h - t.assigned_h - t.unassigned_h - t.not_taking_h - t.travel_h)) < 0.3, label);
+        assert.ok(Math.abs(t.left_h - (t.available_h - t.assigned_h - t.commercial_h - t.unassigned_h - t.not_taking_h - t.travel_h)) < 0.3, label);
         assert.ok(r.by_day.every((d) => new Date(`${d.date}T12:00:00Z`).getUTCDay() !== 0), `no Sundays ${label}`);
       }
     }
@@ -154,8 +168,8 @@ describe('utilization: data check', () => {
     const f = utilizationFacts({ today: TODAY, cleaners: all, visits, holidays: HOLIDAYS, until: '2026-11-15' });
     const dc = dataCheck({ facts: f, inWin: (d) => d >= TODAY && d <= '2026-11-15', cleaners: all, source: { full_at: '2026-11-09T10:00:00Z', cleaners_by: 'person' } });
     const kinds = (id) => dc.cleaners.find((c) => c.cleaner_id === id).flags.map((x) => x.kind);
-    assert.deepEqual(kinds(5), ['refused', 'booked_no_hours']);
-    assert.deepEqual(kinds(4), ['booked_no_hours', 'no_hours', 'no_home']);
+    assert.deepEqual(kinds(5), ['refused', 'booked_no_hours', 'over_availability']);
+    assert.deepEqual(kinds(4), ['booked_no_hours', 'over_availability', 'no_hours', 'no_home']);
     assert.deepEqual(kinds(3), ['booked_not_taking']);
     assert.deepEqual(kinds(1), []);
     assert.equal(dc.cleaners[0].cleaner_id, 5); // problems first, refused at the top
@@ -236,10 +250,12 @@ describe('utilization: past weeks and shared cleaners', () => {
     assert.equal(r.totals.unassigned_h, 2);
   });
 
-  test('a shared cleaner shows open hours and the other brand\'s share', () => {
-    const r = report([1]);
+  test('a shared cleaner shows open hours and the commercial share', () => {
+    const all = report([1]).cleaners.find((c) => c.cleaner_id === 2);
+    assert.deepEqual([all.open_h, all.available_h, all.commercial_h, all.commercial_visits], [40, 40, 3, 1]);
+    const r = report([1], 'residential');
     const b = r.cleaners.find((c) => c.cleaner_id === 2);
-    assert.deepEqual([b.open_h, b.other_brand_h, b.available_h], [40, 3, 37]); // Wednesday 9–12 went to the other brand
+    assert.deepEqual([b.open_h, b.other_brand_h, b.available_h], [40, 3, 37]); // Wednesday 9–12 went to commercial
     const a = r.cleaners.find((c) => c.cleaner_id === 1);
     assert.deepEqual([a.open_h, a.other_brand_h, a.available_h], [44, 0, 44]);
   });
@@ -332,6 +348,116 @@ describe('utilization: daily history record', () => {
       assert.deepEqual([r.history.recorded_days, r.history.past_days], [1, 1]);
     }
     assert.equal(r.history.first_recorded, y);
+    await db.close();
+  });
+});
+
+describe('utilization: residential/commercial transition', () => {
+  const F = { id: 11, name: 'Floyd', area: 'Central', assignable: true, location_ids: [1], ...HOME, rules: {}, availability: week('08:00', '18:00') };
+  const J = { id: 12, name: 'Joel', area: 'Central', assignable: true, location_ids: [1], ...HOME, rules: {}, availability: week('08:00', '20:30') };
+  const T = { id: 13, name: 'Tara', area: 'Central', assignable: true, location_ids: [1], ...HOME, rules: {}, availability: week('08:00', '20:30') };
+  const one = (cleaners, visits, extra = {}) => {
+    const f = utilizationFacts({ today: '2026-11-23', cleaners, visits, until: '2026-12-05', ...extra });
+    return utilizationReport({ facts: f, from: '2026-11-23', to: '2026-12-05', maxTo: '2027-01-10', cleaners });
+  };
+
+  test('each booking counts its full scheduled Duration, not the time on site (Floyd: 2 h, not 1.5 h)', () => {
+    // Nov 27 11:30, scheduled 2 h; Launch27 says Floyd's own hours on it were 1.5.
+    const r = one([F], [visit('bruyere', '2026-11-27', 690, 810, [11], { team_hours: { 11: 1.5 } })]);
+    assert.equal(r.cleaners[0].assigned_h, 2);
+    assert.equal(r.totals.assigned_h, 2);
+  });
+
+  test('every cleaner on a booking counts its full Duration (Joel and Tara: 3 h each, twice = 6 h each)', () => {
+    const v = (key, date) => visit(key, date, 1050, 1230, [12, 13], { team_hours: { 12: 2.5, 13: 2.5 } }); // 5:30 PM, 3 h
+    const r = one([J, T], [v('t1', '2026-11-27'), v('t2', '2026-12-01')]);
+    assert.deepEqual(r.cleaners.map((c) => c.assigned_h), [6, 6]);
+    assert.equal(r.totals.assigned_h, 12);
+  });
+
+  test('a booking past the cleaner\'s hours counts in full and shows as over availability', () => {
+    // Floyd works 8–6; a 3 h booking at 4:30 PM runs 1.5 h past.
+    const r = one([F], [visit('late', '2026-11-24', 990, 1170, [11])]);
+    assert.equal(r.cleaners[0].assigned_h, 3);
+    const row = r.data_check.cleaners.find((c) => c.cleaner_id === 11);
+    assert.equal(row.over_h, 1.5);
+    assert.ok(row.flags.some((f) => f.kind === 'over_availability'));
+  });
+
+  test('every block of a split day counts, and gaps come from each block (Friday 8–1 and 2:15–6)', () => {
+    const S = { id: 14, name: 'Split', area: 'Central', assignable: true, location_ids: [1], ...HOME, rules: {}, availability: [
+      { date: null, weekday: 5, dayoff: false, start_time: '8:00 AM', end_time: '1:00 PM' },
+      { date: null, weekday: 5, dayoff: false, start_time: '2:15 PM', end_time: '6:00 PM' },
+    ] };
+    const f = utilizationFacts({ today: '2026-11-23', cleaners: [S], visits: [], until: '2026-11-27' });
+    const fri = f.days.find((x) => x.d === '2026-11-27');
+    assert.equal(fri.avail, 5 * 60 + 225);
+    assert.deepEqual(fri.gaps, [300, 225]); // the 1:00–2:15 break is not open time
+  });
+
+  test('a day excluded from booking in Launch27 is not open time', () => {
+    const r = one([F], [], { excluded: new Map([[11, new Set(['2026-11-28'])]]) });
+    // Two weeks, Mon–Sat, 10 h a day = 120 h, less Saturday Nov 28.
+    assert.equal(r.totals.available_h, 110);
+    assert.equal(r.totals.excluded_h, 10);
+    assert.equal(r.data_check.cleaners[0].excluded_days, 1);
+  });
+
+  test('a commercial cleaner who takes residential bookings is counted once, not dropped', () => {
+    const M = { id: 15, name: 'Commercial', area: 'Central', assignable: true, location_ids: [167], ...HOME, rules: {}, availability: week('08:00', '16:00') };
+    const visits = [visit('res', '2026-11-24', 540, 720, [15]), visit('com', '2026-11-25', 540, 720, [15], { location_id: 167 })];
+    const f = utilizationFacts({ today: '2026-11-23', cleaners: [F, M], visits, locations: [1], until: '2026-12-05' });
+    const r = utilizationReport({ facts: f, from: '2026-11-23', to: '2026-12-05', maxTo: '2027-01-10' });
+    const m = r.cleaners.find((c) => c.cleaner_id === 15);
+    assert.deepEqual([m.assigned_h, m.commercial_h, m.other_locations], [3, 3, true]);
+    assert.equal(r.totals.not_taking_h, 0);
+    assert.equal(r.totals.assigned_h, 3);
+    assert.equal(r.totals.commercial_h, 3);
+    // A commercial cleaner with no residential work is not part of the residential report.
+    const g = utilizationFacts({ today: '2026-11-23', cleaners: [F, M], visits: [visits[1]], locations: [1], until: '2026-12-05' });
+    assert.ok(!g.taking.some((c) => c.id === 15));
+  });
+
+  test('data check: partner bookings filed under a residential location; hours under 60% of Launch27 weekly', () => {
+    const visits = [
+      visit('owcs', '2026-11-24', 540, 660, [11], { partner_kind: 'homemaking', partner_name: 'OWCS Homemaking' }),
+      visit('ok', '2026-11-24', 720, 840, [11]),
+      visit('owcs-com', '2026-11-25', 540, 660, [11], { location_id: 167, partner_kind: 'homemaking', partner_name: 'OWCS Homemaking' }),
+    ];
+    const away = new Map([[11, new Set(['2026-11-23', '2026-11-25', '2026-11-26', '2026-11-27', '2026-11-28'])]]);
+    const f = utilizationFacts({ today: '2026-11-23', cleaners: [F], visits, locations: [1], unavailable: away, until: '2026-11-28' });
+    const dc = utilizationReport({ facts: f, from: '2026-11-23', to: '2026-11-28', maxTo: '2027-01-10', cleaners: [F] }).data_check;
+    assert.deepEqual(dc.partner_bookings.map((b) => b.key), ['owcs']);
+    const row = dc.cleaners.find((c) => c.cleaner_id === 11);
+    assert.deepEqual([row.report_h, row.weekly_window_h], [10, 60]);
+    assert.ok(row.flags.some((x) => x.kind === 'low_hours'));
+  });
+
+  test('the planner reads days excluded from booking (Launch27 Daily spots)', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const mock = createMockLaunch27({ password: 'demo' });
+    let someone = null;
+    let day = null;
+    const fetchImpl = async (url, init) => {
+      const m = String(url).match(/\/v1\/staff\/locations\/(\d+)\/spots\?(.*)$/);
+      if (m && someone && day) {
+        const q = new URLSearchParams(m[2]);
+        const days = q.get('from') <= day && q.get('to') >= day
+          ? [{ date: day, spots: [{ teams: { available_ids: [], excluded_ids: [someone] } }, { teams: { available_ids: [], excluded_ids: [someone] } }] }]
+          : [];
+        return new Response(JSON.stringify({ grid: [], days }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return mock(url, init);
+    };
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet, retryDelayMs: 0 });
+    await schedule.sync();
+    const first = await schedule.utilizationSource();
+    someone = first.cleaners.find((c) => c.assignable && c.weekly_hours > 0).id;
+    day = addDaysT(first.today, 3);
+    await schedule.sync();
+    const src = await schedule.utilizationSource();
+    assert.ok(src.excluded.get(someone)?.has(day));
     await db.close();
   });
 });
