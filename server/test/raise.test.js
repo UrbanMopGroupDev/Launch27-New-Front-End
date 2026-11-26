@@ -394,7 +394,7 @@ describe('Cleaner reports 2.0 next to Leslie\'s', () => {
     assert.equal(row.drill.no_shows.length, rs.no_shows, 'each number opens the rows behind it');
     assert.equal(row.drill.late_cancels.length, rs.late_cancels);
     assert.equal(rs.issues, rs.no_shows + rs.late_cancels + rs.short_notice + rs.missing_checks);
-    assert.equal(rs.score, Math.round((1 - rs.issues / (row.visits + 2)) * 1000) / 1000);
+    assert.equal(rs.score, Math.round((1 - rs.issues / (row.visits + rs.no_shows + rs.late_cancels + rs.short_notice)) * 1000) / 1000);
     assert.equal(row.complaints_n, 2);
     // Re-cleans come from Launch27 (the synthetic data has free "Reclean" visits).
     assert.ok(v2.rows.reduce((a, r) => a + r.recleans, 0) > 0, 'some re-cleans found in the synthetic Launch27 data');

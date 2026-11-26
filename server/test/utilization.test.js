@@ -208,7 +208,8 @@ describe('reading Launch27 hours', () => {
     assert.deepEqual(workingWindow(rows, '2026-11-16'), [540, 1020]);
     assert.equal(workingWindow(rows, '2026-11-23'), null);
     assert.deepEqual(workingWindow(rows, '2026-11-30'), [600, 840]);
-    assert.deepEqual(workingWindow(rows, '2026-11-17'), [480, 1020]);
+    assert.deepEqual([...workingWindow(rows, '2026-11-17')], [480, 1020]);
+    assert.deepEqual(workingWindow(rows, '2026-11-17').breaks, [[720, 780]]);
     assert.equal(weeklyHours(rows), 8 + 8);
   });
 });
