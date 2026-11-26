@@ -42,7 +42,7 @@ up in Launch27 (cleaners first, then customers; Launch27 stays the authority):
 
 Linking the contact to Launch27 takes the conversation out of Who is this?. Each business number
 keeps its own conversation (a text to the hiring line never joins an Operations conversation),
-and routing rules decide the queue (e.g. the hiring number → Hiring).
+and routing rules decide the queue (e.g. the hiring number → HR Queue).
 
 STOP / START (and the other carrier keywords) mark the number opted out or back in; texts to an
 opted-out number are refused.
