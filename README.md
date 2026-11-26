@@ -16,7 +16,7 @@ browser ── /auth/*, /l27/* ──> server (Express) ── Bearer token ─�
 ```
 
 The server reuses the auth flow from
-[Check-In-Tracker-L27](https://github.com/UrbanMopdev/Check-In-Tracker-L27):
+[Check-In-Tracker-L27](https://github.com/UrbanMopGroupDev/Check-In-Tracker-L27):
 `POST /latest/login` with `{email, password}` returns `{bearer}`, which is sent as
 `Authorization: Bearer …`. Each user signs in with their own Launch27 account, so
 Launch27 still enforces their permissions, and the token stays on the server (the
