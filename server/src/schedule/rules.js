@@ -247,6 +247,9 @@ export function workingBlocks(rows = [], d, unavailableDates = null) {
   }
   return out;
 }
+// A day's capacity as Scheduling insights counts it (breaks in split days taken out). The
+// Utilization report's "Check the numbers" uses the same, so the two always tie.
+export const capacityMinutes = (w) => (w ? openMinutes(w) : 0);
 // Minutes a cleaner is open on a date: the sum of that day's blocks (a split day counts its gap as closed).
 export function workingMinutes(rows = [], d, unavailableDates = null) {
   return workingBlocks(rows, d, unavailableDates).reduce((m, [a, b]) => m + b - a, 0);

@@ -461,3 +461,14 @@ describe('utilization: residential/commercial transition', () => {
     await db.close();
   });
 });
+
+test('"Check the numbers" counts a split day the way Scheduling insights does', async () => {
+  const { capacityMinutes, workingWindow } = await import('../src/schedule/rules.js');
+  const rows = [{ date: null, weekday: 5, dayoff: false, start_time: '8:00 AM', end_time: '1:00 PM' }, { date: null, weekday: 5, dayoff: false, start_time: '2:15 PM', end_time: '6:00 PM' }];
+  const S = { id: 21, name: 'Split', area: 'Central', assignable: true, location_ids: [1], ...HOME, rules: {}, availability: rows };
+  const f = utilizationFacts({ today: '2026-11-23', cleaners: [S], visits: [], until: '2026-11-28' });
+  const fri = f.days.find((x) => x.d === '2026-11-27');
+  assert.equal(fri.window, capacityMinutes(workingWindow(rows, '2026-11-27')));
+  const r = utilizationReport({ facts: f, from: '2026-11-23', to: '2026-11-28', maxTo: '2027-01-10', existing: { capacity4: f.days.reduce((m, x) => m + x.window, 0) / 60, booked4: 0, unassigned_visits: 0, tolerance: 0.5 } });
+  assert.ok(r.reconcile.capacity.ties);
+});
