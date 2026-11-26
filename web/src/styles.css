@@ -2354,3 +2354,6 @@ a.rep-factor:hover b { text-decoration: underline; }
   .composer-attach-label { display: none; }
   .composer-drop { display: none; }
 }
+
+/* Conversation list: the time in the same typeface as the row, numbers lined up, never split over two lines. */
+.wl-time { font-variant-numeric: tabular-nums; white-space: nowrap; letter-spacing: 0; }
