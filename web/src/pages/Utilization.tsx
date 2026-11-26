@@ -1,18 +1,21 @@
 // Utilization (read-only report; everyone can see it): of the hours cleaners have open,
-// how much is already committed (assigned, unassigned, travel) and how many open hours remain.
+// how much is already committed (assigned, commercial, unassigned, travel) and how many open hours
+// remain. During the residential/commercial split it shows all work by default; "Residential only"
+// takes the time shared cleaners have booked for commercial off their hours instead.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { useBrand } from '../brands/useBrand';
+import { useLocations } from '../hooks';
 import { brandLabel } from '../brands/ui';
-import { reportsApi, pct, type DataCheck, type DataFlag, type UtilFigures, type UtilizationReport } from '../reports/api';
+import { reportsApi, pct, type DataCheck, type DataFlag, type UtilFigures, type UtilMode, type UtilizationReport } from '../reports/api';
 import { weekLabel } from '../reports/ui';
 
 const AREAS = ['Central', 'North', 'South', 'East', 'West'];
 // Fixed colour per area (validated for colour-blind separation); lines are also labelled.
 const AREA_COLOR: Record<string, string> = { Central: '#2a78d6', North: '#eb6834', South: '#1baf7a', East: '#eda100', West: '#e87ba4' };
 // The parts of the hours: same colours everywhere on the page.
-const PART = { assigned: '#2a78d6', unassigned: '#eb6834', not_taking: '#e87ba4', travel: '#eda100' };
+const PART = { assigned: '#2a78d6', commercial: '#7b5bd6', unassigned: '#eb6834', not_taking: '#e87ba4', travel: '#eda100' };
 
 const h = (n: number | null | undefined) => (n == null ? '—' : `${n.toLocaleString('en-CA', { maximumFractionDigits: 1 })} h`);
 const pad = (n: number) => String(n).padStart(2, '0');
@@ -31,9 +34,11 @@ export function UtilizationPage() {
   const [range, setRange] = useState<{ from: string; to: string } | null>(null);
   const [area, setArea] = useState<string | null>(null);
   const [tab, setTab] = useState<'report' | 'check'>('report');
+  // All work (residential + commercial) by default while the two are being split; residential only on request.
+  const [mode, setMode] = useState<UtilMode>('all');
   const q = useQuery({
-    queryKey: ['reports', 'utilization', range?.from, range?.to, brand.locationIds],
-    queryFn: () => reportsApi.utilization(range?.from ?? null, range?.to ?? null, brand.locationIds),
+    queryKey: ['reports', 'utilization', range?.from, range?.to, brand.locationIds, mode],
+    queryFn: () => reportsApi.utilization(range?.from ?? null, range?.to ?? null, brand.locationIds, mode),
     retry: false,
     placeholderData: (p) => p,
   });
@@ -43,7 +48,7 @@ export function UtilizationPage() {
       <header className="page-header ut-header">
         <div className="seg-head">
           <span className="small muted">Reports</span>
-          <h1>Utilization{brand.view !== 'both' && <span className="muted"> · {brandLabel(brand.view)}</span>}</h1>
+          <h1>Utilization{brand.view !== 'both' && <span className="muted"> · {mode === 'all' ? 'All work' : `${brandLabel(brand.view)} only`}</span>}</h1>
           <p className="muted">How much of our cleaners' hours are already committed, and how many open hours remain. Monday to Saturday.</p>
         </div>
         {r && <RangePicker value={range || { from: r.from, to: r.to }} onChange={setRange} today={r.today} minFrom={r.min_from || r.today} maxTo={r.max_to} />}
@@ -53,6 +58,12 @@ export function UtilizationPage() {
         <button role="tab" aria-selected={tab === 'check'} className={tab === 'check' ? 'active' : ''} onClick={() => setTab('check')}>
           Data check{r && issues(r) > 0 && <span className="ut-badge">{issues(r)}</span>}
         </button>
+        {brand.view !== 'both' && (
+          <div className="seg-period ut-mode" role="group" aria-label="Which work">
+            <button className={mode === 'all' ? 'active' : ''} aria-pressed={mode === 'all'} onClick={() => setMode('all')} title="Cleaners' full Launch27 hours; commercial bookings and the drives to them count as committed">All work</button>
+            <button className={mode === 'residential' ? 'active' : ''} aria-pressed={mode === 'residential'} onClick={() => setMode('residential')} title="Time shared cleaners have booked for commercial comes off their hours">Residential only</button>
+          </div>
+        )}
       </div>
       <div className="ut-areas" role="group" aria-label="Area">
         {[null, ...AREAS].map((a) => (
@@ -96,13 +107,15 @@ function OpenSplit({ open, other, label }: { open: number; other: number; label:
   return <div className="small muted ut-split" title={`Open in Launch27: ${h(open)}. Already booked for ${label}: ${h(other)}.`}>{h(open)} open · {h(other)} booked for {label}</div>;
 }
 
-const issues = (r: UtilizationReport) => r.data_check.cleaners.filter((c) => c.flags.length).length;
+const issues = (r: UtilizationReport) => r.data_check.cleaners.filter((c) => c.flags.length).length + (r.data_check.partner_bookings_total || 0);
 
 // ---------- data check: what the report knows from Launch27, per cleaner ----------
 const FLAG_HELP: Record<DataFlag, string> = {
   refused: "Launch27 didn't hand over their hours. Usually the login the planner used isn't allowed to read Team Availability, or Launch27 got too many requests at once. Their available hours count as 0 until fixed.",
   booked_no_hours: 'They have bookings in these dates but 0 available hours, so their bookings push the area "over". Check their Team Availability in Launch27.',
   booked_not_taking: 'Their title code says they are not taking bookings ((3), (X), On hold or no code), yet they have bookings. Either the code or the bookings need updating.',
+  over_availability: "Their bookings run past their available hours in Launch27 (or fall on a day they have none). The report still counts every booking's full scheduled Duration as committed; this shows how much of it is outside their hours. Check their Team Availability or the booking times.",
+  low_hours: "The hours this report uses for them are under 60% of their Launch27 weekly hours for these dates. Days off, one-day changes, days excluded from booking (Daily spots) and closed dates all lower them: check those are right.",
   no_hours: 'Launch27 answered, but no weekly hours are set for them.',
   no_home: "Their Launch27 profile has no map location (usually a missing or incomplete home address), so their area shows as Unknown.",
 };
@@ -113,8 +126,10 @@ function DataCheckView({ r, area, otherBrand: ob }: { r: UtilizationReport; area
   const flagged = dc.cleaners.filter((c) => c.flags.length).length;
   const dsort = useSort<DataCheck['cleaners'][number]>(rows, {
     name: (c) => c.name, flags: (c) => c.flags.length, status: (c) => c.status_label, area: (c) => c.area,
-    weekly: (c) => c.weekly_hours, available: (c) => c.available_h, booked: (c) => c.booked_h,
+    weekly: (c) => c.weekly_hours, available: (c) => c.report_h ?? c.available_h, booked: (c) => c.booked_h, over: (c) => c.over_h,
   });
+  const locations = useLocations();
+  const locName = (id: number | null) => (id == null ? '—' : (locations.data || []).find((l) => l.id === id)?.name || `Location ${id}`);
   const when = dc.refreshed_at ? new Date(dc.refreshed_at).toLocaleString('en-CA', { dateStyle: 'medium', timeStyle: 'short' }) : '—';
   return (
     <>
@@ -138,7 +153,7 @@ function DataCheckView({ r, area, otherBrand: ob }: { r: UtilizationReport; area
         <div className="seg-table-head"><h2>By cleaner{area && ` · ${area}`}</h2><span className="muted small">Cleaners taking bookings, plus anyone else with bookings in these dates. Problems first.</span></div>
         <div className="table-scroll">
           <table className="seg-table ut-table">
-            <thead><tr>{dsort.th('name', 'Cleaner')}{dsort.th('flags', 'What to check', true)}{dsort.th('status', 'Status')}{dsort.th('area', 'Area')}{dsort.th('weekly', 'Weekly hours in Launch27', true)}{dsort.th('available', 'Cleaner hours', true)}{dsort.th('booked', 'Booked', true)}</tr></thead>
+            <thead><tr>{dsort.th('name', 'Cleaner')}{dsort.th('flags', 'What to check', true)}{dsort.th('status', 'Status')}{dsort.th('area', 'Area')}{dsort.th('weekly', 'Weekly hours in Launch27', true)}{dsort.th('available', 'Cleaner hours', true)}{dsort.th('booked', 'Booked', true)}{dsort.th('over', 'Over availability', true)}</tr></thead>
             <tbody>
               {dsort.sorted.map((c) => (
                 <tr key={c.cleaner_id}>
@@ -159,15 +174,44 @@ function DataCheckView({ r, area, otherBrand: ob }: { r: UtilizationReport; area
                   <td className={c.taking ? '' : 'warn'}>{c.status_label || '—'}{!c.taking && <span className="muted small"> · not taking</span>}</td>
                   <td className={c.home_location ? 'muted' : 'warn'}>{c.home_location ? c.area : 'Unknown · no home location'}</td>
                   <td className="num">{c.availability_error ? <span className="warn">—</span> : c.weekly_hours ? h(c.weekly_hours) : <span className="warn">none set</span>}{c.dated_rows > 0 && <span className="muted small"> · {c.dated_rows} date changes</span>}</td>
-                  <td className="num">{h(c.available_h)}<OpenSplit open={c.open_h} other={c.other_brand_h} label={ob} /></td>
-                  <td className="num">{h(c.booked_h)}<span className="muted small"> · {c.visits} {c.visits === 1 ? 'visit' : 'visits'}</span></td>
+                  <td className="num">
+                    {h(c.report_h ?? c.available_h)}
+                    {c.weekly_window_h != null && c.weekly_window_h > 0 && <div className={`small ${c.flags.some((f) => f.kind === 'low_hours') ? 'warn' : 'muted'}`}>of {h(c.weekly_window_h)} weekly in Launch27</div>}
+                    {c.excluded_days > 0 && <div className="small muted">{c.excluded_days} {c.excluded_days === 1 ? 'day' : 'days'} excluded from booking</div>}
+                    {r.mode === 'residential' && <OpenSplit open={c.open_h} other={c.other_brand_h} label={ob} />}
+                  </td>
+                  <td className="num">{h(c.booked_h)}<span className="muted small"> · {c.visits} {c.visits === 1 ? 'visit' : 'visits'}</span>{c.commercial_h > 0 && <div className="small muted">+ {h(c.commercial_h)} commercial</div>}</td>
+                  <td className={`num${c.over_h > 0 ? ' warn' : ' muted'}`}>{c.over_h > 0 ? h(c.over_h) : '—'}</td>
                 </tr>
               ))}
-              {rows.length === 0 && <tr><td colSpan={7} className="muted">Nothing to show.</td></tr>}
+              {rows.length === 0 && <tr><td colSpan={8} className="muted">Nothing to show.</td></tr>}
             </tbody>
           </table>
         </div>
       </section>
+      {dc.partner_bookings_total > 0 && (
+        <section className="card flush">
+          <div className="seg-table-head"><h2>Partner bookings under a residential location · {dc.partner_bookings_total}</h2><span className="muted small">Carefor, OWCS, hospital programs and other homemaking work filed under a residential location (such as Ottawa). They are probably commercial: move them to the commercial location in Launch27 so they count on the right side.</span></div>
+          <div className="table-scroll">
+            <table className="seg-table compact ut-table">
+              <thead><tr><th>When</th><th>Client</th><th>Partner</th><th>Location</th><th className="num">Length</th><th>Cleaner</th><th /></tr></thead>
+              <tbody>
+                {dc.partner_bookings.map((b) => (
+                  <tr key={b.key}>
+                    <td className="ut-nowrap">{dayName(b.date)}</td>
+                    <td>{b.customer || '—'}{b.account && <div className="small muted">{b.account}</div>}</td>
+                    <td>{b.partner || '—'}</td>
+                    <td className="warn">{locName(b.location_id)}</td>
+                    <td className="num">{h(b.hours)}</td>
+                    <td>{b.cleaners.join(', ') || <span className="muted">No cleaner yet</span>}</td>
+                    <td>{b.booking_id ? <Link className="small" to={`/bookings/${b.booking_id}`}>Booking</Link> : <span className="muted small">Projected</span>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
     </>
   );
 }
@@ -332,14 +376,16 @@ function Report({ r, area, setArea, otherBrand: ob }: { r: UtilizationReport; ar
   const cleaners = useMemo(() => (area ? r.cleaners.filter((c) => c.area === area) : r.cleaners), [r.cleaners, area]);
   const days = useMemo<DayRow[]>(() => r.by_day.map((d) => ({ ...(area ? d.areas[area] : d), date: d.date })), [r.by_day, area]);
   const [drill, setDrill] = useState<'unassigned' | 'not_taking' | null>(null);
+  // Commercial is shown on its own while the work is split (all work only).
+  const com = r.mode === 'all' && r.split;
   const areaSort = useSort<AreaRow>(r.areas, {
-    area: (x) => x.area, cleaners: (x) => x.cleaners, customers: (x) => x.customers, available: (x) => x.available_h, assigned: (x) => x.assigned_h,
+    area: (x) => x.area, cleaners: (x) => x.cleaners, customers: (x) => x.customers, available: (x) => x.available_h, assigned: (x) => x.assigned_h, commercial: (x) => x.commercial_h,
     unassigned: (x) => x.unassigned_h, travel: (x) => x.travel_h, left: (x) => x.left_h, util: (x) => x.utilization, room: (x) => x.room_bookings,
   });
   const daySort = useSort<DayRow>(days, { date: (x) => x.date, available: (x) => x.available_h, committed: (x) => x.spoken_h, left: (x) => x.left_h, util: (x) => x.utilization, room: (x) => x.room_bookings });
   const cleanerSort = useSort<CleanerRowU>(cleaners, {
-    name: (x) => x.name, area: (x) => x.area, available: (x) => x.available_h, assigned: (x) => x.assigned_h, travel: (x) => x.travel_h,
-    left: (x) => x.left_h, util: (x) => x.utilization, ifleft: (x) => (x.area_short ? 1e9 : x.if_left),
+    name: (x) => x.name, area: (x) => x.area, available: (x) => x.available_h, assigned: (x) => x.assigned_h, commercial: (x) => x.commercial_h, travel: (x) => x.travel_h,
+    left: (x) => x.left_h, util: (x) => x.utilization, room: (x) => x.room_bookings, ifleft: (x) => (x.area_short ? 1e9 : x.if_left),
   }, 'util');
   return (
     <>
@@ -350,7 +396,7 @@ function Report({ r, area, setArea, otherBrand: ob }: { r: UtilizationReport; ar
         <div className="seg-table-head"><h2>By area</h2><span className="muted small">Cleaners by home address; unassigned visits by the client's address. "Room for" = about how many more typical bookings fit into the open gaps in cleaners' days (unassigned ones already counted). Click a row to focus on it; click a heading to sort.</span></div>
         <div className="table-scroll">
           <table className="seg-table ut-table">
-            <thead><tr>{areaSort.th('area', 'Area')}{areaSort.th('cleaners', 'Cleaners', true)}{areaSort.th('customers', 'Customers', true)}{areaSort.th('available', 'Cleaner hours', true)}{areaSort.th('assigned', 'Assigned', true)}{areaSort.th('unassigned', 'Unassigned', true)}{areaSort.th('travel', 'Travel', true)}{areaSort.th('left', 'Open hours remaining', true)}{areaSort.th('util', 'Utilization')}{areaSort.th('room', 'Room for (bookings)', true)}</tr></thead>
+            <thead><tr>{areaSort.th('area', 'Area')}{areaSort.th('cleaners', 'Cleaners', true)}{areaSort.th('customers', 'Customers', true)}{areaSort.th('available', 'Cleaner hours', true)}{areaSort.th('assigned', 'Assigned', true)}{com && areaSort.th('commercial', 'Commercial', true)}{areaSort.th('unassigned', 'Unassigned', true)}{areaSort.th('travel', 'Travel', true)}{areaSort.th('left', 'Open hours remaining', true)}{areaSort.th('util', 'Utilization')}{areaSort.th('room', 'Room for (bookings)', true)}</tr></thead>
             <tbody>
               {areaSort.sorted.map((x) => (
                 <tr key={x.area} className={`clickable${area === x.area ? ' ut-row-on' : ''}`} onClick={() => setArea(area === x.area ? null : x.area)}>
@@ -359,6 +405,7 @@ function Report({ r, area, setArea, otherBrand: ob }: { r: UtilizationReport; ar
                   <td className="num">{x.customers}</td>
                   <td className="num">{h(x.available_h)}</td>
                   <td className="num">{h(x.assigned_h)}</td>
+                  {com && <td className="num">{h(x.commercial_h)}</td>}
                   <td className="num">
                     {x.unassigned_visits ? (
                       <button type="button" className="ut-link" title="See these bookings" onClick={(e) => { e.stopPropagation(); setArea(x.area); setDrill('unassigned'); }}>{h(x.unassigned_h)} · {x.unassigned_visits}</button>
@@ -371,7 +418,7 @@ function Report({ r, area, setArea, otherBrand: ob }: { r: UtilizationReport; ar
                 </tr>
               ))}
               <tr className="ut-total">
-                <td>All areas</td><td className="num">{r.totals.cleaners}</td><td className="num">{r.totals.customers}</td><td className="num">{h(r.totals.available_h)}</td><td className="num">{h(r.totals.assigned_h)}</td><td className="num">{h(r.totals.unassigned_h)}</td><td className="num">{h(r.totals.travel_h)}</td>
+                <td>All areas</td><td className="num">{r.totals.cleaners}</td><td className="num">{r.totals.customers}</td><td className="num">{h(r.totals.available_h)}</td><td className="num">{h(r.totals.assigned_h)}</td>{com && <td className="num">{h(r.totals.commercial_h)}</td>}<td className="num">{h(r.totals.unassigned_h)}</td><td className="num">{h(r.totals.travel_h)}</td>
                 <td className="num"><b>{h(r.totals.left_h)}</b></td><td><UtilBar u={r.totals.utilization} /></td><td className="num">{r.totals.room_bookings ? `≈ ${r.totals.room_bookings}` : '—'}</td>
               </tr>
             </tbody>
@@ -402,24 +449,26 @@ function Report({ r, area, setArea, otherBrand: ob }: { r: UtilizationReport; ar
       </section>
 
       <section className="card flush">
-        <div className="seg-table-head"><h2>By cleaner{area && ` · ${area}`}</h2><span className="muted small">Fullest first. "If they left" = their booked + travel hours ÷ their area's open hours remaining; over 100% means the area couldn't absorb their work.</span></div>
+        <div className="seg-table-head"><h2>By cleaner{area && ` · ${area}`}</h2><span className="muted small">Fullest first. Every booking counts its full scheduled length in Launch27. "If they left" = their booked{com ? ', commercial' : ''} and travel hours ÷ their area's open hours remaining; over 100% means the area couldn't absorb their work.</span></div>
         <div className="table-scroll">
           <table className="seg-table ut-table">
-            <thead><tr>{cleanerSort.th('name', 'Cleaner')}{cleanerSort.th('area', 'Area')}{cleanerSort.th('available', 'Cleaner hours', true)}{cleanerSort.th('assigned', 'Assigned', true)}{cleanerSort.th('travel', 'Travel', true)}{cleanerSort.th('left', 'Open hours remaining', true)}{cleanerSort.th('util', 'Utilization')}{cleanerSort.th('ifleft', 'If they left', true)}</tr></thead>
+            <thead><tr>{cleanerSort.th('name', 'Cleaner')}{cleanerSort.th('area', 'Area')}{cleanerSort.th('available', 'Cleaner hours', true)}{cleanerSort.th('assigned', 'Assigned', true)}{com && cleanerSort.th('commercial', 'Commercial', true)}{cleanerSort.th('travel', 'Travel', true)}{cleanerSort.th('left', 'Open hours remaining', true)}{cleanerSort.th('util', 'Utilization')}{cleanerSort.th('room', 'Room for (bookings)', true)}{cleanerSort.th('ifleft', 'If they left', true)}</tr></thead>
             <tbody>
               {cleanerSort.sorted.map((x) => (
                 <tr key={x.cleaner_id}>
-                  <td><Link to={`/reports/cleaners/${x.cleaner_id}`} className="seg-name">{x.name}</Link>{x.status_label && x.status_label !== 'Active' && <span className="seg-trait">{x.status_label}</span>}</td>
+                  <td><Link to={`/reports/cleaners/${x.cleaner_id}`} className="seg-name">{x.name}</Link>{x.status_label && x.status_label !== 'Active' && <span className="seg-trait">{x.status_label}</span>}{x.other_locations && <span className="seg-trait" title="Their Launch27 locations are commercial, but they have residential bookings in these dates">Commercial location</span>}</td>
                   <td className="muted">{x.area}</td>
-                  <td className="num">{h(x.available_h)}<OpenSplit open={x.open_h} other={x.other_brand_h} label={ob} /></td>
+                  <td className="num">{h(x.available_h)}{r.mode === 'residential' && <OpenSplit open={x.open_h} other={x.other_brand_h} label={ob} />}</td>
                   <td className="num">{h(x.assigned_h)}<span className="muted small"> · {x.visits} {x.visits === 1 ? 'visit' : 'visits'}</span></td>
+                  {com && <td className="num">{x.commercial_h ? <>{h(x.commercial_h)}<span className="muted small"> · {x.commercial_visits} {x.commercial_visits === 1 ? 'visit' : 'visits'}</span></> : '—'}</td>}
                   <td className="num">{h(x.travel_h)}{x.travel_per_visit_min != null && <span className="muted small"> · {x.travel_per_visit_min} min each</span>}</td>
                   <td className={`num${x.left_h < 0 ? ' warn' : ''}`}>{x.left_h < 0 ? `over by ${h(-x.left_h)}` : h(x.left_h)}</td>
                   <td><UtilBar u={x.utilization} /></td>
+                  <td className="num">{x.room_bookings ? `≈ ${x.room_bookings}` : '—'}</td>
                   <td className="num">{x.area_short ? <span className="warn">area has no room</span> : x.if_left != null && x.if_left > 1 ? <span className="warn">{x.if_left > 9.99 ? '>999%' : pct(x.if_left)}</span> : pct(x.if_left)}</td>
                 </tr>
               ))}
-              {cleaners.length === 0 && <tr><td colSpan={8} className="muted">No cleaners taking bookings here.</td></tr>}
+              {cleaners.length === 0 && <tr><td colSpan={10} className="muted">No cleaners taking bookings here.</td></tr>}
             </tbody>
           </table>
         </div>
@@ -534,7 +583,8 @@ function NeedsCleaner({ r, area, setArea, kind, onKind, onClose }: { r: Utilizat
 function Summary({ r, f, area, onDrill, drill }: { r: UtilizationReport; f: UtilFigures; area: string | null; onDrill: (k: 'unassigned' | 'not_taking' | null) => void; drill: 'unassigned' | 'not_taking' | null }) {
   const over = f.left_h < 0;
   const parts = [
-    { key: 'assigned', label: 'Assigned', value: f.assigned_h, color: PART.assigned },
+    { key: 'assigned', label: r.mode === 'all' && r.split ? 'Assigned (residential)' : 'Assigned', value: f.assigned_h, color: PART.assigned },
+    ...(r.mode === 'all' && r.split ? [{ key: 'commercial', label: 'Commercial', value: f.commercial_h, color: PART.commercial }] : []),
     { key: 'unassigned', label: 'Unassigned', value: f.unassigned_h, color: PART.unassigned },
     ...(f.not_taking_h ? [{ key: 'not_taking', label: 'On cleaners not taking bookings', value: f.not_taking_h, color: PART.not_taking }] : []),
     { key: 'travel', label: 'Travel (est.)', value: f.travel_h, color: PART.travel },
@@ -563,14 +613,15 @@ function Summary({ r, f, area, onDrill, drill }: { r: UtilizationReport; f: Util
         </div>
       </div>
       <div className="ut-math" aria-label="How the hours add up">
-        <MathTile label="Total cleaner hours" value={h(f.available_h)} note={f.closed_h ? `after ${h(f.closed_h)} of closed dates` : 'cleaners taking bookings'} />
+        <MathTile label="Total cleaner hours" value={h(f.available_h)} note={[r.mode === 'all' ? 'full Launch27 hours' : 'less time booked for commercial', f.closed_h ? `after ${h(f.closed_h)} of closed dates` : '', f.excluded_h ? `${h(f.excluded_h)} excluded from booking` : ''].filter(Boolean).join(' · ')} />
         <span className="ut-op">−</span>
-        <MathTile label="Assigned" value={h(f.assigned_h)} color={PART.assigned} />
+        <MathTile label={r.mode === 'all' && r.split ? 'Assigned (residential)' : 'Assigned'} value={h(f.assigned_h)} color={PART.assigned} />
+        {r.mode === 'all' && r.split && <><span className="ut-op">−</span><MathTile label="Commercial" value={h(f.commercial_h)} note={`${f.commercial_visits} ${f.commercial_visits === 1 ? 'visit' : 'visits'} on these cleaners`} color={PART.commercial} /></>}
         <span className="ut-op">−</span>
         <MathTile label="Unassigned" onClick={f.unassigned_visits ? () => onDrill(drill === 'unassigned' ? null : 'unassigned') : undefined} active={drill === 'unassigned'} value={h(f.unassigned_h)} note={`${f.unassigned_visits} ${f.unassigned_visits === 1 ? 'visit' : 'visits'} · sales-to-ops handoff gap`} color={PART.unassigned} />
         {!!f.not_taking_h && <><span className="ut-op">−</span><MathTile label="On cleaners not taking bookings" onClick={() => onDrill(drill === 'not_taking' ? null : 'not_taking')} active={drill === 'not_taking'} value={h(f.not_taking_h)} note={`${f.not_taking_visits} ${f.not_taking_visits === 1 ? 'visit' : 'visits'} to move`} color={PART.not_taking} /></>}
         <span className="ut-op">−</span>
-        <MathTile label="Travel (est.)" value={h(f.travel_h)} note="each cleaner's route, home and back" color={PART.travel} />
+        <MathTile label="Travel (est.)" value={h(f.travel_h)} note={r.mode === 'all' ? "each cleaner's route, home and back, commercial stops included" : "each cleaner's route, home and back"} color={PART.travel} />
         <span className="ut-op">=</span>
         <MathTile label={r.past ? 'Unused hours' : 'Open hours remaining'} value={over ? `−${h(-f.left_h)}` : h(f.left_h)} strong />
       </div>
@@ -617,11 +668,11 @@ function Reconcile({ r }: { r: UtilizationReport }) {
   return (
     <details className="card rep-card ut-check">
       <summary><b>Check the numbers</b> <span className="muted small">· ties to Scheduling insights {allOk ? '✓' : '✗'}</span></summary>
-      <p className="small muted">Scheduling insights' own figures, step by step to this page's. Hours use its window ({weekLabel(k.hours_from)} – {weekLabel(k.hours_to)}); visits use the dates picked above.</p>
+      <p className="small muted">Scheduling insights' own figures, step by step to this page's. Hours use its window ({weekLabel(k.hours_from)} – {weekLabel(k.hours_to)}); visits use the dates picked above. Both count every booking's full scheduled length for each cleaner on it.</p>
       <div className="ut-recon">
-        <div><span className="muted small">Available hours</span><span>{h(k.capacity.existing)} <span className="muted">− Sundays {h(k.capacity.sundays)} − closed dates {h(k.capacity.closed)} − other brand {h(k.capacity.other_brand)}{k.capacity.floor ? ` − overbooked days ${h(k.capacity.floor)}` : ''}</span> = <b>{h(k.capacity.result)}</b></span>{tick(k.capacity.ties)}</div>
-        <div><span className="muted small">Assigned hours</span><span>{h(k.booked.existing)} <span className="muted">− Sundays {h(k.booked.sundays)} − other brand {h(k.booked.other_brand)}</span> = <b>{h(k.booked.result)}</b></span>{tick(k.booked.ties)}</div>
-        <div><span className="muted small">"No cleaner yet" visits</span><span>{k.unassigned.existing} <span className="muted">− other brand {k.unassigned.other_brand} − Sundays {k.unassigned.sundays} − outside these dates {k.unassigned.outside}</span> = <b>{k.unassigned.result}</b></span>{tick(k.unassigned.ties)}</div>
+        <div><span className="muted small">Available hours</span><span>{h(k.capacity.existing)} <span className="muted">− Sundays {h(k.capacity.sundays)}{k.capacity.breaks ? ` − breaks in split days ${h(k.capacity.breaks)}` : ''}{k.capacity.excluded ? ` − excluded from booking ${h(k.capacity.excluded)}` : ''} − closed dates {h(k.capacity.closed)}{k.mode === 'residential' ? ` − booked for commercial ${h(k.capacity.other_brand)}` : ''}{k.capacity.floor ? ` − overbooked days ${h(k.capacity.floor)}` : ''}{k.capacity.added ? ` + cleaners from commercial locations with residential bookings ${h(-k.capacity.added)}` : ''}</span> = <b>{h(k.capacity.result)}</b></span>{tick(k.capacity.ties)}</div>
+        <div><span className="muted small">{k.mode === 'all' ? 'Booked hours (residential + commercial)' : 'Assigned hours'}</span><span>{h(k.booked.existing)} <span className="muted">− Sundays {h(k.booked.sundays)}{k.mode === 'residential' ? ` − commercial ${h(k.booked.other_brand)}` : ''}{k.booked.added ? ` + cleaners from commercial locations ${h(-k.booked.added)}` : ''}</span> = <b>{h(k.booked.result)}</b></span>{tick(k.booked.ties)}</div>
+        <div><span className="muted small">"No cleaner yet" visits</span><span>{k.unassigned.existing} <span className="muted">− commercial {k.unassigned.other_brand} − Sundays {k.unassigned.sundays} − outside these dates {k.unassigned.outside}</span> = <b>{k.unassigned.result}</b></span>{tick(k.unassigned.ties)}</div>
       </div>
     </details>
   );
