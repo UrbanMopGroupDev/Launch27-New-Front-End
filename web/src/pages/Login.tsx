@@ -50,7 +50,7 @@ export function LoginPage({ onLoggedIn }: { onLoggedIn: () => void }) {
         </div>
         {env?.note && <p className={`env-note env-${site!.env}`}>{env.note}</p>}
         <h1>Sign in</h1>
-        <p className="muted small">Use your Launch27 login.</p>
+        <p className="muted small">Sign in with your Launch27 email and password.</p>
         <label>
           Email
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" required />
