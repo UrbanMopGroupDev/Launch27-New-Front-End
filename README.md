@@ -1,5 +1,7 @@
 # Launch27 New Front End
 
+The repository lives at [UrbanMopGroupDev/Launch27-New-Front-End](https://github.com/UrbanMopGroupDev/Launch27-New-Front-End) (moved from UrbanMopdev in November 2026). Railway's dev, QA and production services build from it.
+
 A replacement front end for UrbanMop's Launch27 admin portal, so we can add our own
 features on top of Launch27's data. It works in two steps:
 
