@@ -5,6 +5,7 @@ import { contactsInConflict, inbox, type Channel, type Contact, type ContactSumm
 import { Customer360, Story } from '../inbox/Customer360';
 import { Cleaner360 } from '../inbox/Cleaner360';
 import { CleanerProfile } from '../inbox/CleanerProfile';
+import { ApiError } from '../api';
 import { AddContact, contactLabel, deleteContactQuestion } from '../inbox/AddContact';
 import { CHANNEL_ICON, ROLE_LABEL, ago, displayIdentity, useInboxMe, useMeta } from '../inbox/util';
 
@@ -20,6 +21,11 @@ export function ContactPage() {
   const [adding, setAdding] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const notice = (location.state as { notice?: string } | null)?.notice || null;
+  // A contact merged into another: open that one.
+  const mergedInto = contact.error instanceof ApiError ? (contact.error.fields as { merged_into?: number } | undefined)?.merged_into : undefined;
+  useEffect(() => {
+    if (mergedInto) navigate(`/contacts/${mergedInto}`, { replace: true, state: { notice: 'That contact was merged into this one.' } });
+  }, [mergedInto, navigate]);
   if (contact.isLoading) return <div className="muted">Loading…</div>;
   if (contact.error) return <div className="error">{(contact.error as Error).message}</div>;
   const c = contact.data!;
@@ -273,8 +279,8 @@ function IdentityEditor({ contact }: { contact: Contact }) {
             <span>{i.kind === 'phone' ? '☎' : '✉'} {displayIdentity(i.value)} {i.label && <span className="muted small">({i.label})</span>}</span>
             <span className="actions">
               {i.kind === 'phone' && (
-                <label className="check small">
-                  <input type="checkbox" checked={i.opted_out} disabled={busy} onChange={(e) => attempt(() => inbox.setOptOut(i.id, e.target.checked))} /> Opted out of texts
+                <label className="check small" title={i.opted_out && i.opted_out_by !== 'agent' ? 'They texted STOP. Only a START text from them turns texts back on.' : undefined}>
+                  <input type="checkbox" checked={i.opted_out} disabled={busy || (i.opted_out && i.opted_out_by !== 'agent')} onChange={(e) => attempt(() => inbox.setOptOut(i.id, e.target.checked))} /> {i.opted_out && i.opted_out_by !== 'agent' ? 'Texted STOP' : 'Opted out of texts'}
                 </label>
               )}
               <button type="button" className="link small" disabled={busy} onClick={() => edit(i)}>Edit</button>

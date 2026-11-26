@@ -64,7 +64,7 @@ async function supervisors(q) {
 // ---------- contacts ----------
 //
 // One contact per person: an email address or phone number belongs to one contact only, and a
-// Launch27 customer or cleaner has one contact only (unique indexes, migration 0037). Someone
+// Launch27 customer or cleaner has one contact only (unique indexes, migration 0038). Someone
 // who gets in touch from an address or number we don't know becomes a new contact.
 
 const who = (c) => c?.name || 'another contact';
@@ -127,40 +127,45 @@ export async function addIdentity(q, contactId, kind, value, label = null, { ifT
     throw new IdentityTaken(kind, v, await identityOwner(q, kind, v));
   }
   if (kind === 'phone') {
-    const parked = await one(q, 'DELETE FROM sms_opt_outs WHERE phone = $1 RETURNING opted_out_at', [v]);
-    if (parked) row = await one(q, 'UPDATE contact_identities SET opted_out = true, opted_out_at = $2 WHERE id = $1 RETURNING *', [row.id, parked.opted_out_at]);
+    const parked = await one(q, 'DELETE FROM sms_opt_outs WHERE phone = $1 RETURNING opted_out_at, opted_out_by', [v]);
+    if (parked) row = await one(q, 'UPDATE contact_identities SET opted_out = true, opted_out_at = $2, opted_out_by = $3 WHERE id = $1 RETURNING *', [row.id, parked.opted_out_at, parked.opted_out_by || 'stop']);
   }
   await q.query('DELETE FROM contact_identity_removals WHERE contact_id = $1 AND kind = $2 AND value = $3', [contactId, kind, v]);
   return row;
+}
+
+/** Whether an agent took this email or phone off this contact (it isn't theirs any more). */
+export async function wasRemoved(q, contactId, kind, value) {
+  return !!(await one(q, 'SELECT 1 FROM contact_identity_removals WHERE contact_id = $1 AND kind = $2 AND value = $3', [contactId, kind, value]));
 }
 
 // A number that replied STOP keeps its block when it comes off a contact (sms_opt_outs), and
 // goes back on the identity when a contact gets the number again (addIdentity).
 async function parkOptOut(q, identity) {
   if (identity.kind !== 'phone' || !identity.opted_out) return;
-  await q.query('INSERT INTO sms_opt_outs (phone, opted_out_at) VALUES ($1, COALESCE($2, now())) ON CONFLICT (phone) DO NOTHING', [identity.value, identity.opted_out_at]);
+  await q.query('INSERT INTO sms_opt_outs (phone, opted_out_at, opted_out_by) VALUES ($1, COALESCE($2, now()), $3) ON CONFLICT (phone) DO NOTHING', [identity.value, identity.opted_out_at, identity.opted_out_by || 'stop']);
 }
 
 /**
  * The contact for an email or phone, made on first contact: whoever has it; else the Launch27
  * customer's or cleaner's contact (lookup), which gets the new address; else a new contact.
- * `value` must be normalized.
+ * An address an agent took off that Launch27 person isn't theirs (e.g. a number that has a new
+ * owner), so it gets a contact of its own instead. `value` must be normalized.
  */
-export async function contactForIdentity(q, kind, value, { lookup = null, name = null } = {}) {
+export async function contactForIdentity(q, kind, value, { lookup = null, name = null, actorId = null } = {}) {
   const found = await identityOwner(q, kind, value);
   if (found) return found;
   const col = lookup?.l27_team_id ? 'l27_team_id' : lookup?.l27_customer_id ? 'l27_customer_id' : null;
   if (col) {
     const existing = await one(q, `SELECT * FROM contacts WHERE ${col} = $1`, [lookup[col]]);
-    if (existing && (await addIdentity(q, existing.id, kind, value, null, { ifTaken: 'skip' }))) return existing;
+    if (!existing) {
+      const theirs = await contactForL27(q, { ...lookup, identities: [{ kind, value }, ...(lookup.identities || [])] }, { actorId });
+      return (await identityOwner(q, kind, value)) || theirs;
+    }
+    if (!(await wasRemoved(q, existing.id, kind, value)) && (await addIdentity(q, existing.id, kind, value, null, { ifTaken: 'skip' }))) return existing;
   }
-  const made = await createContact(q, {
-    name: lookup?.name || name || null,
-    roles: lookup?.roles || [],
-    l27_customer_id: lookup?.l27_customer_id ?? null,
-    l27_team_id: lookup?.l27_team_id ?? null,
-    identities: [{ kind, value }, ...(lookup?.identities || [])],
-  });
+  const removedFromThem = !!col; // reached with a lookup only when the address was taken off them
+  const made = await createContact(q, { name: (removedFromThem ? null : lookup?.name) || name || null, roles: removedFromThem ? [] : lookup?.roles || [], identities: [{ kind, value }] });
   // Two messages from a new sender at once: the other one made their contact first.
   const owner = await identityOwner(q, kind, value);
   if (owner && Number(owner.id) !== Number(made.id)) {
@@ -168,6 +173,75 @@ export async function contactForIdentity(q, kind, value, { lookup = null, name =
     return owner;
   }
   return made;
+}
+
+/**
+ * The contact for a Launch27 customer or cleaner, info = { name, roles, l27_customer_id or
+ * l27_team_id, identities }: theirs if they have one; else a contact that already has one of
+ * their emails or phones and no Launch27 link of that kind becomes theirs (several such become
+ * one); else a new one. Conversations left over from a deleted contact of theirs come back.
+ */
+export async function contactForL27(q, info, { actorId = null } = {}) {
+  const col = info.l27_team_id ? 'l27_team_id' : 'l27_customer_id';
+  const id = info[col];
+  const existing = await one(q, `SELECT * FROM contacts WHERE ${col} = $1`, [id]);
+  if (existing) return existing;
+  const owners = [];
+  for (const i of info.identities || []) {
+    const o = await identityOwner(q, i.kind, i.value);
+    if (o && o[col] == null && !owners.some((x) => Number(x.id) === Number(o.id))) owners.push(o);
+  }
+  let contact;
+  if (!owners.length) contact = await createContact(q, info);
+  else {
+    let keep = owners[0];
+    for (const o of owners.slice(1)) if (canMerge(keep, o)) keep = await mergeContacts(q, keep.id, o.id, { actorId, reason: `same email or phone as Launch27 ${col === 'l27_team_id' ? 'cleaner' : 'customer'} #${id}` });
+    contact = await one(
+      q,
+      `UPDATE contacts SET ${col} = $2, roles = $3::jsonb, name = COALESCE(NULLIF(btrim(name), ''), $4), caller_flag = NULL, updated_at = now() WHERE id = $1 RETURNING *`,
+      [keep.id, id, json([...new Set([...(keep.roles || []), ...(info.roles || [])])]), cleanName(info.name)],
+    );
+    for (const i of info.identities || []) await addIdentity(q, contact.id, i.kind, i.value, i.label, { ifTaken: 'skip' });
+    await audit(q, actorId, 'contact.linked', 'contact', contact.id, { [col]: id });
+  }
+  await reclaimHistory(q, contact);
+  return contact;
+}
+
+/**
+ * Keep a Launch27 person's contact current with Launch27: their emails and phones are added,
+ * except ones an agent took off this contact; one that is on a contact with no Launch27 link
+ * brings that contact in (one contact per person); one on another Launch27 person stays there.
+ */
+export async function refreshFromL27(q, contact, info, { actorId = null } = {}) {
+  let c = contact;
+  for (const i of info.identities || []) {
+    const v = normalizeIdentity(i.kind, i.value);
+    if (!v || (await wasRemoved(q, c.id, i.kind, v))) continue;
+    const o = await identityOwner(q, i.kind, v);
+    if (!o) await addIdentity(q, c.id, i.kind, v, i.label, { ifTaken: 'skip' });
+    else if (Number(o.id) !== Number(c.id) && o.l27_customer_id == null && o.l27_team_id == null) {
+      c = await mergeContacts(q, c.id, o.id, { actorId, reason: `same ${i.kind === 'phone' ? 'phone number' : 'email'} as in Launch27` });
+    }
+  }
+  return c;
+}
+
+// Conversations detached when this person's earlier contact was deleted come back to them.
+export async function reclaimHistory(q, c) {
+  for (const col of L27_COLS) {
+    if (c?.[col] == null) continue;
+    const back = await many(
+      q,
+      `UPDATE conversations v SET contact_id = $1, updated_at = now() FROM contact_detached d
+       WHERE d.conversation_id = v.id AND d.${col} = $2 AND v.contact_id IS NULL RETURNING v.id`,
+      [c.id, c[col]],
+    );
+    if (!back.length) continue;
+    await q.query(`DELETE FROM contact_detached WHERE ${col} = $1`, [c[col]]);
+    if (col === 'l27_customer_id') await q.query('UPDATE complaint_cases SET contact_id = $1 WHERE contact_id IS NULL AND l27_customer_id = $2', [c.id, c[col]]);
+    await audit(q, null, 'contact.history_returned', 'contact', c.id, { [col]: Number(c[col]), conversations: back.map((r) => Number(r.id)) });
+  }
 }
 
 const L27_COLS = ['l27_customer_id', 'l27_team_id'];
@@ -236,11 +310,15 @@ export async function deleteContact(q, actor, contactId) {
   for (const i of identities) await parkOptOut(q, i);
   const convs = await many(q, 'UPDATE conversations SET contact_id = NULL, updated_at = now() WHERE contact_id = $1 RETURNING id', [c.id]);
   for (const v of convs) await event(q, v.id, `Contact ${c.name || ''} deleted by ${actor.name || actor.email}`.replace(/\s+/g, ' '), { type: 'contact_deleted', contact_id: Number(c.id) }, actor.id);
+  // A Launch27 customer's or cleaner's conversations go back to them when they get a contact again.
+  if (c.l27_customer_id != null || c.l27_team_id != null) {
+    for (const v of convs) await q.query('INSERT INTO contact_detached (conversation_id, l27_customer_id, l27_team_id) VALUES ($1,$2,$3) ON CONFLICT (conversation_id) DO UPDATE SET l27_customer_id = EXCLUDED.l27_customer_id, l27_team_id = EXCLUDED.l27_team_id, detached_at = now()', [v.id, c.l27_customer_id, c.l27_team_id]);
+  }
   await q.query('DELETE FROM contacts WHERE id = $1', [c.id]);
   await audit(q, actor.id, 'contact.deleted', 'contact', c.id, {
     name: c.name, roles: c.roles, l27_customer_id: c.l27_customer_id, l27_team_id: c.l27_team_id, lead_stage: c.lead_stage, lead_source: c.lead_source,
     communication_preference: c.communication_preference, caller_flag: c.caller_flag, notes: c.notes,
-    identities: identities.map((i) => ({ kind: i.kind, value: i.value, label: i.label, opted_out: i.opted_out })),
+    identities: identities.map((i) => ({ kind: i.kind, value: i.value, label: i.label, opted_out: i.opted_out, opted_out_by: i.opted_out_by })),
     conversations: convs.map((v) => Number(v.id)),
   });
   return { id: Number(c.id), conversations: convs.length };
@@ -263,13 +341,15 @@ export async function updateIdentity(q, actor, identityId, { value, label, opted
       await parkOptOut(q, cur);
       await q.query('INSERT INTO contact_identity_removals (contact_id, kind, value) VALUES ($1,$2,$3) ON CONFLICT (contact_id, kind, value) DO UPDATE SET removed_at = now()', [cur.contact_id, cur.kind, cur.value]);
       await q.query('DELETE FROM contact_identity_removals WHERE contact_id = $1 AND kind = $2 AND value = $3', [cur.contact_id, cur.kind, v]);
-      const parked = cur.kind === 'phone' ? await one(q, 'DELETE FROM sms_opt_outs WHERE phone = $1 RETURNING opted_out_at', [v]) : null;
-      row = await one(q, 'UPDATE contact_identities SET value = $2, opted_out = $3, opted_out_at = $4 WHERE id = $1 RETURNING *', [cur.id, v, !!parked, parked?.opted_out_at ?? null]);
+      const parked = cur.kind === 'phone' ? await one(q, 'DELETE FROM sms_opt_outs WHERE phone = $1 RETURNING opted_out_at, opted_out_by', [v]) : null;
+      row = await one(q, 'UPDATE contact_identities SET value = $2, opted_out = $3, opted_out_at = $4, opted_out_by = $5 WHERE id = $1 RETURNING *', [cur.id, v, !!parked, parked?.opted_out_at ?? null, parked ? parked.opted_out_by || 'stop' : null]);
     }
   }
   if (label !== undefined) row = await one(q, 'UPDATE contact_identities SET label = $2 WHERE id = $1 RETURNING *', [cur.id, String(label ?? '').trim().slice(0, 60) || null]);
   if (opted_out !== undefined && !!opted_out !== row.opted_out) {
-    row = await one(q, 'UPDATE contact_identities SET opted_out = $2, opted_out_at = CASE WHEN $2 THEN now() ELSE NULL END WHERE id = $1 RETURNING *', [cur.id, !!opted_out]);
+    // CASL and carrier rules: a STOP is undone only by the person texting START.
+    if (!opted_out && row.opted_out_by !== 'agent') throw new InboxError(409, `${shown(row.kind, row.value)} texted STOP. Only they can turn texts back on, by texting START.`);
+    row = await one(q, "UPDATE contact_identities SET opted_out = $2, opted_out_at = CASE WHEN $2 THEN now() ELSE NULL END, opted_out_by = CASE WHEN $2 THEN 'agent' ELSE NULL END WHERE id = $1 RETURNING *", [cur.id, !!opted_out]);
     await audit(q, actor.id, opted_out ? 'identity.opted_out' : 'identity.opted_in', 'identity', cur.id);
   }
   if (row.value !== cur.value || row.label !== cur.label) {
@@ -405,7 +485,7 @@ export async function ingestInbound(q, input, { lookup = null, now = new Date(),
   );
 
   if (optChange) {
-    await q.query('UPDATE contact_identities SET opted_out = $1, opted_out_at = CASE WHEN $1 THEN now() ELSE NULL END WHERE kind = $2 AND value = $3', [optChange === 'out', 'phone', from]);
+    await q.query("UPDATE contact_identities SET opted_out = $1, opted_out_at = CASE WHEN $1 THEN now() ELSE NULL END, opted_out_by = CASE WHEN $1 THEN 'stop' ELSE NULL END WHERE kind = $2 AND value = $3", [optChange === 'out', 'phone', from]);
     if (optChange === 'in') await q.query('DELETE FROM sms_opt_outs WHERE phone = $1', [from]);
     await event(q, conv.id, optChange === 'out' ? `${from} replied STOP: texts to this number are blocked` : `${from} opted back in to texts`, { type: 'consent', value: optChange });
   }
@@ -452,11 +532,13 @@ async function findThread(q, { channel, from, to, contactId, threadKey, referenc
   }
   if (channel === 'email' || channel === 'chat') return null; // a new email thread is a new conversation
   if (channel === 'sms') {
+    // Only a thread of this contact (or of none): a number taken off someone, e.g. one that has
+    // a new owner, starts a fresh conversation instead of continuing theirs.
     return one(
       q,
       `SELECT * FROM conversations WHERE their_identity = $1 AND our_identity IS NOT DISTINCT FROM $2
-       AND channel = 'sms' ORDER BY (status <> 'done') DESC, last_message_at DESC LIMIT 1`,
-      [from, to],
+       AND channel = 'sms' AND (contact_id IS NULL OR contact_id = $3) ORDER BY (status <> 'done') DESC, last_message_at DESC LIMIT 1`,
+      [from, to, contactId ?? null],
     );
   }
   // voice: join whatever is open with this person

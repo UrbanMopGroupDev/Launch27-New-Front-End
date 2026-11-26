@@ -48,7 +48,10 @@ keeps its own conversation (a text to the hiring line never joins an Operations 
 and routing rules decide the queue (e.g. the hiring number → HR Queue).
 
 STOP / START (and the other carrier keywords) mark the number opted out or back in; texts to an
-opted-out number are refused.
+opted-out number are refused. Only the person's START undoes a STOP (an agent can untick only an
+opt-out an agent ticked), and a STOP stays even if the number is removed from its contact or the
+contact is deleted. A text from a number an agent removed from a contact starts a new contact and
+conversation rather than continuing theirs (e.g. a number with a new owner).
 
 ## Environments
 

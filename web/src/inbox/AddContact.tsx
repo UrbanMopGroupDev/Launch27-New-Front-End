@@ -118,7 +118,7 @@ export function deleteContactQuestion(c: Deletable) {
   return [
     `Delete ${who}?`,
     'Their emails and phone numbers come off the portal. Their conversations stay in the inbox under the number or email they came from, and a number that replied STOP stays blocked. If they get in touch again, they become a new contact.',
-    c.l27_customer_id || c.l27_team_id ? `Launch27 is not changed: opening this ${c.l27_team_id ? 'cleaner' : 'customer'} again starts a fresh contact.` : '',
+    c.l27_customer_id || c.l27_team_id ? `Launch27 is not changed. Opening this ${c.l27_team_id ? 'cleaner' : 'customer'} again makes a fresh contact, and their conversations go back onto it.` : '',
   ]
     .filter(Boolean)
     .join('\n\n');

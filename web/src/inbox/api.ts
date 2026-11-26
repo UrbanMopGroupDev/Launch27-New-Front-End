@@ -236,6 +236,8 @@ export interface Identity {
   value: string;
   label: string | null;
   opted_out: boolean;
+  // 'stop': they texted STOP (only their START undoes it); 'agent': ticked by hand.
+  opted_out_by?: 'stop' | 'agent' | null;
 }
 
 export interface CallLogRow {

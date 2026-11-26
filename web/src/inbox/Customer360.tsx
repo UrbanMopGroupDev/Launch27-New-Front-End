@@ -10,7 +10,7 @@ import { Icon } from '../components/Icon';
 import { CallButton } from '../components/CallButton';
 import { insights, rhythmLabel, summarySentence, visitStatus, type Insights, type Stage } from '../lib/customer360';
 import { inbox, type Contact } from './api';
-import { linkToCustomer } from './caller';
+import { linkPatch } from './caller';
 import { ago, displayIdentity } from './util';
 import { segmentsApi, type CustomerSegment } from '../segments/api';
 import { SEGMENT_LABEL, SegmentPill, TraitTag, shortDate } from '../segments/ui';
@@ -861,10 +861,14 @@ function LinkToLaunch27({ contact, hideHistory = false }: { contact: Contact; hi
   // If the customer already had a contact, this one was merged into it: open that one instead.
   const link = async (customerId: number) => {
     setError(null);
-    const kept = await linkToCustomer(contact, customerId);
-    queryClient.invalidateQueries({ queryKey: ['inbox'] });
-    if (kept === null) setError("Couldn't link this contact. Try again.");
-    else if (kept !== contact.id && location.pathname === `/contacts/${contact.id}`) navigate(`/contacts/${kept}`, { replace: true });
+    try {
+      const r = await inbox.updateContact(contact.id, linkPatch(contact, customerId));
+      const kept = r.merged_into ?? contact.id;
+      queryClient.invalidateQueries({ queryKey: ['inbox'] });
+      if (kept !== contact.id && location.pathname === `/contacts/${contact.id}`) navigate(`/contacts/${kept}`, { replace: true });
+    } catch (err) {
+      setError((err as Error).message);
+    }
   };
   const label = contact.name || displayIdentity(contact.identities[0]?.value) || 'Unknown';
   return (

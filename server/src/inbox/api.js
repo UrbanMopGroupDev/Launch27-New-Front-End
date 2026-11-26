@@ -10,7 +10,7 @@ import { json as toJson } from '../db/index.js';
 import { lintRules, route } from './routing.js';
 import { DISPOSITIONS, OUR_IDENTITIES, UM } from './seed.js';
 import { EMAIL_READ_ONLY_MESSAGE, EMAIL_SENDING_ENABLED, connectedChannels, sendableIdentities } from './channels.js';
-import { normalizeEmail, normalizeIdentity, normalizePhone, kindForChannel } from './normalize.js';
+import { formatPhone, normalizeEmail, normalizeIdentity, normalizePhone, kindForChannel } from './normalize.js';
 import * as svc from './service.js';
 import { CHANNELS, canEditSettings, getSettings, normalizeCapacity, validateSettings } from './workforce.js';
 
@@ -300,11 +300,13 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
 
   r.get('/conversations/:id', wrap(async (req, res) => {
     const conv = await loadConversation(req, req.params.id);
+    const visible = await visibleQueueIds(req.user);
     const [messages, contact, identities, others, queue, owner, policy] = await Promise.all([
       many(db, 'SELECT m.*, u.name AS author_name FROM messages m LEFT JOIN users u ON u.id = m.author_id WHERE m.conversation_id = $1 ORDER BY m.created_at, m.id', [conv.id]),
       conv.contact_id ? one(db, 'SELECT * FROM contacts WHERE id = $1', [conv.contact_id]) : null,
       conv.contact_id ? many(db, 'SELECT * FROM contact_identities WHERE contact_id = $1 ORDER BY kind, id', [conv.contact_id]) : [],
-      conv.contact_id ? many(db, 'SELECT id, channel, status, subject, last_preview, last_message_at, l27_booking_id FROM conversations WHERE contact_id = $1 AND id <> $2 ORDER BY last_message_at DESC LIMIT 30', [conv.contact_id, conv.id]) : [],
+      // Their other conversations, only the ones this user may see.
+      conv.contact_id ? many(db, 'SELECT id, channel, status, subject, last_preview, last_message_at, l27_booking_id FROM conversations WHERE contact_id = $1 AND id <> $2 AND (queue_id IS NULL OR queue_id = ANY($3::bigint[]) OR owner_id = $4) ORDER BY last_message_at DESC LIMIT 30', [conv.contact_id, conv.id, visible, req.user.id]) : [],
       conv.queue_id ? one(db, 'SELECT * FROM queues WHERE id = $1', [conv.queue_id]) : null,
       conv.owner_id ? one(db, 'SELECT id, name, email, presence FROM users WHERE id = $1', [conv.owner_id]) : null,
       conv.sla_policy_id ? one(db, 'SELECT * FROM sla_policies WHERE id = $1', [conv.sla_policy_id]) : null,
@@ -492,7 +494,11 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       const contact = await one(q, 'SELECT * FROM contacts WHERE id = $1', [contact_id]);
       if (!contact) throw new svc.InboxError(404, 'Contact not found');
       const kind = kindForChannel(channel);
-      const target = normalizeIdentity(kind, to) || (await one(q, 'SELECT value FROM contact_identities WHERE contact_id = $1 AND kind = $2 ORDER BY id LIMIT 1', [contact.id, kind]))?.value;
+      const typed = normalizeIdentity(kind, to);
+      // An address typed here becomes theirs (refused, naming who has it, if it is someone else's),
+      // so replies from it come back to this contact.
+      if (typed) await svc.addIdentity(q, contact.id, kind, typed);
+      const target = typed || (await one(q, 'SELECT value FROM contact_identities WHERE contact_id = $1 AND kind = $2 ORDER BY id LIMIT 1', [contact.id, kind]))?.value;
       if (!target) throw new svc.InboxError(400, `${contact.name || 'This contact'} has no ${kind === 'email' ? 'email address' : 'phone number'}`);
       const sendable = sendableIdentities(connectors, 'email');
       // Texts start from a number the SMS connector can really send from (the Twilio numbers).
@@ -602,9 +608,30 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     res.json({ rows, counts, limit: CONTACT_LIST_LIMIT });
   }));
 
+  // The contact a merged-away contact went into (following later merges), or null.
+  const mergedInto = async (id) => {
+    let at = id;
+    for (let hop = 0; hop < 10; hop++) {
+      if (hop && (await one(db, 'SELECT 1 FROM contacts WHERE id = $1', [at]))) return at;
+      const row = await one(
+        db,
+        `SELECT object_id FROM audit_log WHERE action = 'contact.merged' AND object_type = 'contact'
+           AND (detail->'merged'->>'id' = $1::text OR detail->'merged' @> jsonb_build_array(jsonb_build_object('id', $1::bigint)))
+         ORDER BY id DESC LIMIT 1`,
+        [at],
+      );
+      if (!row) return null;
+      at = Number(row.object_id);
+    }
+    return null;
+  };
+
   r.get('/contacts/:id', wrap(async (req, res) => {
     const contact = await one(db, 'SELECT * FROM contacts WHERE id = $1', [idOf(req.params.id)]);
-    if (!contact) throw new svc.InboxError(404, 'Contact not found');
+    if (!contact) {
+      const into = await mergedInto(idOf(req.params.id));
+      throw new svc.InboxError(404, into ? 'This contact was merged into another one' : 'Contact not found', into ? { merged_into: into } : null);
+    }
     const visible = await visibleQueueIds(req.user);
     const [identities, conversations] = await Promise.all([
       many(db, 'SELECT * FROM contact_identities WHERE contact_id = $1 ORDER BY kind, id', [contact.id]),
@@ -704,6 +731,7 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     };
     const keys = Object.keys(patch).filter((k) => patch[k] !== undefined);
     if (!keys.length) throw new svc.InboxError(400, 'Nothing to change');
+    if (patch.l27_customer_id != null && patch.l27_team_id != null) throw new svc.InboxError(400, 'Link a Launch27 customer or a cleaner, one at a time');
     const startId = idOf(req.params.id);
     const out = await db.tx(async (q) => {
       let id = startId;
@@ -714,6 +742,9 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
         if (patch[col] == null || String(patch[col]) === String(cur[col] ?? '')) continue;
         const other = await one(q, `SELECT * FROM contacts WHERE ${col} = $1 AND id <> $2`, [patch[col], id]);
         if (!other) continue;
+        // An agent took one of this contact's emails or phones off that person: not theirs.
+        const disowned = await one(q, 'SELECT r.kind, r.value FROM contact_identity_removals r JOIN contact_identities i ON i.kind = r.kind AND i.value = r.value AND i.contact_id = $2 WHERE r.contact_id = $1 LIMIT 1', [other.id, id]);
+        if (disowned) throw new svc.InboxError(409, `${disowned.kind === 'phone' ? formatPhone(disowned.value) : disowned.value} was taken off ${other.name || 'that Launch27 contact'} by an agent, so this contact isn't linked to them.`, { contact: svc.contactSummary(other) });
         const self = await one(q, `UPDATE contacts SET ${col} = NULL WHERE id = $1 RETURNING *`, [id]);
         if (!svc.canMerge(other, self)) throw new svc.InboxError(409, `${other.name || 'That Launch27 record'} already has a contact, and it is linked to a different Launch27 ${col === 'l27_customer_id' ? 'cleaner' : 'customer'} than this one.`, { contact: svc.contactSummary(other) });
         await svc.mergeContacts(q, other.id, id, { actorId: req.user.id, reason: `linked to Launch27 ${col === 'l27_team_id' ? 'cleaner' : 'customer'} #${patch[col]}` });
@@ -732,6 +763,7 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       // A Launch27 customer or cleaner is never marked spam or wrong number.
       if ((patch.l27_customer_id != null || patch.l27_team_id != null) && patch.caller_flag === undefined) sets.push('caller_flag = NULL');
       const row = await one(q, `UPDATE contacts SET ${[...sets, 'updated_at = now()'].join(', ')} WHERE id = $1 RETURNING *`, params);
+      if (patch.l27_customer_id != null || patch.l27_team_id != null) await svc.reclaimHistory(q, row);
       await svc.audit(q, req.user.id, 'contact.updated', 'contact', id, { ...Object.fromEntries(keys.map((k) => [k, patch[k]])), merged_from: mergedInto ? startId : undefined });
       return { ...row, merged_into: mergedInto };
     });
@@ -786,54 +818,27 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     const { customer_id, team_id } = req.body || {};
     if (!customer_id && !team_id) throw new svc.InboxError(400, 'customer_id or team_id is required');
     const col = customer_id ? 'l27_customer_id' : 'l27_team_id';
-    const what = customer_id ? 'customer' : 'cleaner';
     const id = l27Id(customer_id || team_id, col);
     const find = () => one(db, `SELECT * FROM contacts WHERE ${col} = $1`, [id]);
     const existing = await find();
     if (existing) {
-      // Keep their email and phones current with Launch27 (a changed email would otherwise
-      // leave the Email button and inbound matching on the old address), except ones an agent
-      // took off this contact and ones on another contact. Best effort.
+      // Keep their emails and phones current with Launch27 (a changed email would otherwise leave
+      // the Email button and inbound matching on the old address), except ones an agent took off
+      // this contact; a contact with no Launch27 link that has one of them joins this one. Best effort.
       try {
         const info = customer_id ? await l27.customer(req.bearer, id) : await l27.team(req.bearer, id);
-        await db.tx(async (q) => {
-          const removed = new Set((await many(q, 'SELECT kind, value FROM contact_identity_removals WHERE contact_id = $1', [existing.id])).map((x) => `${x.kind}:${x.value}`));
-          for (const i of info.identities) {
-            const v = normalizeIdentity(i.kind, i.value);
-            if (v && !removed.has(`${i.kind}:${v}`)) await svc.addIdentity(q, existing.id, i.kind, v, i.label, { ifTaken: 'skip' });
-          }
-        });
+        return res.json(await db.tx((q) => svc.refreshFromL27(q, existing, info, { actorId: req.user.id })));
       } catch (err) {
         log('warn', 'could not refresh contact details from Launch27', { contact_id: existing.id, error: err.message });
+        return res.json((await find()) || existing);
       }
-      return res.json(existing);
     }
     const info = customer_id ? await l27.customer(req.bearer, id) : await l27.team(req.bearer, id);
     try {
-      const contact = await db.tx(async (q) => {
-        // Someone who already wrote in or was saved by hand (same email or phone) becomes this
-        // person's contact rather than a second one (several such contacts become one). A
-        // contact linked to a different Launch27 record keeps its email or phone.
-        const owners = [];
-        for (const i of info.identities) {
-          const o = await svc.identityOwner(q, i.kind, i.value);
-          if (o && o[col] == null && !owners.some((x) => Number(x.id) === Number(o.id))) owners.push(o);
-        }
-        if (!owners.length) return svc.createContact(q, info);
-        let keep = owners[0];
-        for (const o of owners.slice(1)) {
-          if (svc.canMerge(keep, o)) keep = await svc.mergeContacts(q, keep.id, o.id, { actorId: req.user.id, reason: `same email or phone as Launch27 ${what} #${id}` });
-        }
-        const linked = await one(
-          q,
-          `UPDATE contacts SET ${col} = $2, roles = $3::jsonb, name = COALESCE(NULLIF(btrim(name), ''), $4), caller_flag = NULL, updated_at = now() WHERE id = $1 RETURNING *`,
-          [keep.id, id, toJson([...new Set([...(keep.roles || []), ...info.roles])]), info.name || null],
-        );
-        for (const i of info.identities) await svc.addIdentity(q, linked.id, i.kind, i.value, i.label, { ifTaken: 'skip' });
-        await svc.audit(q, req.user.id, 'contact.linked', 'contact', linked.id, { [col]: id });
-        return linked;
-      });
-      res.status(201).json(contact);
+      // Someone who already wrote in or was saved by hand (same email or phone) becomes this
+      // person's contact rather than a second one; a contact of another Launch27 person keeps
+      // its email or phone. Conversations of a deleted earlier contact of theirs come back.
+      res.status(201).json(await db.tx((q) => svc.contactForL27(q, info, { actorId: req.user.id })));
     } catch (err) {
       // Opened by someone else at the same moment: theirs is the one.
       const again = err.code === '23505' ? await find() : null;

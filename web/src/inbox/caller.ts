@@ -96,10 +96,12 @@ export async function identifyCaller(phone: string, simulated = false, canSave =
 // If the customer already has a contact, the two become one (theirs is kept). Returns the id of
 // the contact to open from now on, or null if linking failed.
 const OPEN_LEAD = /^(new|attempt|contacted)/i;
-export async function linkToCustomer(contact: { id: number; roles: string[]; lead_stage: string | null }, customerId: number): Promise<number | null> {
+export function linkPatch(contact: { roles: string[]; lead_stage: string | null }, customerId: number) {
   const roles = [...new Set([...contact.roles, 'customer'])] as ('customer' | 'cleaner' | 'applicant' | 'system')[];
-  const patch = { l27_customer_id: customerId, roles, ...(contact.lead_stage && OPEN_LEAD.test(contact.lead_stage) ? { lead_stage: 'Booked' } : {}) };
-  return inbox.updateContact(contact.id, patch).then((r) => r.merged_into ?? contact.id, () => null);
+  return { l27_customer_id: customerId, roles, ...(contact.lead_stage && OPEN_LEAD.test(contact.lead_stage) ? { lead_stage: 'Booked' } : {}) };
+}
+export async function linkToCustomer(contact: { id: number; roles: string[]; lead_stage: string | null }, customerId: number): Promise<number | null> {
+  return inbox.updateContact(contact.id, linkPatch(contact, customerId)).then((r) => r.merged_into ?? contact.id, () => null);
 }
 
 // The label on the call card.
