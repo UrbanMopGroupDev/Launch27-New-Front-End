@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { blockMinutes, buildBoard, distanceKm, fmtClock, localMinutes, rankCandidates, statusOf, workingWindow, type AvailabilityRow, type DispatchBooking } from './dispatch';
+import { blockMinutes, buildBoard, distanceKm, fmtClock, localMinutes, rankCandidates, statusOf, workingWindow, breakHit, fmtWindow, type WorkingWindow, type AvailabilityRow, type DispatchBooking } from './dispatch';
 
 // 2026-11-02 is a Monday; 13:00Z = 8:00am in Toronto/Ottawa (EST after Nov 1).
 const DAY = '2026-11-02';
@@ -31,6 +31,15 @@ describe('dispatch', () => {
     // A date row with neither a day off nor times does not wipe out the weekly hours.
     expect(workingWindow([...rows, { date: DAY, weekday: null, start_time: null, end_time: null, dayoff: false } as unknown as AvailabilityRow], DAY)).toEqual({ start: 540, end: 1020 });
     expect(workingWindow(undefined, DAY)).toBeNull();
+  });
+
+  it('reads a split day as one window with a break', () => {
+    const split: AvailabilityRow[] = [{ date: null, weekday: 1, start_time: '14:15', end_time: '18:00', dayoff: false }, { date: null, weekday: 1, start_time: '08:00', end_time: '13:00', dayoff: false }];
+    const win = workingWindow(split, DAY) as WorkingWindow;
+    expect(win).toEqual({ start: 480, end: 1080, breaks: [[780, 855]] });
+    expect(fmtWindow(win)).toBe('8am–1pm, 2:15pm–6pm');
+    expect(breakHit(win, 720, 840)).toEqual([780, 855]);
+    expect(breakHit(win, 855, 1000)).toBeNull();
   });
 
   it('uses per-cleaner hours, else splits the duration', () => {

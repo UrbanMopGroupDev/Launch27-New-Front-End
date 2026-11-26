@@ -79,16 +79,38 @@ export const fmtClock = (min: number) => {
 };
 
 /** A cleaner's working window on a date (date-specific row wins over the weekly one). */
-export function workingWindow(rows: AvailabilityRow[] | undefined, date: string): { start: number; end: number } | 'off' | null {
+// A day can have several blocks (8–1 and 2:15–6): the window runs from the first start to the
+// last end, with the closed stretches in between as `breaks`.
+export interface WorkingWindow { start: number; end: number; breaks?: [number, number][] }
+export const breakHit = (win: WorkingWindow, start: number, end: number) => (win.breaks || []).find(([a, b]) => start < b && end > a) || null;
+export const fmtWindow = (win: WorkingWindow) => {
+  const edges = [win.start, ...(win.breaks || []).flat(), win.end];
+  return edges.reduce<string[]>((out, x, i) => (i % 2 ? [...out, `${fmtClock(edges[i - 1])}–${fmtClock(x)}`] : out), []).join(', ');
+};
+export function workingWindow(rows: AvailabilityRow[] | undefined, date: string): WorkingWindow | 'off' | null {
   if (!rows) return null;
   const dow = new Date(`${date}T12:00:00`).getDay();
   // A date row only overrides the weekly hours when it says something: a day off, or its own times
   // (Launch27 can return a row for a date with neither; that is not a day off).
   const says = (r: AvailabilityRow) => r.dayoff || (r.start_time && r.end_time);
-  const row = rows.find((r) => r.date && r.date.slice(0, 10) === date && says(r)) || rows.find((r) => !r.date && r.weekday === dow);
-  if (!row) return null;
-  if (row.dayoff || !row.start_time || !row.end_time) return 'off';
-  return { start: hhmmToMinutes(row.start_time), end: hhmmToMinutes(row.end_time) };
+  const dated = rows.filter((r) => r.date && r.date.slice(0, 10) === date && says(r));
+  const day = dated.length ? dated : rows.filter((r) => !r.date && r.weekday === dow);
+  if (!day.length) return null;
+  const open = day
+    .filter((r) => !r.dayoff && r.start_time && r.end_time)
+    .map((r): [number, number] => [hhmmToMinutes(r.start_time!), hhmmToMinutes(r.end_time!)])
+    .filter(([a, b]) => b > a)
+    .sort((x, y) => x[0] - y[0]);
+  if (!open.length) return 'off';
+  const blocks: [number, number][] = [];
+  for (const [a, b] of open) {
+    const last = blocks[blocks.length - 1];
+    if (last && a <= last[1]) last[1] = Math.max(last[1], b);
+    else blocks.push([a, b]);
+  }
+  const win: WorkingWindow = { start: blocks[0][0], end: blocks[blocks.length - 1][1] };
+  if (blocks.length > 1) win.breaks = blocks.slice(1).map((b, i): [number, number] => [blocks[i][1], b[0]]);
+  return win;
 }
 
 /** Length of one cleaner's part of a booking, in minutes. */
@@ -138,7 +160,7 @@ export function buildBoard(bookings: DispatchBooking[], availability: Map<number
       for (let j = i + 1; j < blocks.length; j++) {
         if (overlaps(blocks[i], blocks[j])) blocks[i].conflict = blocks[j].conflict = true;
       }
-      if (win === 'off' || (win && (blocks[i].start < win.start || blocks[i].end > win.end))) blocks[i].outside = true;
+      if (win === 'off' || (win && (blocks[i].start < win.start || blocks[i].end > win.end || breakHit(win, blocks[i].start, blocks[i].end)))) blocks[i].outside = true;
     }
   }
   return rows;
@@ -194,9 +216,9 @@ export function rankCandidates(
       } else if (clash) {
         fit = 'busy';
         note = `Busy ${fmtClock(clash.start)}–${fmtClock(clash.end)}`;
-      } else if (win && (span.start < win.start || span.end > win.end)) {
+      } else if (win && (span.start < win.start || span.end > win.end || breakHit(win, span.start, span.end))) {
         fit = 'outside';
-        note = `Works ${fmtClock(win.start)}–${fmtClock(win.end)}`;
+        note = `Works ${fmtWindow(win)}`;
       } else if (!win) {
         fit = 'unknown';
         note = 'No hours set';

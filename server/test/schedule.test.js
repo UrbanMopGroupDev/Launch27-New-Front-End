@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseCleaner, customerPrefs, cycleWeek, cycleWeeks, frequencyKind, fitsDay, rankCleaners, workingWindow, openGaps, mainCleaner, seriesDates } from '../src/schedule/rules.js';
+import { nameMatches, nameIs, resolvePrefs, windowBlocks, openMinutes, parseCleaner, customerPrefs, cycleWeek, cycleWeeks, frequencyKind, fitsDay, rankCleaners, workingWindow, openGaps, mainCleaner, seriesDates } from '../src/schedule/rules.js';
 import { createSchedule } from '../src/schedule/service.js';
 import { createWriteLog } from '../src/writes.js';
 import { openDb } from '../src/db/index.js';
@@ -35,6 +35,53 @@ describe('schedule: cleaner codes and tags', () => {
     assert.deepEqual(p.avoid, ['amy']);
     assert.deepEqual(p.prefers, ['loveline']);
     assert.ok(customerPrefs([{ name: '#female cleaner only' }]).femaleOnly);
+  });
+});
+
+describe('schedule: names on client tags', () => {
+  test('"do not assign" errs toward ruling out; "prefers" has to be exact', () => {
+    // Near spellings and accents are the same name; so is every cleaner sharing the first name.
+    assert.ok(nameMatches('Sylvia K', 'silvia'));
+    assert.ok(nameMatches('Sílvia Perez', 'silvia'));
+    assert.ok(nameMatches('Maria A', 'maria') && nameMatches('Maria B', 'maria'));
+    assert.ok(nameMatches('Katherine D', 'catherine'));
+    // Short names are not stretched (Maria is not Marie), and other names stay out.
+    assert.ok(!nameMatches('Marie T', 'maria'));
+    assert.ok(!nameMatches('Silvana R', 'silvia'));
+    // A last initial narrows it; words that are not an initial are ignored.
+    assert.ok(nameMatches('Silvia Perez', 'silvia p') && !nameMatches('Silvia Khan', 'silvia p'));
+    assert.ok(nameMatches('Fatu B', "fatu cleaner's request"));
+    // Prefers: exact first name only.
+    assert.ok(nameIs('Caysi M', 'caysi') && nameIs('Caysi M', 'caysi m'));
+    assert.ok(!nameIs('Sylvia K', 'silvia') && !nameIs('Caysi M', 'caysi t'));
+  });
+  test('wishes resolved against the cleaners: unknown and shared names are reported, not guessed', () => {
+    const cleaners = [{ id: 1, name: 'Maria A', assignable: true }, { id: 2, name: 'Maria B', assignable: true }, { id: 3, name: 'Sylvia K', assignable: true }, { id: 4, name: 'Caysi M', assignable: true }, { id: 5, name: 'Caysi T', assignable: false }];
+    const r = resolvePrefs(customerPrefs(['Do not assign Silvia', 'Do not assign Zed', 'Prefers Maria', 'Prefers Caysi']), cleaners);
+    assert.deepEqual([...r.avoidIds], [3]);
+    assert.deepEqual([...r.preferIds], [4], 'the one Caysi taking bookings');
+    assert.deepEqual(r.unmatched, ['zed']);
+    assert.deepEqual(r.ambiguous, [{ name: 'maria', cleaners: ['Maria A', 'Maria B'] }]);
+    assert.deepEqual([...resolvePrefs(customerPrefs(['Prefers Maria B']), cleaners).preferIds], [2]);
+  });
+});
+
+describe('schedule: a split day (8-1, then 2:15-6)', () => {
+  const rows = [{ weekday: 5, date: null, dayoff: false, start_time: '14:15', end_time: '18:00' }, { weekday: 5, date: null, dayoff: false, start_time: '08:00', end_time: '13:00' }];
+  const FRI = '2026-11-06';
+  test('the break is closed: nothing is booked across it, gaps and hours leave it out', () => {
+    const w = workingWindow(rows, FRI);
+    assert.deepEqual([...w], [480, 1080]);
+    assert.deepEqual(w.breaks, [[780, 855]]);
+    assert.deepEqual(windowBlocks(w), [[480, 780], [855, 1080]]);
+    assert.equal(openMinutes(w), 525);
+    assert.equal(fitsDay({ window: w, start: 600, duration: 180, place: {} }).ok, true);
+    assert.equal(fitsDay({ window: w, start: 720, duration: 120, place: {} }).reason, 'outside hours');
+    assert.equal(fitsDay({ window: w, start: 780, duration: 60, place: {} }).ok, false);
+    assert.equal(fitsDay({ window: w, start: 855, duration: 180, place: {} }).ok, true);
+    assert.deepEqual(openGaps(w, [], 120), [[480, 780], [855, 1080]]);
+    // An ordinary day has no breaks.
+    assert.equal(workingWindow([rows[1]], FRI).breaks, undefined);
   });
 });
 
@@ -123,6 +170,7 @@ function world() {
     B(3, '2026-11-05', 9, 'One time', 2),
   ];
   const posts = [];
+  const profiles = {}; // customer id -> profile tag names, as Launch27 has them right now
   const fetchImpl = async (url, init = {}) => {
     const u = new URL(url);
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'content-type': 'application/json' } });
@@ -154,10 +202,12 @@ function world() {
       const off = Number(u.searchParams.get('offset') || 0);
       return json(list.slice(off, off + 100));
     }
+    const cust = u.pathname.match(/^\/v1\/staff\/customers\/(\d+)$/);
+    if (cust && profiles[cust[1]]) return json({ id: Number(cust[1]), tags_info: profiles[cust[1]].map((name) => ({ name })) });
     return json({ error: 'nf' }, 404);
   };
   const opts = {}; // test switches: refuseRange, availability: 'down'
-  return { teams, avail, dated, bookings, posts, fetchImpl, opts };
+  return { teams, avail, dated, bookings, posts, profiles, fetchImpl, opts };
 }
 
 describe('schedule: sync, plan, assign, changes', () => {
@@ -260,6 +310,56 @@ describe('schedule: sync, plan, assign, changes', () => {
     const one = after.find((i) => i.kind === 'cancelled');
     await s.resolveChange(one.id, 'dismissed', null);
     assert.ok((await s.changes()).items.every((i) => i.id !== one.id));
+  });
+
+  test('client tags are read live from the profile: slots, the booking form and assigning all respect them', async () => {
+    const w = world();
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const s = createSchedule({ db, config, fetchImpl: w.fetchImpl, log: quiet, now: () => NOW });
+    await s.sync();
+    // Tagged after the sync: the snapshot knows nothing, the profile does.
+    w.profiles[1] = ['Do not assign Ann', 'Prefers Bea'];
+    const stale = await s.findSlots({ customer_id: 1, duration: 180, kind: 'bi' });
+    assert.equal(stale.slots[0].cleaner.name, 'Ann Usual', 'without a login only the synced tags are known');
+    assert.equal(stale.wishes.source, 'synced');
+    const live = await s.findSlots({ customer_id: 1, duration: 180, kind: 'bi' }, 'user-bearer');
+    assert.ok(live.slots.length > 0 && live.slots.every((x) => x.cleaner.name === 'Bea Backup'));
+    assert.deepEqual([live.wishes.source, live.wishes.prefs.avoid, live.wishes.prefs.prefers], ['profile', ['Ann'], ['Bea']]);
+    assert.ok(live.slots[0].reasons.some((r) => r.text === 'Client asked for them'));
+    assert.deepEqual(live.asked_for, ['Bea Backup']);
+    // Asked for on the tags, but the usual cleaner is still allowed: the asked-for cleaner comes first.
+    w.profiles[1] = ['Prefers Bea', 'Do not assign Zed'];
+    const both = await s.findSlots({ customer_id: 1, duration: 180, kind: 'bi' }, 'user-bearer');
+    assert.equal(both.slots[0].cleaner.name, 'Bea Backup');
+    assert.ok(both.slots.some((x) => x.cleaner.name === 'Ann Usual'));
+    assert.deepEqual(both.wishes.prefs.unmatched, ['Zed']);
+    w.profiles[1] = ['Do not assign Ann', 'Prefers Bea'];
+    // Usual cleaner only, but she is ruled out: nothing, and the count of other cleaners' slots respects the tag too.
+    const same = await s.findSlots({ customer_id: 1, duration: 180, kind: 'bi', cleaner: 'same' }, 'user-bearer');
+    assert.equal(same.slots.length, 0);
+    assert.ok(same.any_count > 0);
+    // A client with no bookings in the planner still has their profile tags applied.
+    w.profiles[77] = ['DO NOT assign Bea'];
+    const fresh = await s.findSlots({ customer_id: 77, duration: 180, kind: 'one' }, 'user-bearer');
+    assert.ok(fresh.slots.length > 0 && fresh.slots.every((x) => x.cleaner.name !== 'Bea Backup'));
+    assert.deepEqual(fresh.wishes.prefs.avoid, ['Bea']);
+    // The booking form: who is ruled out and who was asked for.
+    const wishes = await s.clientWishes(1, 'user-bearer');
+    assert.deepEqual(wishes.blocked, [{ id: 1, name: 'Ann Usual', reason: 'Client asked never to have them' }]);
+    assert.deepEqual(wishes.asked_for, [2]);
+    assert.deepEqual(await s.clientWishes(999, 'user-bearer'), { prefs: null, source: null, blocked: [], asked_for: [] });
+    // Assigning the ruled-out cleaner is refused and nothing is sent to Launch27.
+    const un = await s.unassigned();
+    await assert.rejects(() => s.assign({ visit_keys: un.series[0].visits.map((v) => v.key), cleaner_id: 1 }, 'user-bearer'), (err) => err.status === 409 && /asked never to have Ann Usual/.test(err.message));
+    assert.equal(w.posts.length, 0);
+    // "Assign anyway": the office overrides the tag for one visit.
+    assert.equal((await s.assign({ visit_keys: [un.series[0].visits[0].key], cleaner_id: 1, override: true }, 'user-bearer')).assigned, 1);
+    assert.equal(w.posts.length, 1);
+    assert.equal((await s.assign({ visit_keys: un.series[0].visits.map((v) => v.key), cleaner_id: 2 }, 'user-bearer')).assigned, 2);
+    // Launch27 unreachable: fall back to the synced tags rather than failing the search.
+    const down = createSchedule({ db, config, fetchImpl: async (url, init) => (/\/customers\//.test(url) ? Promise.reject(new Error('down')) : w.fetchImpl(url, init)), log: quiet, now: () => NOW });
+    assert.equal((await down.findSlots({ customer_id: 1, duration: 180, kind: 'bi' }, 'user-bearer')).wishes.source, 'synced');
   });
 
   test('regenerated sample data starts the planner fresh instead of flagging every visit as moved', async () => {
