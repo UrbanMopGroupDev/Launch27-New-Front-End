@@ -16,6 +16,7 @@ import { SchedulingInsightsPage } from './pages/SchedulingInsights';
 import { UtilizationPage } from './pages/Utilization';
 import { KpiScorecardPage } from './pages/KpiScorecard';
 import { ComplaintsPage } from './pages/Complaints';
+import { ComplaintTrackerPage } from './pages/ComplaintTracker';
 import { CleanerReportsPage, CleanerReportPage } from './pages/CleanerReports';
 import { CleanerReports2Page, CleanerReport2Page } from './pages/CleanerReports2';
 import { CustomerInsightsPage } from './pages/CustomerTrends';
@@ -96,6 +97,8 @@ export function App() {
         <Route path="reports/utilization" element={<UtilizationPage />} />
         <Route path="reports/kpi" element={<KpiScorecardPage />} />
         <Route path="complaints" element={<ComplaintsPage />} />
+        <Route path="complaint-tracking" element={<ComplaintTrackerPage />} />
+        <Route path="complaint-tracking/:id" element={<ComplaintTrackerPage />} />
         <Route path="reports/headroom" element={<Navigate to="/reports/utilization" replace />} />
         <Route path="reports/cleaners" element={<CleanerReportsPage />} />
         <Route path="reports/cleaners/:id" element={<CleanerReportPage />} />

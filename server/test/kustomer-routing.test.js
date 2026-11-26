@@ -139,7 +139,7 @@ describe('migration 0036: a database seeded before the Kustomer export', () => {
     await team('Weekend crew', ['operations']);
     const hiringConv = await one("INSERT INTO conversations (channel, queue_id) SELECT 'sms', id FROM queues WHERE slug = 'hiring' RETURNING id");
 
-    assert.deepEqual(await runMigrations(db), ['0036_kustomer_routing']);
+    assert.equal((await runMigrations(db))[0], '0036_kustomer_routing'); // later migrations run after it
 
     const queues = await rows('SELECT slug, name, restricted FROM queues ORDER BY position');
     assert.deepEqual(queues.slice(0, QUEUES.length).map((q) => q.slug), QUEUES.map((q) => q.slug));

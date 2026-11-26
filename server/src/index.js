@@ -28,6 +28,8 @@ import { createEmailSync } from './inbox/email/sync.js';
 import { createL27Client, createSyncBearer } from './inbox/lookup.js';
 import { OUR_IDENTITIES } from './inbox/seed.js';
 import { createComplaints } from './complaints/service.js';
+import { createTracker } from './tracker/service.js';
+import { createAdjustments } from './tracker/adjustments.js';
 import { createKustomerMigration } from './kustomer-migration/service.js';
 import { createClassifier } from './complaints/classify.js';
 
@@ -150,10 +152,15 @@ const kustomerMigration = createKustomerMigration({
   },
 });
 await kustomerMigration.recover();
-const app = createApp(config, { db, sessions, fetchImpl, log, jobs, connectors, qa: { store: qaStore, sender: qaSender }, segments, schedule, reports, writes, commercial, placement, commercialPlan, complaints, smsProviders, kustomerMigration, kpi });
+// Complaints tracker and Cleaner Adjustment form (the office's two Kustomer tools). Production
+// loads recent complaints from Kustomer on request; dev and QA get a few invented ones.
+const tracker = createTracker({ db, config, fetchImpl, log });
+const adjustments = createAdjustments({ db, config, fetchImpl, log });
+const app = createApp(config, { db, sessions, fetchImpl, log, jobs, connectors, qa: { store: qaStore, sender: qaSender }, segments, schedule, reports, writes, commercial, placement, commercialPlan, complaints, smsProviders, kustomerMigration, kpi, tracker, adjustments });
 if (config.sampleData && config.l27Mode === 'mock') {
   await loadSampleInbox(db, { fetchImpl, baseUrl: config.l27BaseUrl, log: (level, msg, fields) => log[level](msg, fields) }).catch((err) => log.error('sample inbox failed', { error: err.message }));
 }
+await tracker.ensureSample().catch((err) => log.warn('complaint tracker: sample complaints not loaded', { error: err.message }));
 
 // In production the server also hosts the built front end.
 const webDist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../web/dist');

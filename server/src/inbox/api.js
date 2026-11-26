@@ -5,6 +5,7 @@ import { canSeeUtilization } from '../config.js';
 import { canSeeKpi } from '../kpi/service.js';
 import { registerComplaintRoutes } from '../complaints/api.js';
 import { registerKustomerRoutes } from '../kustomer-migration/api.js';
+import { registerTrackerRoutes } from '../tracker/api.js';
 import express from 'express';
 import { json as toJson } from '../db/index.js';
 import { lintRules, route } from './routing.js';
@@ -29,7 +30,7 @@ export function diffRules(before, after) {
 }
 const many = async (q, sql, p) => (await q.query(sql, p)).rows;
 
-export function createInboxRouter({ db, sessions, cookieName, config, l27, connectors = {}, log = (lvl, msg, f) => console.error(msg, f), qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, complaints = null, smsProviders = {}, kustomerMigration = null, kpi = null }) {
+export function createInboxRouter({ db, sessions, cookieName, config, l27, connectors = {}, log = (lvl, msg, f) => console.error(msg, f), qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, complaints = null, smsProviders = {}, kustomerMigration = null, kpi = null, tracker = null, adjustments = null }) {
   const r = express.Router();
   // A reply can carry email files (about 18 MB, a third more as base64); everything else is small.
   r.post('/conversations/:id/messages', express.json({ limit: '26mb' }));
@@ -1379,6 +1380,7 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
 
   if (complaints) registerComplaintRoutes(r, { complaints, needRole, wrap });
   if (kustomerMigration) registerKustomerRoutes(r, { migration: kustomerMigration, needRole, wrap });
+  if (tracker || adjustments) registerTrackerRoutes(r, { tracker, adjustments, needRole, wrap });
 
   // ---------- KPI scorecard (read-only; docs/kpi.md) ----------
   if (kpi) {

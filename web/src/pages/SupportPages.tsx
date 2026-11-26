@@ -1,3 +1,4 @@
+import { CleanerAdjustmentCard } from '../tracker/CleanerAdjustment';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -116,6 +117,7 @@ export function ContactPage() {
         </section>
         <section className="card no-pad">
           {c.roles.includes('cleaner') ? <Cleaner360 contact={c} /> : <Customer360 contact={c} hideHistory={storyHere} />}
+          <CleanerAdjustmentCard contact={c} />
         </section>
       </div>
       {/* Not in Launch27 (e.g. a profile the Kustomer import made): their Story is every conversation. */}
