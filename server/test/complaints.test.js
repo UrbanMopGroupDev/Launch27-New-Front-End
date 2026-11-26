@@ -9,7 +9,7 @@ import { outcomeAt, journeyAt, recleanCost } from '../src/complaints/journey.js'
 import { normalizeSettings, canApprove, rungForRefund, budgetStatus, DEFAULT_SETTINGS } from '../src/complaints/settings.js';
 import { buildPlaybook } from '../src/complaints/playbook.js';
 import { mapStatus, toCase, discover, createKustomerClient, findListing } from '../src/complaints/sources/kustomer.js';
-import { createComplaints } from '../src/complaints/service.js';
+import { createComplaints, buildReviewStats } from '../src/complaints/service.js';
 import { createReports } from '../src/reports/service.js';
 import { createSchedule } from '../src/schedule/service.js';
 import { createMockLaunch27 } from '../src/mock/launch27.js';
@@ -594,5 +594,148 @@ describe('complaints: automatic updates', () => {
     await complaints.saveSettings({ auto: { enabled: false } });
     assert.equal(await complaints.maybeRun(), false);
     await db.close();
+  });
+});
+
+describe('complaints: checking the taxonomy by hand', () => {
+  test('accuracy is measured against what the engine said, and thin samples are flagged', () => {
+    const rows = [
+      ...Array.from({ length: 18 }, () => ({ verdict: 'correct', was_category: 'quality_missed', was_classified_by: 'claude', source: 'kustomer' })),
+      { verdict: 'wrong_category', was_category: 'quality_missed', now_category: 'quality_rushed', was_classified_by: 'claude', source: 'kustomer' },
+      { verdict: 'not_complaint', was_category: 'quality_missed', was_classified_by: 'rules', source: 'gmail' },
+      { verdict: 'not_complaint', was_category: 'other', was_classified_by: 'rules', source: 'gmail' },
+    ];
+    const s = buildReviewStats(rows, [{ category: 'quality_missed', n: 40 }, { category: 'punctuality', n: 7 }]);
+    assert.equal(s.total.checked, 21);
+    const missed = s.by_category.find((c) => c.key === 'quality_missed');
+    assert.equal(missed.accuracy, 0.9);
+    assert.equal(missed.enough, true);
+    assert.equal(missed.waiting, 40);
+    assert.equal(s.by_category.find((c) => c.key === 'other').enough, false, 'one check is not a result');
+    assert.equal(s.by_category.find((c) => c.key === 'punctuality').checked, 0, 'unchecked categories still listed');
+    assert.equal(s.by_source.find((c) => c.key === 'gmail').not_complaint, 2);
+    assert.deepEqual(s.confusions, [{ from: 'quality_missed', to: 'quality_rushed', n: 1 }]);
+    assert.equal(s.waiting, 47);
+  });
+
+  test('a batch, the three verdicts, and what each does to the playbook', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await schedule.sync();
+    await reports.sync();
+    const to = (await reports.visitsSnapshot()).to;
+    const from = new Date(Date.parse(to) - 182 * 86_400_000).toISOString().slice(0, 10);
+    const complaints = createComplaints({ db, config, reports, fetchImpl, log: quiet });
+    await complaints.run({ from, to });
+    const before = (await complaints.listCases({ from, to })).length;
+    const queue = await complaints.reviewQueue({ per: 2 });
+    assert.ok(queue.length >= 3, 'needs three cases to check');
+    const perCat = {};
+    for (const c of queue) perCat[c.category] = (perCat[c.category] || 0) + 1;
+    assert.ok(Object.values(perCat).every((n) => n <= 2), 'at most the asked number per category');
+    assert.ok(queue.every((c) => !('raw' in c) && !('source_id' in c)));
+    assert.ok(queue.every((c) => c.text), 'the rating comment is shown to the reviewer');
+    const [a, b, c] = queue;
+    const other = a.category === 'punctuality' ? 'communication' : 'punctuality';
+    await complaints.reviewCase(a.id, { verdict: 'correct' }, null);
+    await complaints.reviewCase(b.id, { verdict: 'wrong_category', category: other === b.category ? 'scope_booking' : other }, null);
+    await complaints.reviewCase(c.id, { verdict: 'not_complaint' }, null);
+    const stats = await complaints.reviewStats();
+    assert.equal(stats.total.checked, 3);
+    assert.equal(stats.total.correct, 1);
+    assert.equal(stats.total.not_complaint, 1);
+    assert.equal(stats.by_category.find((g) => g.key === b.category).wrong_category >= 1, true, 'counted against the category the engine chose');
+    assert.equal((await complaints.getCase(b.id)).classified_by, 'human');
+    assert.equal((await complaints.listCases({ from, to })).length, before - 1, 'not-a-complaint leaves the case list');
+    assert.equal((await complaints.playbook({ from, to })).totals.cases, before - 1);
+    const again = await complaints.reviewQueue({ per: 100 });
+    assert.ok(![a.id, b.id, c.id].some((id) => again.some((x) => x.id === id)), 'checked cases are not shown again');
+    // A later run must not bring the excluded case back or undo the person's category.
+    await complaints.run({ from, to });
+    assert.equal((await complaints.listCases({ from, to })).length, before - 1);
+    assert.equal((await complaints.getCase(b.id)).classified_by, 'human');
+    await assert.rejects(complaints.reviewCase(999999, { verdict: 'correct' }, null), /Not found/);
+    await db.close();
+  });
+});
+
+describe('complaints: every playbook number is traceable', () => {
+  const mk = () => {
+    const cases = [];
+    const resolutions = [];
+    const costs = [];
+    const outcomes = [];
+    let id = 1;
+    const add = (category, { rung, action, cost = 0, outcome, opened = '2026-06-10T12:00:00Z', matched = true, one_time = false, o120 }) => {
+      const c = { id: id++, source: 'kustomer', opened_at: opened, category, l27_customer_id: matched ? 500 + id : null, classified_by: 'claude', one_time };
+      cases.push(c);
+      if (rung) resolutions.push({ case_id: c.id, rung, action });
+      if (cost) costs.push({ case_id: c.id, kind: 'refund', amount: cost, estimated: false });
+      if (outcome) outcomes.push({ case_id: c.id, day: 60, outcome });
+      if (o120) outcomes.push({ case_id: c.id, day: 90, outcome: o120 }, { case_id: c.id, day: 120, outcome: o120 });
+      return c;
+    };
+    return { cases, resolutions, costs, outcomes, add, build: () => buildPlaybook({ cases, resolutions, costs, outcomes, visits: [], from: '2026-05-01', to: '2026-11-15', settings: normalizeSettings({}), today: '2026-11-16' }) };
+  };
+
+  test('rates show their numerator and denominator, and the rest is explained', () => {
+    const m = mk();
+    for (let i = 0; i < 5; i++) m.add('punctuality', { outcome: i < 2 ? 'saved' : i < 3 ? 'partial_save' : 'lost', cost: 100 });
+    m.add('punctuality', { outcome: 'pending', opened: '2026-11-01T12:00:00Z' }); // too recent
+    m.add('punctuality', { matched: false, cost: 40 }); // no Launch27 client
+    m.add('punctuality', { one_time: true, o120: 'rebooked' });
+    m.add('punctuality', { one_time: true, o120: 'not_rebooked' });
+    m.add('punctuality', { outcome: 'pending' }); // old enough, still nothing recorded
+    const t = m.build().taxonomy.find((x) => x.key === 'punctuality');
+    assert.equal(t.n, 10);
+    assert.equal(t.ids.length, 10);
+    assert.equal(t.decided, 5);
+    assert.deepEqual([t.saved_n, t.partial_n, t.lost_n], [2, 1, 2]);
+    assert.equal(t.saved_n + t.partial_n + t.lost_n, t.decided, 'the three verdicts add up to decided');
+    assert.equal(t.saved, 0.4);
+    assert.equal(t.excluded_n, 5);
+    assert.deepEqual(Object.fromEntries(Object.entries(t.excluded).map(([k, v]) => [k, v.length])), { too_recent: 1, unmatched: 1, one_time: 2, no_outcome: 1 });
+    assert.equal(t.decided + t.excluded_n, t.n, 'decided plus not counted is every case');
+    assert.equal(t.avg_cost, 54, 'average over all 10 cases');
+    assert.equal(t.avg_cost_decided, 100, 'average over the same 5 cases the rates use');
+    assert.equal(t.total_cost, 540);
+    assert.equal(t.total_n, 10);
+    assert.deepEqual([t.one_time.n, t.one_time.decided, t.one_time.rebooked_120_n, t.one_time.rebooked_120], [2, 2, 1, 0.5]);
+  });
+
+  test('"cheapest that works" always answers, with a grade and a reason', () => {
+    const m = mk();
+    m.add('communication', { rung: 'L3', action: 'reclean_full', outcome: 'saved' });
+    m.add('communication', { rung: 'L3', action: 'reclean_full', outcome: 'saved' });
+    m.add('communication', { rung: 'L3', action: 'reclean_full', outcome: 'lost' });
+    m.add('communication', { rung: 'L3', action: 'reclean_full', outcome: 'lost' });
+    m.add('scope_booking', { outcome: 'pending', opened: '2026-11-05T12:00:00Z' });
+    m.add('damage', { rung: 'L1', action: 'credit', outcome: 'saved' });
+    const pb = m.build();
+    const by = (k) => pb.taxonomy.find((x) => x.key === k).cheapest_that_works;
+    assert.deepEqual([by('communication').name, by('communication').grade, by('communication').reason], ['Reclean', 'Low', '4 cases with a known outcome, 2 saved']);
+    assert.equal(by('communication').basis, 'compared');
+    assert.equal(by('damage').basis, 'few');
+    assert.equal(by('damage').reason, '1 case with a known outcome, 1 saved');
+    assert.equal(by('scope_booking').basis, 'no_outcomes');
+    assert.match(by('scope_booking').reason, /no outcomes yet/);
+    assert.ok(pb.taxonomy.every((x) => x.cheapest_that_works && x.cheapest_that_works.grade));
+  });
+
+  test('ladder, months and totals carry the case ids behind them', () => {
+    const m = mk();
+    const a = m.add('quality_missed', { rung: 'L5', action: 'refund', cost: 60, outcome: 'saved' });
+    const b = m.add('damage', { outcome: 'lost' });
+    b.hard_route = 'damage_over_100';
+    const pb = m.build();
+    assert.deepEqual(pb.ladder.find((r) => r.rung === 'L5').ids, [a.id]);
+    assert.deepEqual(pb.totals.hard_routed_ids, [b.id]);
+    assert.deepEqual(pb.hard_routes.find((h) => h.key === 'damage_over_100').ids, [b.id]);
+    assert.ok(pb.ladder.every((r) => !r.ids.includes(b.id)), 'escalated cases are not on the ladder');
+    assert.deepEqual(pb.totals.ids.sort(), [a.id, b.id]);
+    assert.ok(pb.excluded_labels.too_recent);
   });
 });

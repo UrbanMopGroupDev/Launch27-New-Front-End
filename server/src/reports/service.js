@@ -6,8 +6,9 @@ import { addDays, daysBetween, localDate, mondayOf } from '../schedule/rules.js'
 import { harmonizePartners } from '../commercial/partners.js';
 import { clampRange, utilizationFacts, utilizationReport, withRecordedDays } from './utilization.js';
 import { UTILIZATION } from './utilization-config.js';
-import { PERIODS, V2, cleanerRow, cleanerStats, emptyStats, mainBefore, flagsFor, indexVisits, median, outsideArea, pct, periodRange, regularClients, round1, sameCleaner, slimReportVisit, teamLong, timing, weeklySeries } from './compute.js';
+import { FIELD_COLUMNS, fieldDaily, PERIODS, V2, findRecleans, cleanerRow, cleanerStats, emptyStats, mainBefore, flagsFor, indexVisits, median, outsideArea, pct, periodRange, regularClients, round1, sameCleaner, slimReportVisit, teamLong, timing, weeklySeries } from './compute.js';
 import { CHANGE_LOG_START, CHURN, DROP_REASONS, RAISE_THRESHOLDS } from './raise-config.js';
+import { createSheetReader, nameMatcher, parseAdjustmentRows } from './adjustments.js';
 import { ladderOf, raiseReview, rateHistory, reliability, reliabilityWeeks, restrictiveTags, slackSummary } from './raise.js';
 
 
@@ -88,6 +89,7 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
       });
       snap = { ...data, taken_at: new Date(now()).toISOString(), byCustomer: indexVisits(visits) };
       cache.clear();
+      await syncAdjustments().catch(() => null);
       log.info('reports updated', { visits: visits.length });
       return { visits: visits.length };
     } catch (err) {
@@ -266,10 +268,12 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
       log.warn('raise readiness data unavailable', { error: err.message });
       return [];
     });
-    const [drops, complaints, reviews] = await Promise.all([
+    const [drops, complaints, reviews, adj, adjSync] = await Promise.all([
       safe(db.query('SELECT id, cleaner_id, visit_key, booking_id, customer, visit_at, dropped_at, reason, source FROM cleaner_drops WHERE dropped_at >= $1 ORDER BY dropped_at', [`${since}T00:00:00Z`])),
       safe(db.query("SELECT id, cleaner_id, cleaner_name, subject, created_at, complaint FROM conversations WHERE cleaner_id IS NOT NULL AND complaint IS NOT NULL AND created_at >= $1 ORDER BY created_at DESC", [`${since}T00:00:00Z`])),
       safe(db.query('SELECT id, cleaner_id, review_date, reviewer, link, bonus_paid, created_at FROM cleaner_google_reviews ORDER BY review_date DESC')),
+      safe(db.query('SELECT row_no, cleaner_name, kind, amount, on_date, customer, details, submitted_by FROM pay_adjustments WHERE valid AND on_date >= $1 ORDER BY on_date DESC', [since])),
+      safe(db.query('SELECT synced_at, row_count, error FROM pay_adjustments_sync WHERE id = 1')),
     ]);
     const group = (rows) => {
       const m = new Map();
@@ -286,6 +290,8 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
       drops: group(drops.map((d) => ({ ...d, id: Number(d.id), visit_at: iso(d.visit_at), dropped_at: iso(d.dropped_at), dropped_on: localDate(d.dropped_at), visit_date: localDate(d.visit_at) }))),
       complaints: group(complaints.map((c) => ({ id: Number(c.id), cleaner_id: Number(c.cleaner_id), subject: c.subject, date: localDate(c.created_at), outcome: c.complaint?.outcome || null, status: c.complaint?.status || null, booking_id: c.complaint?.booking_id ?? null }))),
       reviews: group(reviews.map((r) => ({ id: Number(r.id), cleaner_id: Number(r.cleaner_id), date: day(r.review_date), reviewer: r.reviewer, link: r.link, bonus_paid: !!r.bonus_paid }))),
+      adjRows: adj.map((a) => ({ row_no: a.row_no, cleaner_name: a.cleaner_name, kind: a.kind, amount: Number(a.amount), date: day(a.on_date), customer: a.customer, details: a.details, submitted_by: a.submitted_by })),
+      adjSync: adjSync[0] ? { synced_at: adjSync[0].synced_at ? new Date(adjSync[0].synced_at).toISOString() : null, rows: adjSync[0].row_count, error: adjSync[0].error } : null,
     };
   }
 
@@ -316,10 +322,10 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
   }
 
   // The 13-week figures the verdict is built from.
-  function raiseInput({ st, info, s, side, rates, ratedShare, today13, from13, to13 }) {
+  function raiseInput({ st, info, s, side, rates, ratedShare, today13, from13, to13, adj = null }) {
     const row = cleanerRow(st);
     const start = startOf(info, rates, s);
-    const rel = reliability({ drops: side.drops.get(st.id) || [], checks: { missing: st.missing, late: [] }, from: from13, to: today13 });
+    const rel = withSheet(reliability({ drops: side.drops.get(st.id) || [], checks: { missing: st.missing, late: [] }, from: from13, to: today13 }), adj?.by.get(st.id), from13, today13, !!adj?.connected);
     return {
       today: today13,
       start_date: start.date,
@@ -340,7 +346,7 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
       clients_started: row.clients_started,
       hours_per_week: round1((row.onsite_hours || row.booked_hours) / (RAISE_THRESHOLDS.windowDays / 7)),
       restrictive: restrictiveTags(info?.tags || []),
-      google_reviews: (side.reviews.get(st.id) || []).filter((r) => r.date >= from13 && r.date <= today13).length,
+      google_reviews: (side.reviews.get(st.id) || []).filter((r) => r.date >= from13 && r.date <= today13).length + sheetReviews(adj?.by.get(st.id), from13, today13).length,
       rate: rates?.history?.current ?? null,
       ladder: ladderOf(info?.tags || []),
       margin: row.margin,
@@ -421,6 +427,116 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
     };
   }
 
+  // ---------- pay adjustments sheet ----------
+  // Copies the sheet's late cancels, no-shows, late arrivals and Google review bonuses into
+  // pay_adjustments (replaced whole). Synthetic rows on dev/QA. Read-only on the sheet.
+  async function syncAdjustments() {
+    const sheet = config.paySheet || {};
+    try {
+      let rows;
+      if (config.l27Mode === 'mock') rows = mockAdjustments();
+      else if (!sheet.id) throw new Error('No sheet is set (PAY_ADJUSTMENTS_SHEET_ID), so late cancels, no-shows and Google reviews aren\'t connected');
+      else if (!sheet.serviceAccount) throw new Error('No Google service account is set (GMAIL_SERVICE_ACCOUNT_JSON), so the pay adjustments sheet can\'t be read');
+      else rows = parseAdjustmentRows(await createSheetReader({ serviceAccount: sheet.serviceAccount, fetchImpl, now }).values(sheet.id, sheet.range));
+      await db.tx(async (q) => {
+        await q.query('DELETE FROM pay_adjustments');
+        for (let i = 0; i < rows.length; i += 200) {
+          const chunk = rows.slice(i, i + 200);
+          const vals = [];
+          const ph = chunk.map((r, k) => {
+            vals.push(r.row_no, r.cleaner_name, r.kind, r.amount, r.on_date, r.customer, r.details, r.submitted_by, r.valid);
+            return `(${Array.from({ length: 9 }, (_, j) => `$${k * 9 + j + 1}`).join(',')})`;
+          });
+          await q.query(`INSERT INTO pay_adjustments (row_no, cleaner_name, kind, amount, on_date, customer, details, submitted_by, valid) VALUES ${ph.join(',')}`, vals);
+        }
+        await q.query('INSERT INTO pay_adjustments_sync (id, synced_at, row_count, error) VALUES (1, now(), $1, NULL) ON CONFLICT (id) DO UPDATE SET synced_at = now(), row_count = EXCLUDED.row_count, error = NULL', [rows.length]);
+      });
+      log.info('pay adjustments synced', { rows: rows.length });
+      return { rows: rows.length };
+    } catch (err) {
+      await db.query('INSERT INTO pay_adjustments_sync (id, error) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET error = EXCLUDED.error', [String(err.message).slice(0, 500)]).catch(() => {});
+      log.warn('pay adjustments sync failed', { error: err.message });
+      throw err;
+    }
+  }
+
+  // Dev/QA: a few made-up sheet rows per cleaner, from the names in the synthetic Launch27.
+  function mockAdjustments() {
+    const names = new Map();
+    for (const v of snap?.visits || []) for (const t of v.teams) names.set(t.id, t.name);
+    const t = today();
+    const out = [];
+    let row = 2;
+    const add = (name, kind, daysAgo, amount, customer) => out.push({ row_no: row++, cleaner_name: name, kind, amount, on_date: addDays(t, -daysAgo), customer, details: null, submitted_by: 'Synthetic', valid: true });
+    [...names.entries()].sort((a, b) => a[0] - b[0]).forEach(([, name], i) => {
+      if (i % 3 === 0) add(name, 'google_review', 9 + i, 10, 'Sample Client');
+      if (i % 5 === 0) add(name, 'google_review', 30 + i, 10, 'Another Client');
+      if (i % 4 === 1) add(name, 'late_cancel', 12 + i, -30, 'Sample Client');
+      if (i % 6 === 3) add(name, 'late_cancel', 40 + i, -30, 'Another Client');
+      if (i % 7 === 5) add(name, 'no_show', 20 + i, -100, 'Sample Client');
+      if (i % 5 === 2) add(name, 'late_arrival', 15 + i, -30, 'Sample Client');
+    });
+    return out;
+  }
+
+  // Sheet rows per cleaner (matched by name), and the names that matched nobody.
+  function adjustmentsBy(side, cleaners) {
+    const match = nameMatcher(cleaners);
+    const by = new Map();
+    const unmatched = new Map();
+    for (const a of side.adjRows || []) {
+      const id = match(a.cleaner_name);
+      if (id == null) {
+        unmatched.set(a.cleaner_name, (unmatched.get(a.cleaner_name) || 0) + 1);
+        continue;
+      }
+      if (!by.has(id)) by.set(id, []);
+      by.get(id).push(a);
+    }
+    return { by, unmatched: [...unmatched.entries()].map(([name, rows]) => ({ name, rows })).sort((a, b) => b.rows - a.rows), connected: !!side.adjSync?.synced_at };
+  }
+
+  // Adds the sheet's no-shows and late cancels to the app's own drop log (the same visit is
+  // counted once). With the sheet connected, reliability is known for the whole period.
+  function withSheet(rel, rows, from, to, connected) {
+    if (!connected) return rel;
+    const mine = (rows || []).filter((a) => a.date >= from && a.date <= to);
+    const seen = new Set(rel.incidents.filter((i) => i.kind === 'no_show' || i.kind === 'last_minute').map((i) => `${i.kind}|${i.visit_date}`));
+    const fresh = mine.filter((a) => (a.kind === 'no_show' && !seen.has(`no_show|${a.date}`)) || (a.kind === 'late_cancel' && !seen.has(`last_minute|${a.date}`)));
+    const ns = fresh.filter((a) => a.kind === 'no_show').length;
+    const lc = fresh.length - ns;
+    const sheetIncidents = mine.filter((a) => a.kind === 'late_arrival' || fresh.includes(a)).map((a) => ({
+      date: a.date, visit_date: a.date, customer: a.customer, kind: a.kind === 'late_cancel' ? 'last_minute' : a.kind === 'late_arrival' ? 'late_reported' : a.kind,
+      label: a.kind === 'no_show' ? 'No-show' : a.kind === 'late_cancel' ? 'Late cancel' : 'Late arrival (reported)', reason: `Pay adjustments sheet${a.amount ? ` · $${Math.abs(a.amount)}` : ''}${a.submitted_by ? ` · ${a.submitted_by}` : ''}`, lead_hours: null, counted: a.kind !== 'late_arrival', note: null, id: null,
+    }));
+    return {
+      ...rel,
+      known: true, partial: false, covers_from: from,
+      no_shows: (rel.no_shows || 0) + ns,
+      last_minute: (rel.last_minute || 0) + lc,
+      short_notice: rel.short_notice || 0, with_notice: rel.with_notice || 0, sick_days: rel.sick_days || 0, uncoded: rel.uncoded || 0,
+      late_reported: mine.filter((a) => a.kind === 'late_arrival').length,
+      issues: rel.issues + ns + lc,
+      incidents: [...rel.incidents, ...sheetIncidents].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)),
+    };
+  }
+
+  const sheetReviews = (rows, from, to) => (rows || []).filter((a) => a.kind === 'google_review' && a.date >= from && a.date <= to).map((a) => ({ date: a.date, reviewer: a.customer || 'Client', amount: a.amount, submitted_by: a.submitted_by }));
+
+  // What admins see about the sheet connection (the page says how to fix it).
+  function adjustmentsInfo(side, adj, admin) {
+    const sheet = config.paySheet || {};
+    return {
+      connected: adj.connected,
+      synced_at: side.adjSync?.synced_at || null,
+      rows: side.adjSync?.rows ?? null,
+      error: admin ? side.adjSync?.error || null : undefined,
+      share_with: admin ? sheet.serviceAccount?.client_email || null : undefined,
+      sheet_url: admin && sheet.id ? `https://docs.google.com/spreadsheets/d/${sheet.id}` : undefined,
+      unmatched: admin ? adj.unmatched.slice(0, 40) : undefined,
+    };
+  }
+
   // ---------- 2.0 helpers ----------
   // Churn: a recurring client of ours with nothing booked ahead (their schedule is cancelled).
   // No clean for CHURN.days (60) days = churned, on the day it reaches 60; under that = at risk.
@@ -434,23 +550,33 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
       if (src) upcoming = new Set(src.visits.filter((v) => v.customer_id != null && v.date >= today).map((v) => String(v.customer_id)));
     } catch { /* planner not running: churn unknown */ }
     const byCleaner = new Map();
-    if (!upcoming) return { known: false, byCleaner };
+    // Every recurring client per regular cleaner (the base for churn %): cleaner -> last-clean dates.
+    const book = new Map();
+    if (!upcoming) return { known: false, byCleaner, book };
     for (const [cid, list] of s.byCustomer) {
       const last = list.at(-1);
       if (!last || last.kind === 'one' || list.length < 2) continue;
       if (last.partner_kind === 'homemaking' || last.partner_kind === 'program') continue;
+      const cleaner = mainBefore(list, last.at + 1);
+      if (cleaner == null) continue;
+      if (!book.has(cleaner)) book.set(cleaner, []);
+      book.get(cleaner).push(last.date);
       if (upcoming.has(String(cid))) continue;
       const gap = daysBetween(last.date, today);
       if (gap < CHURN.minGap) continue;
-      const cleaner = mainBefore(list, last.at + 1);
-      if (cleaner == null) continue;
       const churned = gap >= CHURN.days;
-      const entry = { customer_id: cid, customer: last.customer, last_clean: last.date, days_since: gap, freq: last.freq, cleans: list.filter((v) => v.teams.some((t) => t.id === cleaner)).length, status: churned ? 'churned' : 'at_risk', churned_on: churned ? addDays(last.date, CHURN.days) : null };
+      const withThem = list.filter((v) => v.teams.some((t) => t.id === cleaner));
+      const recent = list.slice(-6);
+      const share = recent.filter((v) => v.teams.some((t) => t.id === cleaner)).length / recent.length;
+      // "Loyal": a long-standing client who was almost always with this one cleaner. When such a
+      // client leaves us altogether, it's worth a call to find out why.
+      const loyal = withThem.length >= CHURN.loyalCleans && share >= CHURN.loyalShare;
+      const entry = { customer_id: cid, customer: last.customer, last_clean: last.date, last_cleaner: last.teams.map((t) => t.name), days_since: gap, freq: last.freq, cleans: withThem.length, total_cleans: list.length, share: Math.round(share * 100) / 100, together_since: withThem[0]?.date || null, loyal, status: churned ? 'churned' : 'at_risk', churned_on: churned ? addDays(last.date, CHURN.days) : null };
       if (!byCleaner.has(cleaner)) byCleaner.set(cleaner, []);
       byCleaner.get(cleaner).push(entry);
     }
     for (const l of byCleaner.values()) l.sort((a, b) => (a.last_clean < b.last_clean ? 1 : -1));
-    return { known: true, byCleaner };
+    return { known: true, byCleaner, book };
   }
 
   // Typical hours from the end of a clean to its rating, for ratings in [from, to].
@@ -466,22 +592,78 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
   };
 
   // 2.0's "Losing clients": recurring clients who churned in the period (not Leslie's keeps).
-  const churnFlag = (x) => (x.churned >= CHURN.flagAt ? [{ kind: 'losing', label: 'Losing clients', detail: `${x.churned} recurring client${x.churned === 1 ? '' : 's'} churned this period${x.at_risk ? `, ${x.at_risk} more at risk` : ''}` }] : []);
+  const churnFlag = (x) => [
+    ...(x.churned >= CHURN.flagAt ? [{ kind: 'losing', label: 'Losing clients', detail: `${x.churned} recurring client${x.churned === 1 ? '' : 's'} churned this period${x.at_risk ? `, ${x.at_risk} more at risk` : ''}` }] : []),
+    ...(x.loyal_left >= CHURN.loyalFlagAt ? [{ kind: 'loyal_left', label: 'Loyal clients leaving', detail: `${x.loyal_left} long-standing clients who were almost always with them stopped booking. Worth a call to those clients` }] : []),
+  ];
 
-  // The 2.0 columns for one cleaner.
-  function extras2({ st, row, rel, side, churn, from, today, admin }) {
+  // Re-cleans found in the Launch27 visits, per cleaner of the original clean (cached per build).
+  const recleanCache = new Map();
+  function recleansFor(s) {
+    const k = `${s.taken_at}|${s.visits.length}`;
+    if (!recleanCache.has(k)) {
+      recleanCache.clear();
+      recleanCache.set(k, findRecleans(s.byCustomer));
+    }
+    return recleanCache.get(k);
+  }
+
+  // Reliability score: the share of their visits with no reliability issue. Issues are no-shows,
+  // late cancellations (< 24 h), short-notice drops (24–72 h) and visits with a missing check-in
+  // or check-out. Drops are only known from the change log's start (Oct 31, 2026).
+  function reliabilityScore(rel, visits) {
+    const drops = (rel.no_shows || 0) + (rel.last_minute || 0) + (rel.short_notice || 0);
+    const issues = drops + (rel.missing_checks || 0);
+    const base = visits + drops;
+    return {
+      score: base ? Math.round((1 - issues / base) * 1000) / 1000 : null,
+      issues,
+      no_shows: rel.no_shows,
+      late_cancels: rel.last_minute,
+      short_notice: rel.short_notice,
+      missing_checks: rel.missing_checks,
+      drops_known: rel.no_shows != null,
+    };
+  }
+
+  // The 2.0 columns for one cleaner, with the rows behind each number (drill-downs).
+  function extras2({ st, row, rel, side, churn, from, today, admin, recleans, adj }) {
     const complaints = (side.complaints.get(st.id) || []).filter((c) => c.date >= from && c.date <= today);
     const lost = churn.known ? churn.byCleaner.get(st.id) || [] : null;
+    const rc = (recleans.get(st.id) || []).filter((e) => e.date >= from && e.date <= today).sort((a, b) => (a.date < b.date ? 1 : -1));
+    const churnedNow = lost ? lost.filter((c) => c.status === 'churned' && c.churned_on >= from && c.churned_on <= today) : [];
+    const atRisk = lost ? lost.filter((c) => c.status === 'at_risk') : [];
+    // Churn %: churned clients ÷ the recurring clients they were the regular cleaner for in the
+    // period (those with a clean in the period, plus those who churned in it).
+    const recurring = lost ? (churn.book.get(st.id) || []).filter((d) => d >= from).length + churnedNow.filter((c) => c.last_clean < from).length : null;
+    const fromSheet = sheetReviews(adj.by.get(st.id), from, today);
+    const fromApp = (side.reviews.get(st.id) || []).filter((g) => g.date >= from && g.date <= today).map((g) => ({ date: g.date, reviewer: g.reviewer, amount: g.bonus_paid ? 10 : 0, submitted_by: null }));
+    const reviews = [...fromSheet, ...fromApp].sort((a, b) => (a.date < b.date ? 1 : -1));
+    const inc = (kind) => rel.incidents.filter((i) => i.kind === kind && i.counted).map((i) => ({ date: i.date, customer: i.customer, reason: i.reason }));
     return {
+      reliability_score: reliabilityScore(rel, row.visits),
+      reclean_rate: row.visits ? Math.round((rc.length / row.visits) * 1000) / 1000 : null,
       engagement: row.visits ? Math.round((row.rated / row.visits) * 1000) / 1000 : null,
-      churned: lost ? lost.filter((c) => c.status === 'churned' && c.churned_on >= from && c.churned_on <= today).length : null,
-      at_risk: lost ? lost.filter((c) => c.status === 'at_risk').length : null,
+      churned: lost ? churnedNow.length : null,
+      recurring_clients: recurring,
+      churn_rate: recurring ? Math.round((churnedNow.length / recurring) * 1000) / 1000 : null,
+      at_risk: lost ? atRisk.length : null,
+      loyal_left: churnedNow.filter((c) => c.loyal).length,
       moved: (st.lost || []).filter((l) => l.to != null).length,
-      recleans: complaints.filter((c) => c.outcome === 'return clean').length,
+      recleans: rc.length,
       complaints_n: complaints.length,
-      // Reliability on 2.0: last-minute cancellations + no-shows only (null = not recorded yet).
+      google_reviews: reviews.length,
+      review_bonus: reviews.reduce((a, g) => a + (g.amount > 0 ? g.amount : 0), 0),
       reliability2: rel.no_shows == null ? null : rel.no_shows + rel.last_minute,
       margin_dollars: admin && st.marginRev ? Math.round(st.marginRev - st.marginPay) : undefined,
+      drill: {
+        churn: [...churnedNow, ...atRisk],
+        ratings: [...(st.ratedList || [])].sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 150),
+        recleans: rc,
+        late_cancels: inc('last_minute'),
+        no_shows: inc('no_show'),
+        reviews,
+      },
     };
   }
 
@@ -498,14 +680,15 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
     const { ov, util } = await plannerView(locations);
     const info = new Map((ov?.rows || []).map((r) => [r.id, r]));
     const churn = await churnFor(s, today);
+    const recleans = recleansFor(s);
+    const adj = adjustmentsBy(side, [...new Map([...[...stats.values()].map((x) => [x.id, x.name]), ...(ov?.rows || []).map((x) => [x.id, x.name])]).entries()].map(([id, name]) => ({ id, name })));
     const rows = [];
     for (const st of stats.values()) {
       const i = info.get(st.id);
       const u = util.get(st.id);
       const row = cleanerRow(st, { name: i?.name });
-      const rel = reliability({ drops: side.drops.get(st.id) || [], checks: { missing: st.missing, late: [] }, from, to: today });
-      const reviews = (side.reviews.get(st.id) || []).filter((g) => g.date >= from && g.date <= today);
-      const extra = extras2({ st, row, rel, side, churn, from, today, admin });
+      const rel = withSheet(reliability({ drops: side.drops.get(st.id) || [], checks: { missing: st.missing, late: [] }, from, to: today }), adj.by.get(st.id), from, today, adj.connected);
+      const extra = extras2({ st, row, rel, side, churn, from, today, admin, recleans, adj });
       rows.push({
         ...extra,
         ...row,
@@ -516,7 +699,6 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
         hours_filled: u && u.capacity ? pct(u.booked, u.capacity) : null,
         stars: i?.stars ?? null, ratings_count: i?.ratings_count ?? null,
         reliability: { issues: rel.issues, no_shows: rel.no_shows, last_minute: rel.last_minute, short_notice: rel.short_notice, missing_checks: rel.missing_checks, partial: rel.partial, covers_from: rel.covers_from, uncoded: rel.uncoded },
-        google_reviews: reviews.length,
         flags: [...flagsFor(st, u, team, V2), ...churnFlag(extra)],
       });
     }
@@ -545,10 +727,13 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
         feedback_hours: feedbackHours(s, from, to),
         margin: admin ? marginOf(sumStats) : undefined,
         churned: churn.known ? rows.reduce((a, r) => a + (r.churned || 0), 0) : null,
+        recurring_clients: churn.known ? rows.reduce((a, r) => a + (r.recurring_clients || 0), 0) : null,
+        churn_rate: churn.known ? pct(rows.reduce((a, r) => a + (r.churned || 0), 0), rows.reduce((a, r) => a + (r.recurring_clients || 0), 0)) : null,
         at_risk: churn.known ? rows.reduce((a, r) => a + (r.at_risk || 0), 0) : null,
       },
       churn_known: churn.known,
       churn_days: CHURN.days,
+      adjustments: adjustmentsInfo(side, adj, admin),
       rows,
     };
   }
@@ -574,13 +759,15 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
     const start = startOf(i, rates, s);
     const lastRatings = s.visits.filter((v) => v.rating && v.teams.some((t) => t.id === cid)).sort((a, b) => b.at - a.at).slice(0, 8).map((v) => ({ date: v.date, customer: v.customer, r: v.rating.r, comment: v.rating.comment }));
     const firstSeen = rates?.first || null;
-    const rel = reliability({ drops: side.drops.get(cid) || [], checks: { missing: base.missing, late: base.lateList }, from, to: today });
+    const adj = adjustmentsBy(side, [...new Map([...[...stats.values()].map((x) => [x.id, x.name]), ...(ov?.rows || []).map((x) => [x.id, x.name])]).entries()].map(([k, name]) => ({ id: k, name })));
+    const rel = withSheet(reliability({ drops: side.drops.get(cid) || [], checks: { missing: base.missing, late: base.lateList }, from, to: today }), adj.by.get(cid), from, today, adj.connected);
     const churn = await churnFor(s, today);
-    const extra = extras2({ st: base, row, rel, side, churn, from, today, admin });
+    const recleans = recleansFor(s);
+    const extra = extras2({ st: base, row, rel, side, churn, from, today, admin, recleans, adj });
     let raise;
     if (admin) {
       const st13 = stats13.get(cid) || emptyStats(cid, i?.name);
-      const input = raiseInput({ st: st13, info: i, s, side, rates, ratedShare: ratedShareOf(s, r13.from, r13.to), today13: today, from13: r13.from, to13: r13.to });
+      const input = raiseInput({ st: st13, info: i, s, side, rates, ratedShare: ratedShareOf(s, r13.from, r13.to), today13: today, from13: r13.from, to13: r13.to, adj });
       const review = raiseReview(input);
       const name = i?.name || row.name;
       raise = {
@@ -604,10 +791,13 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
       lost: (base.lost || []).map((l) => ({ customer: l.customer, stopped: l.stopped, to: l.to != null ? (ov?.rows.find((r) => r.id === l.to)?.name || 'another cleaner') : null })),
       ratings: lastRatings,
       last40: [...(base.last40 || [])].reverse(),
-      reliability: { ...rel, weeks: reliabilityWeeks(rel, from, today) },
+      reliability: { ...rel, weeks: reliabilityWeeks(rel, from, today, adj.connected ? '2000-01-01' : undefined) },
+      sheet_reviews: sheetReviews(adj.by.get(cid), from, today),
+      adjustments: adjustmentsInfo(side, adj, admin),
       finished_early: [...base.earlyList].sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 30),
       complaints: (side.complaints.get(cid) || []).filter((c) => c.date >= from),
       google_reviews: side.reviews.get(cid) || [],
+      recleans: (recleans.get(cid) || []).filter((e) => e.date >= from && e.date <= today).sort((a, b) => (a.date < b.date ? 1 : -1)),
       churn: { known: churn.known, days: CHURN.days, clients: churn.known ? (churn.byCleaner.get(cid) || []).filter((c) => c.status === 'at_risk' || c.churned_on >= from) : [] },
       raise,
     };
@@ -628,12 +818,13 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
     const ratedShare = ratedShareOf(s, r13.from, r13.to);
     const { ov } = await plannerView(null);
     const info = new Map((ov?.rows || []).map((r) => [r.id, r]));
+    const adj = adjustmentsBy(side, (ov?.rows || []).map((r) => ({ id: r.id, name: r.name })));
     const out = [];
     for (const st of stats13.values()) {
       const i = info.get(st.id);
       if (!i?.assignable) continue;
       const rt = rates.get(st.id);
-      const review = raiseReview(raiseInput({ st, info: i, s, side, rates: rt, ratedShare, today13: today, from13: r13.from, to13: r13.to }));
+      const review = raiseReview(raiseInput({ st, info: i, s, side, rates: rt, ratedShare, today13: today, from13: r13.from, to13: r13.to, adj }));
       if (review.underlying !== 'ready' || review.verdict === 'thin' || review.verdict === 'ceiling') continue;
       if (review.verdict === 'ladder' && !review.ladder?.next) continue;
       if (rt?.history?.changed_on && daysBetween(rt.history.changed_on, today) < 90) continue;
@@ -784,5 +975,27 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
 
   // The raw year of visits (for the Commercial area).
   const visitsSnapshot = () => need();
-  return { sync, start, maybeRun, scheduling, utilization, cleaners, cleaner, cleaners2, cleaner2, status, visitsSnapshot, recordDrop, codeChange, dropsForChanges, raiseDigest, raiseCheckCandidates, addReview, updateReview, deleteReview, isRunning: () => !!running, mondayOf };
+  // Daily field-operations counts and the next four weeks' hours by area, for the analytics feed.
+  async function fieldFeed({ from = null, to = null } = {}) {
+    const s = await need();
+    const day = (v) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
+    const end = day(to) || addDays(s.today, -1);
+    const start = day(from) || addDays(end, -364);
+    const { ov, util } = await plannerView(null);
+    const area = new Map((ov?.rows || []).map((r) => [r.id, r.area || 'Unknown']));
+    const areas = new Map();
+    for (const [, u] of util) {
+      if (!u.row.assignable) continue;
+      const a = areas.get(u.row.area) || { area: u.row.area || 'Unknown', cleaners: 0, booked: 0, capacity: 0 };
+      a.cleaners += 1; a.booked += u.booked; a.capacity += u.capacity;
+      areas.set(a.area, a);
+    }
+    return {
+      taken_at: s.taken_at, from: start, to: end, columns: FIELD_COLUMNS, rows: fieldDaily(s.visits, s.byCustomer, start, end, area),
+      capacity_columns: ['area', 'assignable_cleaners', 'booked_hours_per_week', 'capacity_hours_per_week', 'unassigned_visits'],
+      capacity: [...areas.values()].map((a) => [a.area, a.cleaners, round1(a.booked / 2), round1(a.capacity / 2), null]).concat([['All areas', [...areas.values()].reduce((x, a) => x + a.cleaners, 0), null, null, ov?.counts?.unassigned_visits ?? null]]),
+      planner: await plannerHealth('4w'),
+    };
+  }
+  return { fieldFeed, sync, start, maybeRun, scheduling, utilization, cleaners, cleaner, cleaners2, cleaner2, status, visitsSnapshot, syncAdjustments, recordDrop, codeChange, dropsForChanges, raiseDigest, raiseCheckCandidates, addReview, updateReview, deleteReview, isRunning: () => !!running, mondayOf };
 }

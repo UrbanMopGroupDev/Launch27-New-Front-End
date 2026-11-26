@@ -4,33 +4,51 @@ import { ApiError, describeErrors } from '../api';
 export type Outcome = 'saved' | 'partial_save' | 'lost' | 'pending' | 'rebooked' | 'not_rebooked';
 export type Confidence = 'good' | 'fair' | 'thin' | 'none';
 
+export type ExcludedReason = 'one_time' | 'unmatched' | 'too_recent' | 'no_outcome';
+export interface OneTimeStats {
+  n: number; ids: number[];
+  decided: number; decided_ids: number[];
+  decided_90: number; decided_90_ids: number[];
+  rebooked_90: number | null; rebooked_90_n: number; rebooked_90_ids: number[];
+  rebooked_120: number | null; rebooked_120_n: number; rebooked_120_ids: number[];
+  too_early_ids: number[];
+  confidence: Confidence;
+}
+// Every figure carries the ids of the cases behind it. Rates are shares of `decided`.
 export interface OutcomeStats {
-  n: number;
-  decided: number;
-  saved: number | null;
-  partial: number | null;
-  lost: number | null;
+  n: number; ids: number[];
+  decided: number; decided_ids: number[];
+  saved: number | null; saved_n: number; saved_ids: number[];
+  partial: number | null; partial_n: number; partial_ids: number[];
+  lost: number | null; lost_n: number; lost_ids: number[];
+  excluded_n: number;
+  excluded: Partial<Record<ExcludedReason, number[]>>;
+  total_cost: number;
   avg_cost: number | null;
+  avg_cost_decided: number | null;
   median_cost: number | null;
   confidence: Confidence;
-  one_time: { n: number; decided: number; rebooked_90: number | null; rebooked_120: number | null; confidence: Confidence };
+  one_time: OneTimeStats;
 }
+export interface Cheapest { rung: string; name: string; saved: number | null; saved_n: number; avg_cost: number | null; n: number; cases: number; ids: number[]; basis: 'compared' | 'few' | 'no_outcomes'; grade: 'High' | 'Medium' | 'Low'; reason: string }
 
 export interface Rung { rung: string; name: string; tier: string; action: string; label: string; amount?: number; pct?: number }
 
 export interface Playbook {
   window: { from: string; to: string };
-  totals: OutcomeStats & { cases: number; hard_routed: number; by_source: Record<string, number>; total_cost: number };
+  totals: OutcomeStats & { cases: number; hard_routed: number; hard_routed_ids: number[]; by_source: Record<string, number>; total_cost: number };
   taxonomy: (OutcomeStats & {
     key: string;
     label: string;
     share: number | null;
+    total_n: number;
     hard_routed: number;
+    hard_routed_ids: number[];
     typical_rung: string | null;
     typical_name: string | null;
     tones: Record<string, number>;
     by_rung: (OutcomeStats & { rung: string; name: string })[];
-    cheapest_that_works: { rung: string; name: string; saved: number; avg_cost: number | null; n: number } | null;
+    cheapest_that_works: Cheapest | null;
   })[];
   ladder: (Rung & OutcomeStats)[];
   reclean_vs_refund: { key: string; label: string; reclean: OutcomeStats; refund: OutcomeStats; neither: OutcomeStats; verdict: string }[];
@@ -38,8 +56,8 @@ export interface Playbook {
   like_for_like: {
     groups_compared: number;
     matched_pairs: number;
-    reclean: { saved: number; avg_cost: number | null; n: number } | null;
-    refund: { saved: number; avg_cost: number | null; n: number } | null;
+    reclean: { saved: number; avg_cost: number | null; n: number; ids: number[] } | null;
+    refund: { saved: number; avg_cost: number | null; n: number; ids: number[] } | null;
     confidence: Confidence;
     verdict: string;
   };
@@ -47,12 +65,13 @@ export interface Playbook {
     base_rate_per_100: number;
     visits: number;
     linked_complaints: number;
-    rows: { key: string; label: string; visits: number; complaints: number; rate_per_100: number | null; vs_base: number | null; confidence: Confidence }[];
+    linked_ids: number[];
+    rows: { key: string; label: string; visits: number; complaints: number; case_ids: number[]; rate_per_100: number | null; vs_base: number | null; confidence: Confidence }[];
   };
-  hard_routes: { key: string; label: string; n: number }[];
+  hard_routes: { key: string; label: string; n: number; ids: number[] }[];
   response: { first_response_median_hours: number | null; with_response_time: number; decided_by: Record<string, number> };
   baseline: {
-    months: { month: string; revenue: number; cost: number; rate: number | null; cases: number; refunds: number; credits: number; recleans: number }[];
+    months: { month: string; revenue: number; cost: number; rate: number | null; cases: number; case_ids: number[]; refunds: number; credits: number; recleans: number }[];
     average: number | null;
     best: { month: string; rate: number | null } | null;
     worst: { month: string; rate: number | null } | null;
@@ -61,6 +80,7 @@ export interface Playbook {
   };
   gaps: string[];
   thin_threshold: number;
+  excluded_labels: Record<ExcludedReason, string>;
 }
 
 export interface CaseRow {
@@ -87,6 +107,7 @@ export interface CaseRow {
   service: string | null;
   tenure_days: number | null;
   cleaner_name: string | null;
+  original_url: string | null;
 }
 
 export interface CaseDetail extends CaseRow {
@@ -140,6 +161,39 @@ export interface Clients {
   clients_with_complaints: number;
 }
 
+export type Verdict = 'correct' | 'wrong_category' | 'not_complaint';
+export interface ReviewItem {
+  id: number;
+  source: string;
+  opened_at: string;
+  service_date: string | null;
+  customer_name: string | null;
+  category: string;
+  tone: string | null;
+  severity: number | null;
+  hard_route: string | null;
+  summary: string | null;
+  source_status: string | null;
+  classified_by: string;
+  areas_cited: string[];
+  rungs: string | null;
+  title: string | null;
+  text: string | null;
+  resolution_text: string | null;
+  rating: number | null;
+  original_url: string | null;
+}
+export interface ReviewTally { key: string; checked: number; correct: number; wrong_category: number; not_complaint: number; accuracy: number | null; enough: boolean }
+export interface ReviewStats {
+  total: Omit<ReviewTally, 'key'>;
+  by_category: (ReviewTally & { waiting: number })[];
+  by_source: ReviewTally[];
+  by_classifier: ReviewTally[];
+  confusions: { from: string; to: string; n: number }[];
+  min_checks: number;
+  waiting: number;
+}
+
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api/complaints${path}`, { method, credentials: 'same-origin', headers: body ? { 'content-type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined });
   if (res.status === 401) window.dispatchEvent(new Event('l27:logged-out'));
@@ -150,8 +204,8 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   return res.json();
 }
 
-const qs = (w?: { from?: string; to?: string; category?: string }) => {
-  const p = new URLSearchParams(Object.entries(w || {}).filter(([, v]) => v) as [string, string][]).toString();
+const qs = (w?: Record<string, string | number | undefined>) => {
+  const p = new URLSearchParams(Object.entries(w || {}).filter(([, v]) => v) .map(([k, v]) => [k, String(v)])).toString();
   return p ? `?${p}` : '';
 };
 
@@ -163,6 +217,8 @@ export const complaintsApi = {
   case: (id: number) => call<CaseDetail>('GET', `/cases/${id}`),
   reclassify: (id: number, patch: { category?: string; hard_route?: string | null }) => call<CaseDetail>('PATCH', `/cases/${id}`, patch),
   run: (w?: { from?: string; to?: string }) => call<{ started: boolean }>('POST', '/run', w || {}),
+  review: (w?: { category?: string; source?: string; per?: number }) => call<{ queue: ReviewItem[]; stats: ReviewStats }>('GET', `/review${qs(w)}`),
+  submitReview: (id: number, body: { verdict: Verdict; category?: string }) => call<{ ok: boolean; stats: ReviewStats }>('POST', `/cases/${id}/review`, body),
   settings: () => call<{ settings: Settings; rungs: Rung[]; presets: Record<string, { label: string }>; categories: string[]; hard_routes: Record<string, string> }>('GET', '/settings'),
   saveSettings: (s: Settings) => call<{ settings: Settings }>('PUT', '/settings', s),
 };

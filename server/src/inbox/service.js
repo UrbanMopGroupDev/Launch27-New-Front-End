@@ -5,6 +5,8 @@ import { route } from './routing.js';
 import { addBusinessMinutes, URBANMOP_HOURS } from './hours.js';
 import { normalizeEmail, normalizeIdentity, normalizePhone, kindForChannel, isStopWord, isStartWord } from './normalize.js';
 import { EMAIL_READ_ONLY_MESSAGE, EMAIL_SENDING_ENABLED, sendOutbound } from './channels.js';
+import { attachmentName } from './email/mime.js';
+import { signatureHtml, signatureText, textToHtml } from './email/signature.js';
 import { eligibleAgents, getSettings, setStatus as setAgentStatus, workforceTick } from './workforce.js';
 
 const DAY = 24 * 3600_000;
@@ -348,7 +350,40 @@ export async function logCall(q, user, call, { lookup = null, now = new Date() }
 
 // ---------- outbound, notes, events ----------
 
-export async function reply(q, user, convId, { body, channel, to, subject, from, idempotency_key }, { connectors = {} } = {}) {
+// Files on an outgoing email, as the screen sends them: [{ filename, type, data (base64) }].
+// Gmail takes 25 MB per message after encoding, which is about 18 MB of files.
+export const MAX_ATTACHMENTS = 10;
+export const MAX_ATTACHMENT_BYTES = 18 * 1024 * 1024;
+// Gmail refuses these outright; saying so here is clearer than its error.
+const BLOCKED_FILE = /\.(ade|adp|apk|appx|bat|cab|chm|cmd|com|cpl|dll|dmg|exe|hta|ins|isp|iso|jar|js|jse|lib|lnk|mde|msc|msi|msix|msp|mst|nsh|pif|ps1|scr|sct|shb|sys|vb|vbe|vbs|vxd|wsc|wsf|wsh)$/i;
+export function readAttachments(list, channel) {
+  if (!Array.isArray(list) || !list.length) return [];
+  if (channel !== 'email') throw new InboxError(400, 'Files can only be sent by email');
+  if (list.length > MAX_ATTACHMENTS) throw new InboxError(400, `Attach at most ${MAX_ATTACHMENTS} files to one email`);
+  let total = 0;
+  const files = list.map((f) => {
+    const filename = attachmentName(f?.filename);
+    if (BLOCKED_FILE.test(filename)) throw new InboxError(400, `${filename}: Gmail does not allow this kind of file. Zip files with one of these inside are refused too.`);
+    const data = Buffer.from(String(f?.data || ''), 'base64');
+    if (!data.length) throw new InboxError(400, `${filename} is empty`);
+    total += data.length;
+    return { filename, type: /^[\w.+-]+\/[\w.+-]+$/.test(String(f?.type || '')) ? String(f.type).toLowerCase() : 'application/octet-stream', data };
+  });
+  if (total > MAX_ATTACHMENT_BYTES) throw new InboxError(413, `These files are ${(total / 1048576).toFixed(1)} MB together. One email can carry about ${Math.round(MAX_ATTACHMENT_BYTES / 1048576)} MB; send a link for anything larger.`);
+  return files;
+}
+
+// The agent's email signature: their own (Support settings -> My email signature), else their
+// name and the business's sender name.
+export async function signatureFor(q, user) {
+  const own = await one(q, 'SELECT body FROM user_signatures WHERE user_id = $1', [user.id]);
+  const settings = await getSettings(q);
+  const fallback = [user.name || '', settings.email_from_name || 'UrbanMop'].filter(Boolean).join('\n');
+  return { body: own?.body ?? fallback, custom: !!own, fallback };
+}
+
+// cc (email): more addresses to copy, each checked.
+export async function reply(q, user, convId, { body, channel, to, subject, from, idempotency_key, attachments, cc = [] }, { connectors = {} } = {}) {
   const conv = await one(q, 'SELECT * FROM conversations WHERE id = $1', [convId]);
   if (!conv) throw new InboxError(404, 'Conversation not found');
   // The composer sends one key per message: a repeated request returns the first one, unsent again.
@@ -361,6 +396,11 @@ export async function reply(q, user, convId, { body, channel, to, subject, from,
   const ch = channel || conv.channel;
   if (ch === 'voice') throw new InboxError(400, 'Use the phone to call; replies go by email or text');
   if (ch === 'email' && !EMAIL_SENDING_ENABLED) throw new InboxError(403, EMAIL_READ_ONLY_MESSAGE);
+  const files = readAttachments(attachments, ch);
+  const ccList = ch === 'email' && Array.isArray(cc) ? cc.map((a) => String(a || '').trim()).filter(Boolean) : [];
+  const wrongCc = ccList.find((a) => !normalizeIdentity('email', a));
+  if (wrongCc) throw new InboxError(400, `${wrongCc} (Cc) does not look like an email address`);
+  if (ccList.length > 10) throw new InboxError(400, 'Copy up to 10 addresses');
   const kind = kindForChannel(ch);
   const target = normalizeIdentity(kind, to || (ch === conv.channel ? conv.their_identity : null));
   if (!target) throw new InboxError(400, `Pick a ${kind === 'email' ? 'email address' : 'phone number'} to send to`);
@@ -380,6 +420,17 @@ export async function reply(q, user, convId, { body, channel, to, subject, from,
     const base = (conv.subject || '').trim();
     emailSubject = subject?.trim() || (base ? (earlier.length && !/^re:/i.test(base) ? `Re: ${base}` : base) : 'A message from UrbanMop');
   }
+  // Email: formatted (an HTML part next to the plain text) and ending with the agent's
+  // signature, bold and links in the HTML part, readable in the plain text and the timeline.
+  const copies = [...new Set(ccList.map((a) => normalizeIdentity('email', a)))].filter((a) => a !== target);
+  let html = null;
+  let fromName = null;
+  if (ch === 'email') {
+    const sig = (await signatureFor(q, user)).body.trim();
+    html = `<div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; line-height: 1.45;">${textToHtml(body.trimEnd())}${sig ? `<br><br>${signatureHtml(sig)}` : ''}</div>`;
+    if (sig) body = `${body.trimEnd()}\n\n${signatureText(sig)}`;
+    fromName = (await getSettings(q)).email_from_name || null;
+  }
   // Saved first as "sending" (the key's unique index stops a second copy), then handed to the
   // provider; it only shows as sent once the provider has accepted it.
   const reserved = await one(
@@ -390,11 +441,12 @@ export async function reply(q, user, convId, { body, channel, to, subject, from,
     [convId, ch, fromId, target, emailSubject, body, user.id, json(key ? { idempotency_key: key } : {})],
   );
   if (!reserved) return one(q, "SELECT * FROM messages WHERE conversation_id = $1 AND meta->>'idempotency_key' = $2", [convId, key]);
-  const result = await sendOutbound({ channel: ch, from: fromId, to: target, subject: emailSubject, body, thread }, connectors);
+  const result = await sendOutbound({ channel: ch, from: fromId, to: target, cc: copies, subject: emailSubject, body, html, fromName, thread, attachments: files }, connectors);
+  // The sent email's Gmail id and mailbox, so its files can be downloaded later like received ones.
   const msg = await one(
     q,
     `UPDATE messages SET delivery_state = $2, external_id = $3, meta = meta || $4::jsonb WHERE id = $1 RETURNING *`,
-    [reserved.id, result.state, result.external_id || null, json({ provider: result.provider, note: result.note, message_id: result.message_id || undefined })],
+    [reserved.id, result.state, result.external_id || null, json({ provider: result.provider, note: result.note, message_id: result.message_id || undefined, mailbox: result.mailbox || undefined, gmail_id: result.provider === 'gmail' ? result.provider_id || undefined : undefined, attachments: files.length ? files.map((f) => ({ filename: f.filename, type: f.type, size: f.data.length })) : undefined, cc: copies.length ? copies : undefined })],
   );
   // The first email in a conversation names its subject and Gmail thread, so replies find it.
   if (ch === 'email' && conv.channel === 'email') {
@@ -402,7 +454,7 @@ export async function reply(q, user, convId, { body, channel, to, subject, from,
   }
   await q.query(
     `UPDATE conversations SET first_response_at = COALESCE(first_response_at, now()), awaiting_reply_since = NULL,
-            sla_due_at = NULL, sla_warned_at = NULL, last_message_at = now(), last_preview = $2,
+            sla_due_at = NULL, sla_warned_at = NULL, last_message_at = now(), last_preview = $2, draft = NULL, draft_at = NULL,
             owner_id = CASE WHEN $4 THEN COALESCE(owner_id, $3) ELSE owner_id END, status = CASE WHEN status = 'snoozed' THEN 'open' ELSE status END, updated_at = now()
      WHERE id = $1`,
     [convId, body.slice(0, 160), user.id, (await getSettings(q)).assign_on_reply],

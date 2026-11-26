@@ -16,6 +16,11 @@ import { EMAIL_SENDING_ENABLED, guardConnectors, sendOutbound } from '../src/inb
 const b64 = (s) => Buffer.from(s, 'utf8').toString('base64url');
 const unraw = (raw) => Buffer.from(raw, 'base64url').toString('utf8');
 const bodyOf = (raw) => Buffer.from(raw.split('\r\n\r\n')[1].replace(/\r\n/g, ''), 'base64').toString('utf8');
+// One part of a multipart email (text/plain or text/html), decoded.
+const partOf = (raw, type) => {
+  const m = new RegExp(`Content-Type: ${type.replace('/', '\\/')}; charset=UTF-8\\r\\nContent-Transfer-Encoding: base64\\r\\n\\r\\n([A-Za-z0-9+/=\\r\\n]+?)\\r\\n--`).exec(raw);
+  return m ? Buffer.from(m[1].replace(/\r\n/g, ''), 'base64').toString('utf8') : null;
+};
 
 /** A Gmail message as the API returns it (format=full). */
 function gmailMsg({ id, threadId, from, to, subject, text, html, messageId, inReplyTo, references, cc, at = Date.now(), labels = ['INBOX', 'UNREAD'] }) {
@@ -38,6 +43,7 @@ function fakeGmail() {
   const sent = [];
   let tokenCalls = 0;
   const scopes = [];
+  const tokenScopes = new Map(); // access token -> the scope it was issued for
   const box = (a) => {
     if (!boxes.has(a)) boxes.set(a, { historyId: 100, messages: new Map(), history: [] });
     return boxes.get(a);
@@ -53,8 +59,28 @@ function fakeGmail() {
       tokenCalls += 1;
       const p = new URLSearchParams(init.body);
       assert.ok(p.get('assertion') || p.get('refresh_token'));
-      if (p.get('assertion')) scopes.push(...JSON.parse(Buffer.from(p.get('assertion').split('.')[1], 'base64url').toString('utf8')).scope.split(' '));
+      const scope = p.get('assertion') ? JSON.parse(Buffer.from(p.get('assertion').split('.')[1], 'base64url').toString('utf8')).scope : '*';
+      if (p.get('assertion')) scopes.push(...scope.split(' '));
+      tokenScopes.set(`tok${tokenCalls}`, scope);
       return Response.json({ access_token: `tok${tokenCalls}`, expires_in: 3600 });
+    }
+    const record = (account, raw, threadId, via) => {
+      const b = box(account);
+      const id = `sent${sent.length + 1}`;
+      const messageId = /^Message-ID: (.+)$/m.exec(raw)[1].trim();
+      sent.push({ account, raw, threadId: threadId || null, id, messageId, via });
+      b.messages.set(id, { id, threadId: threadId || `t-${id}`, labelIds: ['SENT'], payload: { headers: [{ name: 'Message-ID', value: messageId }] } });
+      return Response.json({ id, threadId: threadId || `t-${id}`, labelIds: ['SENT'] });
+    };
+    const sendScope = (init) => tokenScopes.get(init.headers.authorization.replace(/^Bearer /, ''));
+    const up = /^https:\/\/gmail\.googleapis\.com\/upload\/gmail\/v1\/users\/([^/]+)\/messages\/send\?uploadType=multipart$/.exec(url);
+    if (up) {
+      assert.equal(sendScope(init), 'https://www.googleapis.com/auth/gmail.send');
+      const text = Buffer.from(init.body).toString('utf8');
+      const boundary = /boundary=(.+)$/.exec(init.headers['content-type'])[1];
+      const meta = JSON.parse(text.split('\r\n\r\n')[1].split('\r\n')[0]);
+      const raw = text.slice(text.indexOf('message/rfc822\r\n\r\n') + 'message/rfc822\r\n\r\n'.length, text.lastIndexOf(`\r\n--${boundary}--`));
+      return record(decodeURIComponent(up[1]), raw, meta.threadId, 'upload');
     }
     const m = /^https:\/\/gmail\.googleapis\.com\/gmail\/v1\/users\/([^/]+)(\/[^?]*)(?:\?(.*))?$/.exec(url);
     assert.ok(m, `unexpected url ${url}`);
@@ -72,14 +98,9 @@ function fakeGmail() {
     }
     if (path === '/messages' && init.method !== 'POST') return Response.json({ messages: [...b.messages.keys()].map((id) => ({ id })) });
     if (path === '/messages/send') {
+      assert.equal(sendScope(init), 'https://www.googleapis.com/auth/gmail.send');
       const body = JSON.parse(init.body);
-      const raw = unraw(body.raw);
-      const id = `sent${sent.length + 1}`;
-      const threadId = body.threadId || `t-${id}`;
-      const messageId = /^Message-ID: (.+)$/m.exec(raw)[1].trim();
-      sent.push({ account, raw, threadId: body.threadId || null, id, messageId });
-      b.messages.set(id, { id, threadId, labelIds: ['SENT'], payload: { headers: [{ name: 'Message-ID', value: messageId }] } });
-      return Response.json({ id, threadId, labelIds: ['SENT'] });
+      return record(account, unraw(body.raw), body.threadId, 'send');
     }
     const one = /^\/messages\/([^/]+)$/.exec(path);
     if (one) {
@@ -234,48 +255,132 @@ describe('customer email conversations end to end (fake Gmail)', () => {
     assert.ok(full.body.conversations.some((c) => c.id === convId && c.channel === 'email'));
   });
 
-  test('email is read-only: an email reply is refused and nothing reaches Gmail, even in production with notifications live', async () => {
-    const res = await api(`/api/conversations/${convId}/messages`, { body: 'Thursday 9am works. See you then!' });
-    assert.equal(res.status, 403);
-    assert.match(res.body.error, /read-only/);
-    // Asking for email explicitly on any conversation is refused the same way.
-    assert.equal((await api(`/api/conversations/${convId}/messages`, { body: 'x', channel: 'email', to: 'jane@example.com' })).status, 403);
-    assert.equal(gmail.sent.length, 0);
-    const out = (await db.query("SELECT count(*)::int AS n FROM messages WHERE direction = 'out' AND channel = 'email'")).rows[0].n;
-    assert.equal(out, 0);
-    // Internal notes still work on email conversations.
-    assert.equal((await api(`/api/conversations/${convId}/notes`, { body: 'Called her instead' })).status, 201);
+  test('the agent replies by email: sent through Gmail, in the same thread', async () => {
+    const sent = await api(`/api/conversations/${convId}/messages`, { body: 'Thursday 9am works. See you then!', idempotency_key: 'em-1' });
+    assert.equal(sent.status, 201);
+    assert.equal(sent.body.delivery_state, 'sent');
+    assert.equal(sent.body.subject, 'Re: Reschedule next week');
+    const out = gmail.sent.at(-1);
+    assert.equal(out.account, 'info@urbanmop.ca');
+    assert.equal(out.threadId, 'T1');
+    assert.equal(out.via, 'send'); // no files: the ordinary send
+    assert.match(out.raw, /^To: jane@example\.com$/m);
+    assert.match(out.raw, /^In-Reply-To: <cust-1@example\.com>$/m);
+    // Formatted: plain text and HTML, both ending with the agent's signature (default: their name and the business).
+    assert.match(out.raw, /^Content-Type: multipart\/alternative; boundary="alt-/m);
+    assert.equal(partOf(out.raw, 'text/plain').replace(/\r\n/g, '\n'), `Thursday 9am works. See you then!\n\n${sent.body.body.split('\n\n').at(-1)}`);
+    assert.match(partOf(out.raw, 'text/html'), /^<div style="font-family: Arial[^"]*">Thursday 9am works\. See you then!<br><br>/);
+    assert.ok(sent.body.body.startsWith('Thursday 9am works. See you then!\n\n'));
+    assert.match(sent.body.body, /UrbanMop$/);
+    const stored = (await db.query('SELECT meta, external_id FROM messages WHERE id = $1', [sent.body.id])).rows[0];
+    assert.equal(stored.meta.message_id, out.messageId);
+    assert.equal(stored.meta.gmail_id, out.id);
+    assert.equal(stored.meta.mailbox, 'info@urbanmop.ca');
+    assert.equal(stored.external_id, `gmail:${out.id}`);
+    // The same request again (double click, retry) emails the customer once.
+    const again = await api(`/api/conversations/${convId}/messages`, { body: 'Thursday 9am works. See you then!', idempotency_key: 'em-1' });
+    assert.equal(again.body.id, sent.body.id);
+    assert.equal(gmail.sent.length, 1);
     const ch = await api('/api/channels');
-    assert.equal(ch.body.email.read_only, true);
-    assert.equal(ch.body.email.state, 'live'); // still reading mail
+    assert.equal(ch.body.email.read_only, false);
+  });
+
+  test('Cc, my own signature (bold and links) and the sender name from Support settings', async () => {
+    const sig = await api('/api/me/signature', { body: '**Sam Agent**\n[urbanmop.ca](https://urbanmop.ca) · <b>no html</b>' }, 'PUT');
+    assert.equal(sig.body.custom, true);
+    await api('/api/admin/settings', { email_from_name: 'UrbanMop Residential' }, 'PUT');
+    const sent = await api(`/api/conversations/${convId}/messages`, { body: 'Copying our team lead.', idempotency_key: 'em-cc', cc: ['lead@example.com', ' Lead@Example.com ', 'jane@example.com'] });
+    assert.equal(sent.status, 201);
+    const out = gmail.sent.at(-1);
+    assert.match(out.raw, /^Cc: lead@example\.com$/m); // once, and never the person it's addressed to
+    assert.match(out.raw, /^From: "?UrbanMop Residential"? <info@urbanmop\.ca>$/m);
+    const html = partOf(out.raw, 'text/html');
+    assert.match(html, /<strong>Sam Agent<\/strong><br><a href="https:\/\/urbanmop\.ca" target="_blank">urbanmop\.ca<\/a> · &lt;b&gt;no html&lt;\/b&gt;/);
+    assert.equal(partOf(out.raw, 'text/plain').replace(/\r\n/g, '\n'), 'Copying our team lead.\n\nSam Agent\nurbanmop.ca · <b>no html</b>');
+    assert.deepEqual(sent.body.meta.cc, ['lead@example.com']);
+    assert.equal((await api(`/api/conversations/${convId}/messages`, { body: 'x', idempotency_key: 'em-cc2', cc: ['not an address'] })).status, 400);
+    // Clearing the signature goes back to the default; the sender name back to EMAIL_FROM_NAME.
+    assert.equal((await api('/api/me/signature', { body: '' }, 'PUT')).body.custom, false);
+    await api('/api/admin/settings', { email_from_name: '' }, 'PUT');
+  });
+
+  test('files go with an email: one message with the text and each file, sent by upload', async () => {
+    const pdf = Buffer.from('%PDF-1.4 quote');
+    const photo = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+    const sent = await api(`/api/conversations/${convId}/messages`, {
+      body: 'Here is the quote and a photo.',
+      idempotency_key: 'em-files',
+      attachments: [
+        { filename: 'Quote é.pdf', type: 'application/pdf', data: pdf.toString('base64') },
+        { filename: '../photo.png', type: 'image/png', data: photo.toString('base64') },
+      ],
+    });
+    assert.equal(sent.status, 201);
+    assert.equal(sent.body.delivery_state, 'sent');
+    const out = gmail.sent.at(-1);
+    assert.equal(out.via, 'upload');
+    assert.equal(out.threadId, 'T1');
+    assert.match(out.raw, /^Content-Type: multipart\/mixed; boundary="mix-/m);
+    assert.match(out.raw, /Content-Disposition: attachment; filename="Quote _.pdf"; filename\*=UTF-8''Quote%20%C3%A9.pdf/);
+    assert.match(out.raw, /filename="\.\._photo\.png"/); // no paths in file names
+    assert.ok(out.raw.includes(pdf.toString('base64')));
+    assert.ok(out.raw.includes(photo.toString('base64')));
+    assert.ok(out.raw.includes(Buffer.from('Here is the quote and a photo.').toString('base64')));
+    assert.deepEqual(sent.body.meta.attachments, [{ filename: 'Quote é.pdf', type: 'application/pdf', size: pdf.length }, { filename: '.._photo.png', type: 'image/png', size: photo.length }]);
+  });
+
+  test('files that cannot be sent are refused before anything reaches Gmail', async () => {
+    const before = gmail.sent.length;
+    const file = (name, bytes = 10) => ({ filename: name, type: 'application/octet-stream', data: Buffer.alloc(bytes, 1).toString('base64') });
+    const send = (attachments, extra = {}) => api(`/api/conversations/${convId}/messages`, { body: 'Files', attachments, ...extra });
+    assert.match((await send([file('setup.exe')])).body.error, /does not allow this kind of file/);
+    assert.match((await send([file('empty.pdf', 0)])).body.error, /is empty/);
+    assert.match((await send(Array.from({ length: 11 }, (_, i) => file(`f${i}.pdf`)))).body.error, /at most 10 files/);
+    const big = await send([file('big.pdf', 18 * 1024 * 1024 + 1)]);
+    assert.equal(big.status, 413);
+    assert.match(big.body.error, /about 18 MB/);
+    assert.match((await send([file('a.pdf')], { channel: 'sms', to: '613-555-0122' })).body.error, /only be sent by email/);
+    assert.equal(gmail.sent.length, before);
+  });
+
+  test('reading and sending sign in separately, so reading works even before sending is allowed', () => {
+    assert.ok(gmail.scopes.includes('https://www.googleapis.com/auth/gmail.readonly'));
+    assert.ok(gmail.scopes.includes('https://www.googleapis.com/auth/gmail.send'));
+    assert.ok(gmail.scopes.every((s) => !s.includes(' ')));
   });
 
   test('their reply joins the conversation, even in another mailbox, by References', async () => {
-    gmail.deliver('billing@urbanmop.ca', gmailMsg({ id: 'in2', threadId: 'OTHER', from: 'jane@example.com', to: 'billing@urbanmop.ca', subject: 'Re: Reschedule next week', messageId: '<cust-2@example.com>', inReplyTo: '<cust-1@example.com>', references: '<cust-1@example.com>', text: 'Also, the fridge please.\n\nOn Tue, Jane wrote:\n> Could we move Tuesday?' }));
+    const ours = gmail.sent.at(-1).messageId;
+    gmail.deliver('billing@urbanmop.ca', gmailMsg({ id: 'in2', threadId: 'OTHER', from: 'jane@example.com', to: 'billing@urbanmop.ca', subject: 'Re: Reschedule next week', messageId: '<cust-2@example.com>', inReplyTo: ours, references: `<cust-1@example.com> ${ours}`, text: 'Perfect, thanks!\n\nOn Tue, UrbanMop wrote:\n> Thursday 9am works.' }));
     assert.equal(await sync.run(), 1);
     const detail = await api(`/api/conversations/${convId}`);
     const msgs = detail.body.messages.filter((m) => m.kind === 'message');
-    assert.deepEqual(msgs.map((m) => m.direction), ['in', 'in']);
-    assert.equal(msgs.at(-1).body, 'Also, the fridge please.');
+    assert.deepEqual(msgs.map((m) => m.direction), ['in', 'out', 'out', 'out', 'in']);
+    assert.equal(msgs.at(-1).body, 'Perfect, thanks!');
     const n = (await db.query("SELECT count(*)::int AS n FROM conversations WHERE channel = 'email'")).rows[0].n;
     assert.equal(n, 1);
   });
 
-  test("an email can't be started from a customer's page", async () => {
+  test('emailing a customer from their page starts a thread their reply comes back to', async () => {
     const contact = await api('/api/contacts/from-l27', { customer_id: 88 });
-    const conv = await api('/api/conversations', { contact_id: contact.body.id, channel: 'email', subject: 'Your Friday clean', body: 'Hi Raj' });
-    assert.equal(conv.status, 403);
-    assert.match(conv.body.error, /read-only/);
+    const conv = await api('/api/conversations', { contact_id: contact.body.id, channel: 'email' });
+    assert.equal(conv.status, 201);
+    assert.equal(conv.body.our_identity, UM.info);
+    assert.equal(conv.body.their_identity, 'raj@example.com');
+    const sent = await api(`/api/conversations/${conv.body.id}/messages`, { body: 'Hi Raj, a quick question about Friday.', subject: 'Your Friday clean' });
+    assert.equal(sent.body.delivery_state, 'sent');
+    const out = gmail.sent.at(-1);
+    assert.equal(out.threadId, null); // new thread
+    assert.match(out.raw, /^Subject: Your Friday clean$/m);
+    const row = (await db.query('SELECT subject, thread_key FROM conversations WHERE id = $1', [conv.body.id])).rows[0];
+    assert.equal(row.subject, 'Your Friday clean');
+    assert.equal(row.thread_key, `gmail:info@urbanmop.ca:t-${out.id}`);
+    gmail.deliver('info@urbanmop.ca', gmailMsg({ id: 'in3', threadId: `t-${out.id}`, from: 'raj@example.com', to: 'info@urbanmop.ca', subject: 'Re: Your Friday clean', messageId: '<raj-1@example.com>', text: 'Sure, ask away.' }));
+    assert.equal(await sync.run(), 1);
+    const detail = await api(`/api/conversations/${conv.body.id}`);
+    assert.deepEqual(detail.body.messages.filter((m) => m.kind === 'message').map((m) => m.body.split('\n\n')[0]), ['Hi Raj, a quick question about Friday.', 'Sure, ask away.']);
     const full = await api(`/api/contacts/${contact.body.id}`);
-    assert.equal(full.body.conversations.length, 0);
-    assert.equal(gmail.sent.length, 0);
-    // Texting still works.
-    assert.equal((await api('/api/conversations', { contact_id: contact.body.id, channel: 'sms' })).status, 201);
-  });
-
-  test('Gmail is asked only for read access', () => {
-    assert.ok(gmail.scopes.length > 0);
-    assert.ok(gmail.scopes.every((s) => s === 'https://www.googleapis.com/auth/gmail.readonly'), gmail.scopes.join(', '));
+    assert.equal(full.body.conversations.length, 1);
   });
 
   test('mail from our own addresses is skipped; mail to billing@ routes to Billing', async () => {
@@ -303,23 +408,24 @@ describe('customer email conversations end to end (fake Gmail)', () => {
   });
 });
 
-describe('read-only email in every environment', () => {
-  test('the connector the app gets cannot send, in sandbox or live mode', async () => {
-    for (const mode of ['sandbox', 'live']) {
-      const g = fakeGmail();
-      const guarded = guardConnectors({ email: createGmailConnector({ client: createGmailClient({ auth: { serviceAccount: SA }, fetchImpl: g.fetchImpl }), mailboxes: parseMailboxes('info@urbanmop.ca') }) }, mode);
-      assert.equal(guarded.email.readOnly, true);
-      await assert.rejects(guarded.email.send({ from: UM.info, to: 'x@example.com', subject: 's', body: 'b' }), /read-only/);
-      assert.equal(g.sent.length, 0, mode);
-      assert.equal(g.tokens(), 0, mode);
-    }
+describe('sending email: production only', () => {
+  test('dev and QA record emails as sandbox messages and never reach Gmail', async () => {
+    const g = fakeGmail();
+    const guarded = guardConnectors({ email: createGmailConnector({ client: createGmailClient({ auth: { serviceAccount: SA }, fetchImpl: g.fetchImpl }), mailboxes: parseMailboxes('info@urbanmop.ca') }) }, 'sandbox');
+    const res = await sendOutbound({ channel: 'email', from: UM.info, to: 'x@example.com', subject: 's', body: 'b', attachments: [{ filename: 'a.pdf', type: 'application/pdf', data: Buffer.from('x') }] }, guarded);
+    assert.equal(res.state, 'sandbox');
+    assert.equal(g.sent.length, 0);
+    assert.equal(g.tokens(), 0);
   });
 
-  test('the outbound path never hands an email to a connector', async () => {
-    let called = 0;
-    const res = await sendOutbound({ channel: 'email', from: UM.info, to: 'x@example.com', subject: 's', body: 'b' }, { email: { name: 'gmail', send: async () => ++called } });
-    assert.equal(res.state, 'not_sent');
-    assert.equal(called, 0);
-    assert.equal(EMAIL_SENDING_ENABLED, false);
+  test('email sending is on', async () => {
+    assert.equal(EMAIL_SENDING_ENABLED, true);
+    const g = fakeGmail();
+    const live = guardConnectors({ email: createGmailConnector({ client: createGmailClient({ auth: { serviceAccount: SA }, fetchImpl: g.fetchImpl }), mailboxes: parseMailboxes('info@urbanmop.ca') }) }, 'live');
+    assert.equal(live.email.readOnly, undefined);
+    const res = await sendOutbound({ channel: 'email', from: UM.info, to: 'x@example.com', subject: 's', body: 'b' }, live);
+    assert.equal(res.state, 'sent');
+    assert.equal(res.mailbox, 'info@urbanmop.ca');
+    assert.equal(g.sent.length, 1);
   });
 });

@@ -15,7 +15,7 @@ import { PortalSwitcher } from './PortalSwitcher';
 // Sidebar sections. Add a line here for each page rebuilt from docs/API.md.
 // `icon` is a name from components/Icon.tsx.
 // `feature`: shown only to logins the server enables it for (/auth/me features).
-const NAV: { section: string; items: { to: string; label: string; icon: string; feature?: 'utilization'; lead?: true }[] }[] = [
+const NAV: { section: string; items: { to: string; label: string; icon: string; feature?: 'utilization' | 'kpi'; lead?: true }[] }[] = [
   {
     section: 'Support',
     items: [
@@ -23,7 +23,7 @@ const NAV: { section: string; items: { to: string; label: string; icon: string; 
       { to: '/supervisor', label: 'Supervisor', icon: 'headset' },
       { to: '/calls', label: 'Calls', icon: 'voice' },
       { to: '/contacts', label: 'Contacts', icon: 'user' },
-      { to: '/complaints', label: 'Complaint playbook', icon: 'alert', lead: true },
+      { to: '/complaints', label: 'Complaint playbook', icon: 'alert' },
       { to: '/inbox-simulator', label: 'Channel simulator', icon: 'flask' },
       { to: '/inbox-settings', label: 'Support settings', icon: 'sliders' },
     ],
@@ -59,6 +59,7 @@ const NAV: { section: string; items: { to: string; label: string; icon: string; 
   {
     section: 'Reports',
     items: [
+      { to: '/reports/kpi', label: 'KPI scorecard', icon: 'trend', feature: 'kpi' },
       { to: '/reports/customers', label: 'Customer insights', icon: 'grid' },
       { to: '/reports/scheduling', label: 'Scheduling insights', icon: 'route' },
       { to: '/reports/utilization', label: 'Utilization', icon: 'trend', feature: 'utilization' },

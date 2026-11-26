@@ -54,15 +54,16 @@ describe('routing rules', () => {
   test('the audited cases land where Kustomer sent them', () => {
     assert.equal(q({}), 'operations');
     assert.equal(q({ to: UM.billing }), 'billing');
-    assert.equal(q({ subject: 'Cart Abandonment: Jane' }), 'sales');
+    assert.equal(q({ subject: 'Cart Abandonment: Jane' }), 'sales-overflow');
     assert.equal(q({ subject: 'Jane submitted an inquiry' }), 'sales');
-    assert.equal(q({ channel: 'sms', to: UM.smsHiring, from: '+16135550100' }), 'hiring');
+    assert.equal(q({ channel: 'sms', to: UM.smsHiring, from: '+16135550100' }), 'hr');
     assert.equal(q({ channel: 'sms', to: UM.smsOttawa, from: '+16135550100' }), 'operations');
     assert.equal(q({ channel: 'sms', to: UM.smsOttawa, roles: ['cleaner'] }), 'operations');
     assert.equal(route(rules, ctx({ channel: 'sms', to: UM.smsOttawa, roles: ['cleaner'] })).action.sla, 'cleaner');
     assert.equal(q({ body: 'Leslie for review: refund' }), 'management');
     assert.equal(q({ lead_stage: undefined, leadStage: 'Attempt #2' }), 'sales');
-    assert.equal(q({ channel: 'chat', to: null }), 'operations');
+    // Kustomer's Sales Queue Rule takes every chat (above its Operations - Chat Rule).
+    assert.equal(q({ channel: 'chat', to: null }), 'sales');
   });
   test('system notices are marked done; bank codes are redacted', () => {
     assert.equal(route(rules, ctx({ from: 'notifications@kustomerapp.com' })).action.mark_done, true);
@@ -182,7 +183,7 @@ describe('inbox service', () => {
     const a = await ingest({ channel: 'email', from: 'Pat <pat@example.com>', to: UM.billing, subject: 'Charge question', body: 'Why $200?', thread_key: 'gm:abc', at: t0 });
     const b = await ingest({ channel: 'email', from: 'pat@example.com', to: UM.billing, subject: 'Re: Charge question', body: 'Following up', thread_key: 'gm:abc', at: at(30) });
     assert.equal(a.conversationId, b.conversationId);
-    assert.equal((await conv(a.conversationId)).routed_by, 'Billing');
+    assert.equal((await conv(a.conversationId)).routed_by, 'Billing & Financial Operations Queue');
     // Two contacts share one email.
     await db.tx(async (q) => {
       await svc.createContact(q, { name: 'Sam A', identities: [{ kind: 'email', value: 'family@example.com' }] });
@@ -315,6 +316,27 @@ describe('/api end to end', () => {
     assert.ok(counts.leads >= 1 && counts.flagged >= 1);
   });
 
+  test('contacts: every conversation of a contact, newest first, a page at a time', async () => {
+    const who = (await api('/api/contacts', { name: 'Kim History', roles: ['customer'], email: 'kim.history@example.com' })).body;
+    // Five closed conversations over the years; two share a time, so the id breaks the tie.
+    const times = ['2019-01-01T10:00:00Z', '2021-06-01T10:00:00Z', '2021-06-01T10:00:00Z', '2023-03-03T10:00:00Z', '2025-05-05T10:00:00Z'];
+    const ids = [];
+    for (const t of times) ids.push(Number((await db.query("INSERT INTO conversations (contact_id, channel, status, subject, routed_by, last_message_at, created_at) VALUES ($1, 'email', 'done', 'Old', 'Imported from Kustomer', $2, $2) RETURNING id", [who.id, t])).rows[0].id));
+    const seen = [];
+    let next = null;
+    let pages = 0;
+    do {
+      const page = await api(`/api/contacts/${who.id}/conversations?limit=2${next ? `&before=${encodeURIComponent(next)}` : ''}`);
+      assert.equal(page.status, 200);
+      seen.push(...page.body.rows.map((r) => Number(r.id)));
+      next = page.body.next;
+      pages++;
+    } while (next && pages < 10);
+    assert.equal(pages, 3);
+    assert.deepEqual(seen, [ids[4], ids[3], ids[2], ids[1], ids[0]]);
+    assert.equal((await api('/api/contacts/abc/conversations')).status, 400);
+  });
+
   test('calls: a hidden caller can be saved by name alone; nothing at all is refused', async () => {
     const made = await api('/api/contacts', { name: 'Hidden caller about a quote', roles: [] });
     assert.equal(made.status, 201);
@@ -367,7 +389,7 @@ describe('/api end to end', () => {
     assert.equal(rules.body.rules.length, RULES.length);
     assert.deepEqual(rules.body.warnings, []);
     const dry = await api('/api/admin/rules/test', { channel: 'email', to: UM.billing, from: 'x@y.com', subject: 'Invoice' });
-    assert.equal(dry.body.rule, 'Billing');
+    assert.equal(dry.body.rule, 'Billing & Financial Operations Queue');
     const sup = await api('/api/supervisor');
     assert.equal(sup.status, 200);
     assert.ok(sup.body.queues.find((q) => q.slug === 'operations').open >= 1);

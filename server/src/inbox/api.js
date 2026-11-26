@@ -2,6 +2,7 @@
 // as the rest of the app); the agent's Launch27 token is used for lookups so Launch27
 // keeps enforcing their permissions.
 import { canSeeUtilization } from '../config.js';
+import { canSeeKpi } from '../kpi/service.js';
 import { registerComplaintRoutes } from '../complaints/api.js';
 import { registerKustomerRoutes } from '../kustomer-migration/api.js';
 import express from 'express';
@@ -28,8 +29,10 @@ export function diffRules(before, after) {
 }
 const many = async (q, sql, p) => (await q.query(sql, p)).rows;
 
-export function createInboxRouter({ db, sessions, cookieName, config, l27, connectors = {}, log = (lvl, msg, f) => console.error(msg, f), qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, complaints = null, smsProviders = {}, kustomerMigration = null }) {
+export function createInboxRouter({ db, sessions, cookieName, config, l27, connectors = {}, log = (lvl, msg, f) => console.error(msg, f), qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, complaints = null, smsProviders = {}, kustomerMigration = null, kpi = null }) {
   const r = express.Router();
+  // A reply can carry email files (about 18 MB, a third more as base64); everything else is small.
+  r.post('/conversations/:id/messages', express.json({ limit: '26mb' }));
   r.use(express.json({ limit: '1mb' }));
 
   const roleFor = (email, isFirst) => {
@@ -170,7 +173,8 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     return {
       // state: how mail is read (live Gmail, sandbox, or not connected). read_only: sending is off.
       email: !email ? { state: 'not_connected', provider: null, accounts: [], read_only: !EMAIL_SENDING_ENABLED } : { state: email.sandbox ? 'sandbox' : 'live', provider: email.name, send_from: email.identities || OUR_IDENTITIES.email, accounts, read_only: !EMAIL_SENDING_ENABLED },
-      sms: !connectors.sms ? { state: 'not_connected', provider: null, providers: [] } : { state: connectors.sms.sandbox ? 'sandbox' : 'live', provider: connectors.sms.name, providers: await Promise.all(Object.values(smsProviders).map(smsDetail)) },
+      // problems: why a provider's settings were turned down at start-up (variable names, never values).
+      sms: { ...(!connectors.sms ? { state: 'not_connected', provider: null, providers: [] } : { state: connectors.sms.sandbox ? 'sandbox' : 'live', provider: connectors.sms.name, providers: await Promise.all(Object.values(smsProviders).map(smsDetail)) }), problems: config.smsProblems || [] },
     };
   }
 
@@ -192,8 +196,8 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
   // Admins: check, disconnect or reconnect one provider (credentials stay in Railway).
   r.post('/admin/sms/:provider/:action', needRole('admin'), wrap(async (req, res) => {
     const provider = Object.hasOwn(smsProviders, req.params.provider) ? smsProviders[req.params.provider] : null;
-    const actions = { check: 'check', disconnect: 'disconnect', connect: 'connect' };
-    if (!provider || !Object.hasOwn(actions, req.params.action)) throw new svc.InboxError(404, 'Unknown SMS provider or action');
+    const actions = { check: 'check', disconnect: 'disconnect', connect: 'connect', 'take-over': 'takeOver', 'hand-back': 'handBack' };
+    if (!provider || !Object.hasOwn(actions, req.params.action) || typeof provider[actions[req.params.action]] !== 'function') throw new svc.InboxError(404, 'Unknown SMS provider or action');
     await provider[actions[req.params.action]]();
     await svc.audit(db, req.user.id, `sms.${req.params.action}`, 'channel', `sms:${req.params.provider}`, {});
     res.json(await channelStatus());
@@ -220,10 +224,22 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
 
   // ---------- work lists ----------
 
+  // Fixed SQL per sort key so user input never reaches ORDER BY.
+  const LIST_ORDER = {
+    newest: 'c.last_message_at DESC NULLS LAST, c.id DESC',
+    oldest: 'c.last_message_at ASC NULLS LAST, c.id ASC',
+    due: '(c.sla_due_at IS NULL), c.sla_due_at ASC, c.priority DESC, c.last_message_at DESC',
+  };
+
+  // A conversation an agent started ("New conversation") is work only once something is in
+  // it: a message, a note, a call or a saved draft. Until then it is left out of the work
+  // lists and counts, so opening the composer and leaving needs no "Done".
+  const HAS_CONTENT = "NOT (c.routed_by = 'Started by agent' AND c.draft IS NULL AND NOT EXISTS (SELECT 1 FROM messages mm WHERE mm.conversation_id = c.id AND mm.kind IN ('message', 'note', 'call')))";
+
   r.get('/conversations', wrap(async (req, res) => {
-    const { view = 'mine', status = 'open', channel, role, q: text, contact_id, booking_id, limit = 100 } = req.query;
+    const { view = 'mine', status = 'open', channel, role, q: text, contact_id, booking_id, limit = 100, sort = 'newest', since } = req.query;
     const visible = await visibleQueueIds(req.user);
-    const where = ['(c.queue_id IS NULL OR c.queue_id = ANY($1::bigint[]) OR c.owner_id = $2)'];
+    const where = ['(c.queue_id IS NULL OR c.queue_id = ANY($1::bigint[]) OR c.owner_id = $2)', HAS_CONTENT];
     const params = [visible, req.user.id];
     const add = (sql, v) => {
       params.push(v);
@@ -240,6 +256,7 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     if (role) add('co.roles @> ?::jsonb', JSON.stringify([role]));
     if (contact_id) add('c.contact_id = ?', Number(contact_id));
     if (booking_id) add('c.l27_booking_id = ?', Number(booking_id));
+    if (since && !Number.isNaN(Date.parse(since))) add('c.last_message_at >= ?::timestamptz', new Date(since).toISOString());
     if (text) {
       params.push(`%${text}%`);
       const n = `$${params.length}`;
@@ -257,7 +274,7 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
        LEFT JOIN queues qu ON qu.id = c.queue_id
        LEFT JOIN users u ON u.id = c.owner_id
        WHERE ${where.join(' AND ')}
-       ORDER BY (c.sla_due_at IS NULL), c.sla_due_at ASC, c.priority DESC, c.last_message_at DESC
+       ORDER BY ${Object.hasOwn(LIST_ORDER, sort) ? LIST_ORDER[sort] : LIST_ORDER.newest}
        LIMIT $${params.length}`,
       params,
     );
@@ -273,10 +290,10 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
         count(*) FILTER (WHERE c.owner_id IS NULL)::int AS unassigned,
         count(*) FILTER (WHERE c.sla_breached_at IS NOT NULL)::int AS breached,
         count(*) FILTER (WHERE c.needs_match)::int AS needs_match
-       FROM conversations c WHERE c.status = 'open' AND (c.queue_id = ANY($1::bigint[]) OR c.owner_id = $2 OR c.queue_id IS NULL)`,
+       FROM conversations c WHERE c.status = 'open' AND (c.queue_id = ANY($1::bigint[]) OR c.owner_id = $2 OR c.queue_id IS NULL) AND ${HAS_CONTENT}`,
       [visible, req.user.id],
     );
-    const byQueue = await many(db, "SELECT queue_id, count(*)::int AS n FROM conversations WHERE status = 'open' AND queue_id = ANY($1::bigint[]) GROUP BY queue_id", [visible]);
+    const byQueue = await many(db, `SELECT c.queue_id, count(*)::int AS n FROM conversations c WHERE c.status = 'open' AND c.queue_id = ANY($1::bigint[]) AND ${HAS_CONTENT} GROUP BY c.queue_id`, [visible]);
     const mentions = await one(db, "SELECT count(*)::int AS n FROM notifications WHERE user_id = $1 AND kind = 'mention' AND read_at IS NULL", [req.user.id]);
     res.json({ ...row, mentions: mentions.n, queues: Object.fromEntries(byQueue.map((b) => [b.queue_id, b.n])) });
   }));
@@ -302,9 +319,121 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     res.json({ conversation: conv, messages, contact: contact && { ...contact, identities }, others, queue, owner, sla_policy: policy, candidates, cleaner_from_booking });
   }));
 
+  // Everything said with the person behind a conversation, across texts, calls and email,
+  // oldest first: one timeline however they reached us. Only conversations this user may see.
+  r.get('/conversations/:id/history', wrap(async (req, res) => {
+    const conv = await loadConversation(req, req.params.id);
+    if (!conv.contact_id) return res.json({ messages: [], conversations: 1 });
+    const visible = await visibleQueueIds(req.user);
+    const rows = await many(
+      db,
+      `SELECT m.*, u.name AS author_name, c.channel AS conversation_channel, c.status AS conversation_status
+       FROM messages m JOIN conversations c ON c.id = m.conversation_id LEFT JOIN users u ON u.id = m.author_id
+       WHERE c.contact_id = $1 AND (c.queue_id IS NULL OR c.queue_id = ANY($2::bigint[]) OR c.owner_id = $3)
+       ORDER BY m.created_at DESC, m.id DESC LIMIT 400`,
+      [conv.contact_id, visible, req.user.id],
+    );
+    res.json({ messages: rows.reverse(), conversations: new Set(rows.map((x) => String(x.conversation_id))).size });
+  }));
+
+  // A file on a received email, fetched from Gmail when asked for (the portal keeps no copy)
+  // and always handed over as a download, never opened in the page. Read-only: nothing is sent.
+  r.get('/messages/:id/attachments/:n', wrap(async (req, res) => {
+    const m = await one(db, "SELECT id, meta, conversation_id FROM messages WHERE id = $1 AND channel = 'email'", [req.params.id]);
+    const n = Number(req.params.n);
+    const listed = Array.isArray(m?.meta?.attachments) ? m.meta.attachments[n] : null;
+    if (!m || !Number.isInteger(n) || !listed) throw new svc.InboxError(404, 'File not found');
+    await loadConversation(req, m.conversation_id);
+    if (!m.meta.gmail_id || !m.meta.mailbox || typeof connectors.email?.attachment !== 'function') throw new svc.InboxError(409, 'This file was not kept: it is on a test message, or email is not connected here.');
+    let file;
+    try {
+      file = await connectors.email.attachment({ mailbox: m.meta.mailbox, gmailId: m.meta.gmail_id, index: n });
+    } catch (err) {
+      if (err.status === 404) throw new svc.InboxError(404, 'Gmail no longer has this email or file (it may have been deleted from the mailbox).');
+      throw new svc.InboxError(502, `Could not get the file from Gmail: ${err.message}`);
+    }
+    // The same file as listed on the message, not whatever now sits at that position.
+    if (file.filename !== listed.filename) throw new svc.InboxError(409, 'The email changed in Gmail since it was read. Open it in Gmail to get this file.');
+    const safe = String(listed.filename).replace(/[\r\n"\\/]/g, '_');
+    res.set({
+      'Content-Type': 'application/octet-stream',
+      'Content-Disposition': `attachment; filename="${safe.replace(/[^\x20-\x7E]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(safe)}`,
+      'Content-Length': String(file.data.length),
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'private, no-store',
+    });
+    res.send(file.data);
+  }));
+
+  // The unsent reply on a conversation an agent started (see HAS_CONTENT). Empty clears it.
+  r.put('/conversations/:id/draft', wrap(async (req, res) => {
+    const conv = await loadConversation(req, req.params.id);
+    const text = String(req.body?.text ?? '').slice(0, 20_000);
+    await db.query('UPDATE conversations SET draft = $2, draft_at = CASE WHEN $2::text IS NULL THEN NULL ELSE now() END WHERE id = $1', [conv.id, text.trim() ? text : null]);
+    res.json({ ok: true });
+  }));
+
+  // Several conversations marked done at once (the work list's Select), with one reason.
+  // Each goes through the same checks as one at a time; one that can't be closed is
+  // reported and the rest still close.
+  r.post('/conversations/bulk/done', wrap(async (req, res) => {
+    const ids = [...new Set((Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+    if (!ids.length) throw new svc.InboxError(400, 'Pick at least one conversation');
+    if (ids.length > 200) throw new svc.InboxError(400, 'Close at most 200 at a time');
+    const disposition = req.body?.disposition && typeof req.body.disposition === 'object' ? req.body.disposition : undefined;
+    const done = [];
+    const failed = [];
+    for (const id of ids) {
+      try {
+        const conv = await loadConversation(req, id);
+        if (conv.status === 'done') {
+          done.push(id);
+          continue;
+        }
+        await db.tx((q) => svc.updateConversation(q, req.user, id, { status: 'done', ...(disposition ? { disposition } : {}) }));
+        done.push(id);
+      } catch (err) {
+        if (!(err instanceof svc.InboxError)) throw err;
+        failed.push({ id, error: err.message });
+      }
+    }
+    res.json({ done, failed });
+  }));
+
+  // People this agent texted, emailed or called lately, and the ones the team talks to most:
+  // the starting list for "New conversation". Only conversations this user may see.
+  r.get('/contacts/suggested', wrap(async (req, res) => {
+    const visible = await visibleQueueIds(req.user);
+    const touched = `FROM messages m JOIN conversations v ON v.id = m.conversation_id JOIN contacts c ON c.id = v.contact_id
+       WHERE m.created_at > now() - interval '90 days' AND c.caller_flag IS NULL AND NOT c.roles ? 'system'
+         AND (v.queue_id IS NULL OR v.queue_id = ANY($1::bigint[]))
+         AND ((m.kind = 'message' AND m.direction = 'out') OR m.kind = 'call')`;
+    const withIds = (rows) => rows.map((r) => ({ ...r, times: r.times === undefined ? undefined : Number(r.times) }));
+    const cols = `c.id, c.name, c.roles, c.l27_customer_id, c.l27_team_id,
+       COALESCE((SELECT json_agg(i ORDER BY i.kind) FROM contact_identities i WHERE i.contact_id = c.id), '[]') AS identities`;
+    const recent = await many(db, `SELECT ${cols}, x.last_at, x.last_channel FROM (
+         SELECT c.id AS cid, max(m.created_at) AS last_at, (array_agg(m.channel ORDER BY m.created_at DESC))[1] AS last_channel
+         ${touched} AND (m.author_id = $2 OR m.meta->>'agent_id' = $2::text) GROUP BY c.id ORDER BY max(m.created_at) DESC LIMIT 6
+       ) x JOIN contacts c ON c.id = x.cid ORDER BY x.last_at DESC`, [visible, req.user.id]);
+    const frequent = await many(db, `SELECT ${cols}, x.times, x.last_at, x.last_channel FROM (
+         SELECT c.id AS cid, count(*) AS times, max(m.created_at) AS last_at, (array_agg(m.channel ORDER BY m.created_at DESC))[1] AS last_channel
+         ${touched} AND c.id <> ALL($2::bigint[]) GROUP BY c.id HAVING count(*) >= 2 ORDER BY count(*) DESC, max(m.created_at) DESC LIMIT 6
+       ) x JOIN contacts c ON c.id = x.cid ORDER BY x.times DESC, x.last_at DESC`, [visible, recent.map((r) => r.id)]);
+    res.json({ recent: withIds(recent), frequent: withIds(frequent) });
+  }));
+
   r.post('/conversations/:id/messages', wrap(async (req, res) => {
     await loadConversation(req, req.params.id);
     res.status(201).json(await db.tx((q) => svc.reply(q, req.user, req.params.id, req.body || {}, { connectors })));
+  }));
+
+  // My email signature (Support settings -> My email signature): **bold** and [link](address).
+  r.get('/me/signature', wrap(async (req, res) => res.json(await svc.signatureFor(db, req.user))));
+  r.put('/me/signature', wrap(async (req, res) => {
+    const body = String(req.body?.body ?? '').replace(/\r\n/g, '\n').slice(0, 2000).trim();
+    if (body) await db.query('INSERT INTO user_signatures (user_id, body) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET body = EXCLUDED.body, updated_at = now()', [req.user.id, body]);
+    else await db.query('DELETE FROM user_signatures WHERE user_id = $1', [req.user.id]);
+    res.json(await svc.signatureFor(db, req.user));
   }));
 
   r.post('/conversations/:id/notes', wrap(async (req, res) => {
@@ -371,8 +500,10 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       const target = normalizeIdentity(kind, to) || (await one(q, 'SELECT value FROM contact_identities WHERE contact_id = $1 AND kind = $2 ORDER BY id LIMIT 1', [contact.id, kind]))?.value;
       if (!target) throw new svc.InboxError(400, `${contact.name || 'This contact'} has no ${kind === 'email' ? 'email address' : 'phone number'}`);
       const sendable = sendableIdentities(connectors, 'email');
-      const ours = from || (channel === 'email' ? (!sendable || sendable.includes(UM.info) ? UM.info : sendable[0]) : UM.smsOttawa);
-      const queue = await one(q, 'SELECT id FROM queues WHERE slug = $1', [(contact.roles || []).includes('applicant') ? 'hiring' : 'operations']);
+      // Texts start from a number the SMS connector can really send from (the Twilio numbers).
+      const smsNumbers = sendableIdentities(connectors, 'sms');
+      const ours = from || (channel === 'email' ? (!sendable || sendable.includes(UM.info) ? UM.info : sendable[0]) : smsNumbers?.length && !smsNumbers.includes(UM.smsOttawa) ? smsNumbers[0] : UM.smsOttawa);
+      const queue = await one(q, 'SELECT id FROM queues WHERE slug = $1', [(contact.roles || []).includes('applicant') ? 'hr' : 'operations']);
       const conv = await one(q, "INSERT INTO conversations (contact_id, channel, our_identity, their_identity, subject, queue_id, owner_id, l27_booking_id, routed_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'Started by agent') RETURNING *", [contact.id, channel, channel === 'email' ? normalizeEmail(ours) : normalizePhone(ours), target, subject || null, queue?.id, req.user.id, l27_booking_id || null]);
       if (body) await svc.reply(q, req.user, conv.id, { body, channel, to: target, subject, from: conv.our_identity }, { connectors });
       return conv;
@@ -432,9 +563,33 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     const visible = await visibleQueueIds(req.user);
     const [identities, conversations] = await Promise.all([
       many(db, 'SELECT * FROM contact_identities WHERE contact_id = $1 ORDER BY kind, id', [contact.id]),
-      many(db, 'SELECT id, channel, status, subject, last_preview, last_message_at, l27_booking_id, queue_id, owner_id, disposition, complaint FROM conversations WHERE contact_id = $1 AND (queue_id IS NULL OR queue_id = ANY($2::bigint[]) OR owner_id = $3) ORDER BY last_message_at DESC LIMIT 100', [contact.id, visible, req.user.id]),
+      many(db, `SELECT c.id, c.channel, c.status, c.subject, c.last_preview, c.last_message_at, c.l27_booking_id, c.queue_id, c.owner_id, c.disposition, c.complaint FROM conversations c WHERE c.contact_id = $1 AND (c.queue_id IS NULL OR c.queue_id = ANY($2::bigint[]) OR c.owner_id = $3) AND ${HAS_CONTENT} ORDER BY c.last_message_at DESC LIMIT 100`, [contact.id, visible, req.user.id]),
     ]);
     res.json({ ...contact, identities, conversations });
+  }));
+
+  // Every conversation of a contact, newest first, a page at a time (a Story or a cleaner's
+  // history can go back years, e.g. Kustomer history). Same visibility as above.
+  // ?before=<last_message_at>|<id> continues after the previous page's last row.
+  r.get('/contacts/:id/conversations', wrap(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) throw new svc.InboxError(400, 'Bad contact id');
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
+    const [at, beforeId] = String(req.query.before || '').split('|');
+    const cursor = at && Number(beforeId) > 0 && !Number.isNaN(Date.parse(at)) ? [new Date(at).toISOString(), Number(beforeId)] : null;
+    const visible = await visibleQueueIds(req.user);
+    const rows = await many(
+      db,
+      `SELECT c.id, c.channel, c.status, c.subject, c.last_preview, c.last_message_at, c.l27_booking_id, c.queue_id, c.owner_id, c.disposition, c.complaint, c.source
+       FROM conversations c WHERE c.contact_id = $1 AND (c.queue_id IS NULL OR c.queue_id = ANY($2::bigint[]) OR c.owner_id = $3) AND ${HAS_CONTENT}
+         AND ($4::timestamptz IS NULL OR (c.last_message_at, c.id) < ($4::timestamptz, $5::bigint))
+       ORDER BY c.last_message_at DESC, c.id DESC LIMIT $6`,
+      [id, visible, req.user.id, cursor?.[0] ?? null, cursor?.[1] ?? null, limit + 1],
+    );
+    const more = rows.length > limit;
+    const page = rows.slice(0, limit);
+    const last = page.at(-1);
+    res.json({ rows: page, next: more && last ? `${new Date(last.last_message_at).toISOString()}|${last.id}` : null });
   }));
 
   r.post('/contacts', wrap(async (req, res) => {
@@ -1224,6 +1379,26 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
 
   if (complaints) registerComplaintRoutes(r, { complaints, needRole, wrap });
   if (kustomerMigration) registerKustomerRoutes(r, { migration: kustomerMigration, needRole, wrap });
+
+  // ---------- KPI scorecard (read-only; docs/kpi.md) ----------
+  if (kpi) {
+    const k = (fn) => wrap(async (req, res) => {
+      if (!canSeeKpi(config, req.user.email)) return res.status(404).json({ error: 'Not found' });
+      try {
+        res.json(await fn(req));
+      } catch (err) {
+        if (err.status) return res.status(err.status).json({ error: err.message });
+        throw err;
+      }
+    });
+    const q = (req) => ({ brand: req.query.brand ? String(req.query.brand) : null, month: req.query.month ? String(req.query.month) : null, mode: String(req.query.mode || 'month'), outage: req.query.outage ? String(req.query.outage) : null, from: req.query.from ? String(req.query.from) : null, to: req.query.to ? String(req.query.to) : null });
+    r.get('/kpi/scorecard', k((req) => kpi.scorecard(q(req))));
+    r.get('/kpi/drill', k((req) => kpi.drill({ ...q(req), kpi: String(req.query.kpi || '') })));
+    r.post('/kpi/refresh', k((req) => kpi.refresh({ bearer: req.bearer })));
+    // Manual Google review entry: the service refuses it in production.
+    r.put('/kpi/reviews/:month', k((req) => kpi.saveManualReviews({ brand: req.body?.brand, month: req.params.month, entry: req.body, email: req.user.email })));
+    r.delete('/kpi/reviews/:month', k((req) => kpi.clearManualReviews({ brand: req.query.brand ? String(req.query.brand) : null, month: req.params.month })));
+  }
 
   return r;
 }

@@ -2,11 +2,11 @@
 // Playbook: what complaints we get, what we did, what kept clients and at what cost.
 // Cases: every mined case with its journey, resolution, cost and outcome.
 // Rules: the ladder, who approves what, the refund budget and cost assumptions.
-// Supervisors and admins only (cases hold client names and what they wrote).
+// Open to everyone with a staff login; running updates and changing rules are admin only.
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useInboxMe } from '../inbox/util';
-import { complaintsApi, OUTCOME_LABEL, RUNG_NAME, SOURCE_LABEL, TONE_LABEL, whatWeDid, type CaseRow, type ClientRow, type Confidence, type OutcomeStats, type Playbook, type Settings, type Status } from '../complaints/api';
+import { complaintsApi, OUTCOME_LABEL, RUNG_NAME, SOURCE_LABEL, TONE_LABEL, whatWeDid, type CaseRow, type ClientRow, type ReviewItem, type ReviewTally, type Confidence, type ExcludedReason, type OutcomeStats, type Playbook, type Settings, type Status } from '../complaints/api';
 import { Kpi } from '../reports/ui';
 import { money, pct } from '../reports/api';
 
@@ -45,7 +45,7 @@ const lastDays = (n: number, end: string): Period => ({ from: addDays(end, -(n -
 
 export function ComplaintsPage() {
   const me = useInboxMe();
-  const [tab, setTab] = useState<'playbook' | 'cases' | 'clients' | 'rules'>('playbook');
+  const [tab, setTab] = useState<'playbook' | 'cases' | 'clients' | 'check' | 'rules'>('playbook');
   const [chosen, setChosen] = useState<Period | null>(null);
   const status = useQuery({ queryKey: ['complaints', 'status'], queryFn: complaintsApi.status, refetchInterval: (q) => (q.state.data?.running ? 5000 : false), retry: false });
   const isAdmin = me.data?.role === 'admin';
@@ -55,7 +55,7 @@ export function ComplaintsPage() {
       <div className="seg-page">
         <section className="card seg-empty">
           <h2>Complaint playbook isn't available</h2>
-          <p className="muted">{(status.error as Error).message}. It's open to supervisors and admins.</p>
+          <p className="muted">{(status.error as Error).message}.</p>
         </section>
       </div>
     );
@@ -71,15 +71,16 @@ export function ComplaintsPage() {
       </header>
       {status.data && period && <RunBar status={status.data} isAdmin={isAdmin} period={period} onPeriod={setChosen} />}
       <div className="tabs" role="tablist">
-        {(['playbook', 'cases', 'clients', 'rules'] as const).map((t) => (
+        {(['playbook', 'cases', 'clients', 'check', 'rules'] as const).map((t) => (
           <button key={t} role="tab" aria-selected={tab === t} className={`tab ${tab === t ? 'active' : ''}`} onClick={() => setTab(t)}>
-            {t === 'playbook' ? 'Playbook' : t === 'cases' ? 'Cases' : t === 'clients' ? 'Clients' : 'Rules & budget'}
+            {t === 'playbook' ? 'Playbook' : t === 'cases' ? 'Cases' : t === 'clients' ? 'Clients' : t === 'check' ? 'Check accuracy' : 'Rules & budget'}
           </button>
         ))}
       </div>
       {tab === 'playbook' && period && <PlaybookTab period={period} />}
       {tab === 'cases' && period && <CasesTab period={period} />}
       {tab === 'clients' && <ClientsTab />}
+      {tab === 'check' && <CheckTab />}
       {tab === 'rules' && <RulesTab canEdit={isAdmin} />}
     </div>
   );
@@ -191,86 +192,257 @@ function RunBar({ status, isAdmin, period, onPeriod }: { status: Status; isAdmin
   );
 }
 
-function StatCells({ s }: { s: OutcomeStats }) {
+// ---- Traceable numbers: every figure opens the exact cases behind it ----
+type Drill = { title: string; ids: number[]; why?: Record<number, string> };
+type Open = (d: Drill) => void;
+const EXCLUDED_SHORT: Record<ExcludedReason, string> = { too_recent: 'not yet 60 days', one_time: 'one-time', unmatched: 'unmatched', no_outcome: 'no outcome' };
+const ESCALATED_TIP = 'Escalated: damage over $100, theft or a missing item, safety, misconduct, legal or chargeback. These go to the Office Manager and are never handled on the normal ladder.';
+
+function Num({ ids, title, open, why, children }: { ids: number[]; title: string; open: Open; why?: Record<number, string>; children: React.ReactNode }) {
+  if (!ids.length) return <>{children}</>;
+  return <button type="button" className="rep-num" title="Show these cases" onClick={() => open({ title, ids, why })}>{children}</button>;
+}
+
+function RateCell({ s, k, name, open }: { s: OutcomeStats; k: 'saved' | 'partial' | 'lost'; name: string; open: Open }) {
+  if (!s.decided) return <td className="muted">—</td>;
+  const word = k === 'saved' ? 'saved' : k === 'partial' ? 'partly saved' : 'lost';
+  return (
+    <td>
+      <b>{pct(s[k])}</b>{' '}
+      <span className="small muted cmp-nd"><Num ids={s[`${k}_ids`]} title={`${name}: ${word}`} open={open}>{s[`${k}_n`]}</Num> of <Num ids={s.decided_ids} title={`${name}: cases with a known outcome (decided)`} open={open}>{s.decided}</Num> decided</span>
+    </td>
+  );
+}
+
+function ExcludedCell({ s, name, labels, open }: { s: OutcomeStats; name: string; labels: Record<ExcludedReason, string>; open: Open }) {
+  if (!s.excluded_n) return <td className="muted">0</td>;
+  const parts = Object.entries(s.excluded) as [ExcludedReason, number[]][];
+  const why: Record<number, string> = {};
+  for (const [r, list] of parts) for (const id of list) why[id] = labels[r];
+  return (
+    <td className="small">
+      <Num ids={parts.flatMap(([, l]) => l)} title={`${name}: not counted in saved / lost`} why={why} open={open}>{s.excluded_n}</Num>
+      {': '}
+      {parts.map(([r, list], i) => <span key={r}>{i ? ', ' : ''}<Num ids={list} title={`${name}: ${labels[r]}`} why={why} open={open}>{list.length} {EXCLUDED_SHORT[r]}</Num></span>)}
+    </td>
+  );
+}
+
+function CostCell({ s, name, open }: { s: OutcomeStats; name: string; open: Open }) {
+  if (!s.n) return <td className="muted">—</td>;
+  return (
+    <td>
+      {money(s.avg_cost)} <span className="small muted cmp-nd">all <Num ids={s.ids} title={`${name}: every case (total cost ${money(s.total_cost)})`} open={open}>{s.n}</Num></span>
+      {s.decided > 0 && <span className="small muted cmp-nd"><br />{money(s.avg_cost_decided)} on the <Num ids={s.decided_ids} title={`${name}: decided cases`} open={open}>{s.decided}</Num> decided</span>}
+    </td>
+  );
+}
+
+function StatCells({ s, name, labels, open }: { s: OutcomeStats; name: string; labels: Record<ExcludedReason, string>; open: Open }) {
   return (
     <>
-      <td>{s.n}</td>
-      <td>{pct(s.saved)}</td>
-      <td>{pct(s.lost)}</td>
-      <td>{money(s.avg_cost)}</td>
+      <RateCell s={s} k="saved" name={name} open={open} />
+      <RateCell s={s} k="partial" name={name} open={open} />
+      <RateCell s={s} k="lost" name={name} open={open} />
+      <ExcludedCell s={s} name={name} labels={labels} open={open} />
+      <CostCell s={s} name={name} open={open} />
       <td>{conf(s.confidence, s.decided)}</td>
     </>
+  );
+}
+const STAT_HEADS = (
+  <>
+    <th title="Still booking 60 days after the complaint, as a share of decided cases">Saved</th>
+    <th title="Still a client 60 days later but booking less, as a share of decided cases">Partial</th>
+    <th title="Stopped booking within 60 days, as a share of decided cases">Lost</th>
+    <th title="Cases with no saved / lost verdict, and why">Not counted</th>
+    <th title="Average cost over every case, then over the decided cases the rates use">Avg cost</th>
+    <th>Confidence</th>
+  </>
+);
+
+function csvOf(rows: CaseRow[], why?: Record<number, string>) {
+  const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const head = ['Case', 'Opened', 'Client', 'Booking', 'Service date', 'Cleaner', 'Client type', 'Service', 'Category', 'Escalated', 'Tone', 'What we did', 'Cost', 'Outcome', 'Source', 'Link', ...(why ? ['Why not counted'] : [])];
+  const lines = rows.map((c) => [c.id, c.opened_at.slice(0, 10), c.customer_name, c.l27_booking_id, c.service_date?.slice(0, 10), c.cleaner_name, c.client_type, c.service, catLabel(c.category), c.hard_route, c.tone, whatWeDid(c.rungs), Number(c.total_cost).toFixed(2), outcomeOf(c) ? OUTCOME_LABEL[outcomeOf(c) as string] : '', SOURCE_LABEL[c.source] || c.source, c.original_url, ...(why ? [why[c.id]] : [])].map(esc).join(','));
+  return [head.map(esc).join(','), ...lines].join('\n');
+}
+
+function DrillDialog({ drill, cases, loading, onClose }: { drill: Drill; cases: CaseRow[]; loading: boolean; onClose: () => void }) {
+  const [openCase, setOpenCase] = useState<number | null>(null);
+  const rows = useMemo(() => {
+    const want = new Set(drill.ids);
+    return cases.filter((c) => want.has(c.id)).sort((a, b) => b.opened_at.localeCompare(a.opened_at));
+  }, [drill, cases]);
+  const total = rows.reduce((s, c) => s + Number(c.total_cost), 0);
+  const download = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csvOf(rows, drill.why)], { type: 'text/csv' }));
+    a.download = `complaints-${drill.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60)}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  return (
+    <div className="modal-backdrop top" onClick={onClose}>
+      <section className="card modal rep-drill" role="dialog" aria-label={drill.title} onClick={(e) => e.stopPropagation()}>
+        <div className="cmp-runbar">
+          <h2>{drill.title}</h2>
+          <span><button className="secondary" onClick={download} disabled={!rows.length}>Download CSV</button>{' '}<button className="link" onClick={onClose}>Close</button></span>
+        </div>
+        <p className="muted small">
+          {drill.ids.length} {drill.ids.length === 1 ? 'case' : 'cases'} · total cost {money(total)} · average {money(rows.length ? total / rows.length : null)}. Click a row for the full case.
+          {!loading && rows.length !== drill.ids.length && <span className="warn"> {drill.ids.length - rows.length} could not be loaded.</span>}
+        </p>
+        {loading ? <p className="muted">Loading…</p> : (
+          <div className="table-scroll">
+            <table className="rep-drill-table cmp-cases">
+              <thead><tr><th>Opened</th><th>Client</th><th>Booking</th><th>Cleaner</th><th>Category</th><th>What we did</th><th>Cost</th><th>Outcome</th><th>Source</th>{drill.why && <th>Why not counted</th>}</tr></thead>
+              <tbody>
+                {rows.map((c) => (
+                  <tr key={c.id} className={openCase === c.id ? 'selected' : ''} onClick={() => setOpenCase(c.id)}>
+                    <td>{day(c.opened_at)}</td>
+                    <td>{c.customer_name || <span className="muted">unmatched</span>}</td>
+                    <td className="small">{c.l27_booking_id ? `#${c.l27_booking_id}` : '—'}{c.service_date ? ` · ${day(c.service_date)}` : ''}</td>
+                    <td className="small">{c.cleaner_name || '—'}</td>
+                    <td>{catLabel(c.category)}{c.hard_route && <span className="pill late" title={ESCALATED_TIP}>escalated</span>}</td>
+                    <td>{whatWeDid(c.rungs)}</td>
+                    <td>{money(Number(c.total_cost))}</td>
+                    <td>{outcomeOf(c) ? OUTCOME_LABEL[outcomeOf(c) as string] : '—'}</td>
+                    <td className="small">{c.original_url ? <a href={c.original_url} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>{SOURCE_LABEL[c.source] || c.source}</a> : <span className="muted">{SOURCE_LABEL[c.source] || c.source}</span>}</td>
+                    {drill.why && <td className="small">{drill.why[c.id] || '—'}</td>}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {openCase && <CaseDetailCard id={openCase} onClose={() => setOpenCase(null)} />}
+      </section>
+    </div>
   );
 }
 
 function PlaybookTab({ period }: { period: Period }) {
   const q = useQuery({ queryKey: ['complaints', 'playbook', period.from, period.to], queryFn: () => complaintsApi.playbook({ from: period.from, to: period.to }), retry: false, placeholderData: (prev) => prev });
+  const [drill, setDrill] = useState<Drill | null>(null);
+  const cases = useQuery({ queryKey: ['complaints', 'cases', '', period.from, period.to], queryFn: () => complaintsApi.cases({ from: period.from, to: period.to }), retry: false, enabled: !!drill });
   const p = q.data;
   if (q.isLoading) return <p className="muted">Loading…</p>;
   if (q.isError) return <div className="error">{(q.error as Error).message}</div>;
   if (!p) return null;
   if (!p.totals.cases) return <section className="card seg-empty"><h2>No cases stored for these dates</h2><p className="muted">Pick other dates above, or update these dates from the sources.</p></section>;
+  const open: Open = setDrill;
+  const L = p.excluded_labels;
+  const t = p.totals;
+  const oneTime = p.taxonomy.filter((x) => x.one_time.n > 0);
   return (
     <>
       <div className="tiles">
-        <Kpi label="Complaint cases" value={String(p.totals.cases)} note={Object.entries(p.totals.by_source).map(([k, v]) => `${SOURCE_LABEL[k] || k} ${v}`).join(' · ')} />
-        <Kpi label="Recurring clients kept (60 days)" value={pct(p.totals.saved)} note={`of ${p.totals.decided} weekly/biweekly/monthly clients with a known outcome`} />
-        <Kpi label="Recurring clients lost" value={pct(p.totals.lost)} tone={(p.totals.lost || 0) > 0.3 ? 'warn' : undefined} />
-        <Kpi label="One-time clients who booked again" value={pct(p.totals.one_time.rebooked_120)} note={`within 120 days (${pct(p.totals.one_time.rebooked_90)} within 90) · ${p.totals.one_time.decided} of ${p.totals.one_time.n} with a known outcome`} />
-        <Kpi label="Total cost" value={money(p.totals.total_cost)} note={`avg ${money(p.totals.avg_cost)} per case`} />
-        <Kpi label="Hard-routed" value={String(p.totals.hard_routed)} note="damage >$100, theft, safety, misconduct, legal" />
+        <Kpi label="Complaint cases" value={String(t.cases)} note={Object.entries(t.by_source).map(([k, v]) => `${SOURCE_LABEL[k] || k} ${v}`).join(' · ')} />
+        <Kpi label="Recurring clients kept (60 days)" value={pct(t.saved)} note={`${t.saved_n} of ${t.decided} decided`} />
+        <Kpi label="Recurring clients lost" value={pct(t.lost)} note={`${t.lost_n} of ${t.decided} decided`} tone={(t.lost || 0) > 0.3 ? 'warn' : undefined} />
+        <Kpi label="One-time clients who booked again" value={pct(t.one_time.rebooked_120)} note={`${t.one_time.rebooked_120_n} of ${t.one_time.decided} within 120 days`} />
+        <Kpi label="Total cost" value={money(t.total_cost)} note={`avg ${money(t.avg_cost)} over all ${t.n} cases`} />
+        <Kpi label="Escalated" value={String(t.hard_routed)} note="damage / theft / safety / legal" />
         <Kpi label="First reply (median)" value={p.response.first_response_median_hours == null ? '—' : `${p.response.first_response_median_hours} h`} note={`${p.response.with_response_time} cases with reply times`} />
       </div>
 
       <section className="card">
+        <h2>How the totals are counted</h2>
+        <p className="muted small">Click any underlined number on this page to see the exact cases behind it and download them.</p>
+        <table>
+          <thead><tr><th>All complaints</th>{STAT_HEADS}<th title={ESCALATED_TIP}>Escalated</th></tr></thead>
+          <tbody>
+            <tr className="static">
+              <td><Num ids={t.ids} title="All complaints in these dates" open={open}>{t.n}</Num> cases</td>
+              <StatCells s={t} name="All complaints" labels={L} open={open} />
+              <td><Num ids={t.hard_routed_ids} title="Escalated cases" open={open}>{t.hard_routed}</Num></td>
+            </tr>
+          </tbody>
+        </table>
+        {p.hard_routes.some((h) => h.n > 0) && <p className="small muted">Escalated by reason: {p.hard_routes.filter((h) => h.n > 0).map((h, i) => <span key={h.key}>{i ? ' · ' : ''}{h.label} <Num ids={h.ids} title={`Escalated: ${h.label}`} open={open}>{h.n}</Num></span>)}</p>}
+      </section>
+
+      <section className="card">
         <h2>Taxonomy: what comes up, what we did, what worked</h2>
-        <p className="muted small">Saved and Lost count recurring clients only (still booking 60 days later). One-time clients are measured on whether they booked again within 120 days. "Cheapest that works" is the lowest-cost response whose save rate is within 10 points of the best one, among responses with at least 3 known outcomes. Anything marked thin rests on fewer than {p.thin_threshold} cases.</p>
+        <p className="muted small">Saved, Partial and Lost are shares of <b>decided</b> cases: recurring clients matched in Launch27 whose complaint is at least 60 days old. Everything else is listed under Not counted, with the reason. Average cost is shown over every case, then over the same decided cases the rates use. One-time clients have their own table below.</p>
         <div className="table-scroll">
           <table>
-            <thead><tr><th>Category</th><th>Share</th><th>We usually</th><th>Cases</th><th>Saved</th><th>Lost</th><th>Avg cost</th><th>Confidence</th><th>One-time: booked again</th><th>Cheapest that works</th></tr></thead>
+            <thead><tr><th>Category</th><th title="This category's cases as a share of every complaint in these dates">% of all complaints</th><th>We usually</th>{STAT_HEADS}<th title="The lowest-cost response whose save rate is within 10 points of the best one, among responses with at least 3 known outcomes. With fewer outcomes it shows the best we have seen and says so.">Cheapest that works</th></tr></thead>
             <tbody>
-              {p.taxonomy.map((t) => (
-                <tr key={t.key} className="static">
-                  <td>{catLabel(t.key)}{t.hard_routed ? <span className="pill late">{t.hard_routed} hard-routed</span> : null}</td>
-                  <td>{pct(t.share)}</td>
-                  <td>{t.typical_name || '—'}</td>
-                  <StatCells s={t} />
-                  <td>{t.one_time.n ? `${pct(t.one_time.rebooked_120)} · n=${t.one_time.decided}` : '—'}</td>
-                  <td>{t.cheapest_that_works ? `${t.cheapest_that_works.name} · ${pct(t.cheapest_that_works.saved)} saved · ${money(t.cheapest_that_works.avg_cost)}` : <span className="muted">not enough data</span>}</td>
-                </tr>
-              ))}
+              {p.taxonomy.map((x) => {
+                const name = catLabel(x.key);
+                const c = x.cheapest_that_works;
+                return (
+                  <tr key={x.key} className="static">
+                    <td>{name}{x.hard_routed ? <span className="pill late" title={ESCALATED_TIP}><Num ids={x.hard_routed_ids} title={`${name}: escalated`} open={open}>{x.hard_routed} escalated</Num></span> : null}</td>
+                    <td>{pct(x.share)} <span className="small muted cmp-nd"><Num ids={x.ids} title={`${name}: every case`} open={open}>{x.n}</Num> of {x.total_n}</span></td>
+                    <td>{x.typical_name || '—'}</td>
+                    <StatCells s={x} name={name} labels={L} open={open} />
+                    <td className="small">{c ? <><b>{c.name}</b>, {c.grade} confidence: <Num ids={c.ids} title={`${name}: ${c.name}`} open={open}>{c.reason}</Num>{c.saved != null ? ` (${pct(c.saved)} saved, avg ${money(c.avg_cost)})` : ''}</> : <span className="muted">no cases</span>}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
       </section>
 
       <section className="card">
-        <h2>What we did: retention and real cost of each response</h2>
-        <p className="muted small">Each case is counted at the biggest thing we gave. Refunds are grouped by size (we've actually given 20%, 30%, 40%, 50% and full). Hard-routed cases are left out (they're never on the ladder). Reclean cost includes the cleaner's pay, travel and the margin of the slot it used up.</p>
-        <table>
-          <thead><tr><th>Response</th><th>Level</th><th>Cases</th><th>Saved</th><th>Lost</th><th>Avg cost</th><th>Confidence</th></tr></thead>
-          <tbody>
-            {p.ladder.map((r) => (
-              <tr key={r.rung} className="static"><td><b>{r.name}</b></td><td className="muted small">{r.tier}</td><StatCells s={r} /></tr>
-            ))}
-          </tbody>
-        </table>
+        <h2>One-time clients: did they book again?</h2>
+        <p className="muted small">One-time clients have no schedule to keep, so they are left out of Saved and Lost above. The question here is whether they booked again within 90 and 120 days of the complaint. Recleans and free visits don't count as booking again.</p>
+        {oneTime.length === 0 ? <p className="muted">No one-time clients among these complaints.</p> : (
+          <table>
+            <thead><tr><th>Category</th><th>One-time cases</th><th>Booked again within 90 days</th><th>Booked again within 120 days</th><th>Too early to tell</th></tr></thead>
+            <tbody>
+              {[{ key: 'all', one_time: t.one_time }, ...oneTime].map((x) => {
+                const o = x.one_time;
+                const name = x.key === 'all' ? 'All one-time clients' : `${catLabel(x.key)}: one-time clients`;
+                return (
+                  <tr key={x.key} className="static">
+                    <td>{x.key === 'all' ? <b>All categories</b> : catLabel(x.key)}</td>
+                    <td><Num ids={o.ids} title={name} open={open}>{o.n}</Num></td>
+                    <td>{o.decided_90 ? <><b>{pct(o.rebooked_90)}</b> <span className="small muted cmp-nd"><Num ids={o.rebooked_90_ids} title={`${name}, booked again within 90 days`} open={open}>{o.rebooked_90_n}</Num> of <Num ids={o.decided_90_ids} title={`${name}, at least 90 days old`} open={open}>{o.decided_90}</Num></span></> : <span className="muted">—</span>}</td>
+                    <td>{o.decided ? <><b>{pct(o.rebooked_120)}</b> <span className="small muted cmp-nd"><Num ids={o.rebooked_120_ids} title={`${name}, booked again within 120 days`} open={open}>{o.rebooked_120_n}</Num> of <Num ids={o.decided_ids} title={`${name}, at least 120 days old`} open={open}>{o.decided}</Num></span></> : <span className="muted">—</span>}</td>
+                    <td><Num ids={o.too_early_ids} title={`${name}, not yet 120 days old or unmatched`} open={open}>{o.too_early_ids.length}</Num></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
       </section>
 
-      <RecleanVsRefund p={p} />
+      <section className="card">
+        <h2>What we did: retention and real cost of each response</h2>
+        <p className="muted small">Each case is counted at the biggest thing we gave. Refunds are grouped by size (we've actually given 20%, 30%, 40%, 50% and full). Escalated cases are left out (they're never on the ladder). Reclean cost includes the cleaner's pay, travel and the margin of the slot it used up.</p>
+        <div className="table-scroll">
+          <table>
+            <thead><tr><th>Response</th><th>Level</th><th>Cases</th>{STAT_HEADS}</tr></thead>
+            <tbody>
+              {p.ladder.map((r) => (
+                <tr key={r.rung} className="static"><td><b>{r.name}</b></td><td className="muted small">{r.tier}</td><td><Num ids={r.ids} title={`${r.name}: every case`} open={open}>{r.n}</Num></td><StatCells s={r} name={r.name} labels={L} open={open} /></tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
 
-      {p.root_causes && <RootCauses rc={p.root_causes} />}
-      <Baseline b={p.baseline} />
+      <RecleanVsRefund p={p} open={open} />
+
+      {p.root_causes && <RootCauses rc={p.root_causes} open={open} />}
+      <Baseline b={p.baseline} open={open} />
 
       <section className="card">
         <h2>Data gaps and confidence</h2>
         <ul>{p.gaps.map((g, i) => <li key={i}>{g}</li>)}</ul>
       </section>
+      {drill && <DrillDialog drill={drill} cases={cases.data || []} loading={cases.isLoading} onClose={() => setDrill(null)} />}
     </>
   );
 }
 
-function RecleanVsRefund({ p }: { p: Playbook }) {
+function RecleanVsRefund({ p, open }: { p: Playbook; open: Open }) {
   const t = p.reclean_vs_refund_total;
   const l = p.like_for_like;
   const arms = [
@@ -279,6 +451,10 @@ function RecleanVsRefund({ p }: { p: Playbook }) {
     { label: 'Neither (apology or credit)', s: t.neither },
   ];
   const any = t.reclean.n + t.refund.n > 0;
+  const kept = (s: OutcomeStats, name: string) => (s.decided
+    ? <><b>{pct(s.saved)}</b> <span className="small muted cmp-nd"><Num ids={s.saved_ids} title={`${name}: saved`} open={open}>{s.saved_n}</Num> of <Num ids={s.decided_ids} title={`${name}: decided`} open={open}>{s.decided}</Num></span></>
+    : s.n ? <span className="muted">too early (<Num ids={s.ids} title={`${name}: every case`} open={open}>{s.n}</Num>)</span> : <span className="muted">—</span>);
+  const cost = (s: OutcomeStats, name: string) => (s.n ? <>{money(s.avg_cost)} <span className="small muted cmp-nd">all <Num ids={s.ids} title={`${name}: every case (total cost ${money(s.total_cost)})`} open={open}>{s.n}</Num></span></> : <span className="muted">—</span>);
   return (
     <section className="card">
       <h2>Reclean vs refund</h2>
@@ -291,14 +467,14 @@ function RecleanVsRefund({ p }: { p: Playbook }) {
               <div key={a.label} className="cmp-arm">
                 <span className="muted small">{a.label}</span>
                 <span className="cmp-arm-value">{a.s.decided ? pct(a.s.saved) : '—'}</span>
-                <span className="small">recurring clients kept</span>
-                <span className="muted small">{a.s.n} cases · avg cost {money(a.s.avg_cost)} · {a.s.decided} with a known outcome</span>
+                <span className="small">recurring clients kept: <Num ids={a.s.saved_ids} title={`${a.label}: saved`} open={open}>{a.s.saved_n}</Num> of <Num ids={a.s.decided_ids} title={`${a.label}: decided`} open={open}>{a.s.decided}</Num> decided</span>
+                <span className="muted small"><Num ids={a.s.ids} title={`${a.label}: every case`} open={open}>{a.s.n}</Num> cases · avg cost {money(a.s.avg_cost)} over all, {money(a.s.avg_cost_decided)} on the decided · {a.s.excluded_n} not counted</span>
               </div>
             ))}
           </div>
           <div className={`cmp-note ${l.reclean && l.refund && l.matched_pairs >= p.thin_threshold ? 'ok' : ''}`}>
             <b>Like for like.</b> Angrier clients tend to get refunds, which makes refunds look worse than they are. Comparing only similar complaints (same category, calm or heated, new or established client):{' '}
-            {l.reclean && l.refund ? <>reclean kept <b>{pct(l.reclean.saved)}</b>, refund kept <b>{pct(l.refund.saved)}</b>, from {l.matched_pairs} comparable pair{l.matched_pairs === 1 ? '' : 's'}. {l.verdict}</> : <span className="muted">not enough similar cases yet to compare fairly. This fills in as more history is read.</span>}
+            {l.reclean && l.refund ? <>reclean kept <b>{pct(l.reclean.saved)}</b> (<Num ids={l.reclean.ids} title="Like for like: recleans compared" open={open}>{l.reclean.n} cases</Num>), refund kept <b>{pct(l.refund.saved)}</b> (<Num ids={l.refund.ids} title="Like for like: refunds compared" open={open}>{l.refund.n} cases</Num>), from {l.matched_pairs} comparable pair{l.matched_pairs === 1 ? '' : 's'} in {l.groups_compared} group{l.groups_compared === 1 ? '' : 's'}. {l.verdict}</> : <span className="muted">not enough similar cases yet to compare fairly. This fills in as more history is read.</span>}
           </div>
           {p.reclean_vs_refund.length > 0 && (
             <div className="table-scroll">
@@ -308,11 +484,11 @@ function RecleanVsRefund({ p }: { p: Playbook }) {
                   {p.reclean_vs_refund.map((x) => (
                     <tr key={x.key} className="static">
                       <td>{catLabel(x.key)}</td>
-                      <td>{x.reclean.decided ? `${pct(x.reclean.saved)} of ${x.reclean.decided}` : x.reclean.n ? `too early (${x.reclean.n})` : '—'}</td>
-                      <td>{x.reclean.n ? money(x.reclean.avg_cost) : '—'}</td>
-                      <td>{x.refund.decided ? `${pct(x.refund.saved)} of ${x.refund.decided}` : x.refund.n ? `too early (${x.refund.n})` : '—'}</td>
-                      <td>{x.refund.n ? money(x.refund.avg_cost) : '—'}</td>
-                      <td>{x.neither.decided ? `${pct(x.neither.saved)} of ${x.neither.decided}` : '—'}</td>
+                      <td>{kept(x.reclean, `${catLabel(x.key)}, reclean`)}</td>
+                      <td>{cost(x.reclean, `${catLabel(x.key)}, reclean`)}</td>
+                      <td>{kept(x.refund, `${catLabel(x.key)}, refund`)}</td>
+                      <td>{cost(x.refund, `${catLabel(x.key)}, refund`)}</td>
+                      <td>{kept(x.neither, `${catLabel(x.key)}, neither`)}</td>
                       <td className="small">{x.verdict}</td>
                     </tr>
                   ))}
@@ -326,17 +502,20 @@ function RecleanVsRefund({ p }: { p: Playbook }) {
   );
 }
 
-function RootCauses({ rc }: { rc: NonNullable<Playbook['root_causes']> }) {
+function RootCauses({ rc, open }: { rc: NonNullable<Playbook['root_causes']>; open: Open }) {
   return (
     <section className="card">
       <h2>Pain points upstream: when complaints happen</h2>
-      <p className="muted small">Complaints per 100 visits in each situation, against the overall {rc.base_rate_per_100} per 100 ({rc.linked_complaints} complaints linked to one of {rc.visits.toLocaleString()} visits). Above 1.5× is worth fixing before the complaint happens.</p>
+      <p className="muted small">Complaints per 100 visits in each situation, against the overall {rc.base_rate_per_100} per 100 (<Num ids={rc.linked_ids} title="Complaints linked to a visit in these dates" open={open}>{rc.linked_complaints} complaints</Num> linked to one of {rc.visits.toLocaleString()} visits). Above 1.5× is worth fixing before the complaint happens. Visit counts come straight from Launch27 bookings and aren't listed case by case.</p>
       <table>
-        <thead><tr><th>Situation at the visit</th><th>Visits</th><th>Complaints</th><th>Per 100</th><th>vs overall</th><th>Confidence</th></tr></thead>
+        <thead><tr><th>Situation at the visit</th><th>Complaints</th><th>Visits</th><th>Per 100</th><th>vs overall</th><th>Confidence</th></tr></thead>
         <tbody>
           {rc.rows.map((r) => (
             <tr key={r.key} className="static">
-              <td>{r.label}</td><td>{r.visits.toLocaleString()}</td><td>{r.complaints}</td><td>{r.rate_per_100 ?? '—'}</td>
+              <td>{r.label}</td>
+              <td><Num ids={r.case_ids} title={`Complaints after: ${r.label.toLowerCase()}`} open={open}>{r.complaints}</Num></td>
+              <td>{r.visits.toLocaleString()}</td>
+              <td>{r.rate_per_100 == null ? '—' : <>{r.rate_per_100} <span className="small muted cmp-nd">{r.complaints} of {r.visits.toLocaleString()}</span></>}</td>
               <td className={(r.vs_base || 0) >= 1.5 ? 'neg' : ''}>{r.vs_base == null ? '—' : `${r.vs_base}×`}</td>
               <td>{conf(r.confidence, r.complaints)}</td>
             </tr>
@@ -347,7 +526,7 @@ function RootCauses({ rc }: { rc: NonNullable<Playbook['root_causes']> }) {
   );
 }
 
-function Baseline({ b }: { b: Playbook['baseline'] }) {
+function Baseline({ b, open }: { b: Playbook['baseline']; open: Open }) {
   const max = Math.max(0.0001, ...b.months.map((m) => m.rate || 0));
   return (
     <section className="card">
@@ -360,6 +539,22 @@ function Baseline({ b }: { b: Playbook['baseline'] }) {
             <small>{m.month.slice(5)}</small>
           </div>
         ))}
+      </div>
+      <div className="table-scroll">
+        <table>
+          <thead><tr><th>Month</th><th>Cost as % of revenue</th><th>Complaint cost</th><th>Refunds</th><th>Credits</th><th>Recleans</th><th>Revenue</th><th>Cases</th></tr></thead>
+          <tbody>
+            {b.months.map((m) => (
+              <tr key={m.month} className="static">
+                <td>{m.month}</td>
+                <td><b>{pct(m.rate, 2)}</b> <span className="small muted cmp-nd">{money(m.cost)} of {money(m.revenue)}</span></td>
+                <td>{money(m.cost)}</td><td>{money(m.refunds)}</td><td>{money(m.credits)}</td><td>{money(m.recleans)}</td>
+                <td>{money(m.revenue)}</td>
+                <td><Num ids={m.case_ids} title={`Complaints opened in ${m.month}`} open={open}>{m.cases}</Num></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
       <p className="small warn">{b.caveat}</p>
     </section>
@@ -427,7 +622,7 @@ function CasesTab({ period }: { period: Period }) {
                   <td>{c.customer_name || <span className="muted">unmatched</span>}</td>
                   <td>{c.client_type === 'one_time' ? 'One-time' : c.client_type === 'recurring' ? 'Recurring' : '—'}</td>
                   <td className="small">{c.service || '—'}</td>
-                  <td>{catLabel(c.category)}{c.hard_route && <span className="pill late">hard route</span>}</td>
+                  <td>{catLabel(c.category)}{c.hard_route && <span className="pill late" title={ESCALATED_TIP}>escalated</span>}</td>
                   <td>{c.tone ? TONE_LABEL[c.tone] : '—'}</td>
                   <td>{whatWeDid(c.rungs)}</td>
                   <td>{money(Number(c.total_cost))}</td>
@@ -464,7 +659,7 @@ function CaseDetailCard({ id, onClose }: { id: number; onClose: () => void }) {
           <span className="muted small">classified by {c.classified_by}</span>
         </dd>
         <dt>Tone · severity</dt><dd>{c.tone ? TONE_LABEL[c.tone] : '—'} · {c.severity ?? '—'}/4</dd>
-        {c.hard_route && (<><dt>Hard route</dt><dd className="neg">{c.hard_route.replace(/_/g, ' ')} → Office Manager</dd></>)}
+        {c.hard_route && (<><dt>Escalated</dt><dd className="neg">{c.hard_route.replace(/_/g, ' ')} → Office Manager</dd></>)}
         <dt>Areas</dt><dd>{c.areas_cited?.length ? c.areas_cited.join(', ') : '—'}</dd>
         <dt>Booking</dt><dd>{c.l27_booking_id ? `#${c.l27_booking_id}` : '—'} {c.service_date && `· cleaned ${day(c.service_date)}`}</dd>
         <dt>Service</dt><dd>{c.service || '—'} · {c.client_type === 'one_time' ? 'One-time client' : c.client_type === 'recurring' ? 'Recurring client' : 'client type unknown'}</dd>
@@ -536,6 +731,127 @@ function ClientsTab() {
         {c.review_mentions.length ? <ClientTable rows={c.review_mentions} head="Mentioned" extra={(r) => day((r as (typeof c.review_mentions)[number]).mentioned_on)} /> : <p className="muted">Nobody has mentioned a review in the periods mined.</p>}
       </section>
     </>
+  );
+}
+
+// Check accuracy: a person looks at a random sample per category and says whether the
+// engine's category was right. The answers fix the case and give a measured accuracy.
+function AccuracyRows({ rows, label }: { rows: (ReviewTally & { waiting?: number })[]; label: (k: string) => string }) {
+  return (
+    <>
+      {rows.map((r) => (
+        <tr key={r.key}>
+          <td>{label(r.key)}</td>
+          <td className="num">{r.checked}</td>
+          <td className="num">{r.accuracy == null ? '—' : pct(r.accuracy)}{r.checked > 0 && !r.enough && <span className="pill late" title="Too few checked to trust this number yet"> thin</span>}</td>
+          <td className="num">{r.wrong_category}</td>
+          <td className="num">{r.not_complaint}</td>
+          <td className="num muted">{r.waiting ?? ''}</td>
+        </tr>
+      ))}
+    </>
+  );
+}
+
+function CheckTab() {
+  const qc = useQueryClient();
+  const [category, setCategory] = useState('');
+  const [source, setSource] = useState('');
+  const [done, setDone] = useState<number[]>([]);
+  const q = useQuery({ queryKey: ['complaints', 'review', category, source], queryFn: () => complaintsApi.review({ category: category || undefined, source: source || undefined }), retry: false, refetchOnWindowFocus: false });
+  const send = useMutation({
+    mutationFn: (v: { id: number; verdict: 'correct' | 'wrong_category' | 'not_complaint'; category?: string }) => complaintsApi.submitReview(v.id, { verdict: v.verdict, category: v.category }),
+    onSuccess: (r, v) => {
+      setDone((d) => [...d, v.id]);
+      qc.setQueryData(['complaints', 'review', category, source], (old: typeof q.data) => (old ? { ...old, stats: r.stats } : old));
+      for (const k of ['playbook', 'cases', 'clients']) qc.invalidateQueries({ queryKey: ['complaints', k] });
+    },
+  });
+  if (q.isError) return <section className="card seg-empty"><p className="muted">{(q.error as Error).message}</p></section>;
+  if (!q.data) return <section className="card">Loading…</section>;
+  const { stats } = q.data;
+  const queue = q.data.queue.filter((c) => !done.includes(c.id));
+  const t = stats.total;
+  return (
+    <>
+      <section className="card">
+        <h2>How accurate is the sorting?</h2>
+        <div className="cmp-arms">
+          <div className="cmp-arm"><span className="small muted">Checked by a person</span><span className="cmp-arm-value">{t.checked}</span><span className="small muted">{stats.waiting} not checked yet</span></div>
+          <div className="cmp-arm"><span className="small muted">Category was right</span><span className="cmp-arm-value">{t.accuracy == null ? '—' : pct(t.accuracy)}</span><span className="small muted">{t.checked < stats.min_checks ? `Needs at least ${stats.min_checks} checks to mean anything` : `${t.correct} of ${t.checked}`}</span></div>
+          <div className="cmp-arm"><span className="small muted">Wrong category</span><span className="cmp-arm-value">{t.wrong_category}</span><span className="small muted">Fixed when you pick the right one</span></div>
+          <div className="cmp-arm"><span className="small muted">Not a complaint at all</span><span className="cmp-arm-value">{t.not_complaint}</span><span className="small muted">Taken out of the playbook</span></div>
+        </div>
+        <div className="table-wrap">
+          <table className="table">
+            <thead><tr><th>What the engine said</th><th className="num">Checked</th><th className="num">Right</th><th className="num">Wrong category</th><th className="num">Not a complaint</th><th className="num">Waiting</th></tr></thead>
+            <tbody>
+              <AccuracyRows rows={stats.by_category} label={catLabel} />
+              {stats.by_source.length > 0 && <tr><th colSpan={6}>By where it came from</th></tr>}
+              <AccuracyRows rows={stats.by_source} label={(k) => SOURCE_LABEL[k] || k} />
+              {stats.by_classifier.length > 0 && <tr><th colSpan={6}>By who sorted it</th></tr>}
+              <AccuracyRows rows={stats.by_classifier} label={(k) => (k === 'claude' ? 'Claude' : k === 'rules' ? 'Keyword rules' : k)} />
+            </tbody>
+          </table>
+        </div>
+        {stats.confusions.length > 0 && (
+          <>
+            <h3>Most common mix-ups</h3>
+            <ul>{stats.confusions.map((c) => <li key={`${c.from}>${c.to}`}>{catLabel(c.from)} → should be <b>{catLabel(c.to)}</b> ({c.n})</li>)}</ul>
+          </>
+        )}
+      </section>
+      <section className="card cmp-filter">
+        <label className="cmp-date">Category
+          <select value={category} onChange={(e) => { setCategory(e.target.value); setDone([]); }}>
+            <option value="">All (20 random from each)</option>
+            {Object.keys(CATEGORY_LABEL).map((k) => <option key={k} value={k}>{catLabel(k)}</option>)}
+          </select>
+        </label>
+        <label className="cmp-date">Source
+          <select value={source} onChange={(e) => { setSource(e.target.value); setDone([]); }}>
+            <option value="">All sources</option>
+            {['kustomer', 'gmail', 'launch27_rating', 'slack'].map((k) => <option key={k} value={k}>{SOURCE_LABEL[k]}</option>)}
+          </select>
+        </label>
+        <span className="muted small">{queue.length} to check in this batch</span>
+        <button className="link" onClick={() => { setDone([]); q.refetch(); }}>New batch</button>
+      </section>
+      {send.isError && <p className="cmp-note">{(send.error as Error).message}</p>}
+      {queue.length === 0 && <section className="card seg-empty"><p className="muted">Nothing left to check here. Pick another category or source, or get a new batch.</p></section>}
+      {queue.slice(0, 10).map((c) => <CheckCard key={c.id} c={c} busy={send.isPending} onVerdict={(verdict, cat) => send.mutate({ id: c.id, verdict, category: cat })} />)}
+      {queue.length > 10 && <p className="muted small">{queue.length - 10} more appear as you go.</p>}
+    </>
+  );
+}
+
+function CheckCard({ c, busy, onVerdict }: { c: ReviewItem; busy: boolean; onVerdict: (v: 'correct' | 'wrong_category' | 'not_complaint', category?: string) => void }) {
+  return (
+    <section className="card cmp-check">
+      <div className="cmp-runbar">
+        <h3><span className="pill">{catLabel(c.category)}</span> {c.customer_name || 'Unmatched client'} · {day(c.opened_at)}</h3>
+        <span className="muted small">{SOURCE_LABEL[c.source] || c.source} · sorted by {c.classified_by === 'claude' ? 'Claude' : 'keyword rules'}</span>
+      </div>
+      {c.text && <blockquote className="cmp-quote">{c.text}</blockquote>}
+      {c.summary ? <p>{c.text ? <span className="muted small">Engine's summary: </span> : null}{c.summary}</p> : !c.text && <p className="muted">No text stored for this case{c.original_url ? ': open the email to check it' : ''}.</p>}
+      <dl className="kv">
+        {c.title && (<><dt>Subject</dt><dd>{c.title}</dd></>)}
+        {c.source_status && (<><dt>Kustomer status</dt><dd>{c.source_status}</dd></>)}
+        {c.rating != null && (<><dt>Rating</dt><dd>Unhappy rating in Launch27</dd></>)}
+        <dt>Tone · severity</dt><dd>{c.tone ? TONE_LABEL[c.tone] : '—'} · {c.severity ?? '—'}/4{c.hard_route ? ` · hard route: ${c.hard_route.replace(/_/g, ' ')}` : ''}</dd>
+        {c.areas_cited?.length > 0 && (<><dt>Areas</dt><dd>{c.areas_cited.join(', ')}</dd></>)}
+        <dt>What we did</dt><dd>{whatWeDid(c.rungs)}{c.resolution_text ? ` · ${c.resolution_text}` : ''}</dd>
+      </dl>
+      <div className="cmp-check-actions">
+        <button disabled={busy} onClick={() => onVerdict('correct')}>Correct</button>
+        <select value="" disabled={busy} aria-label="Pick the right category" onChange={(e) => e.target.value && onVerdict('wrong_category', e.target.value)}>
+          <option value="">Wrong, it should be…</option>
+          {Object.keys(CATEGORY_LABEL).filter((k) => k !== c.category).map((k) => <option key={k} value={k}>{catLabel(k)}</option>)}
+        </select>
+        <button className="secondary" disabled={busy} onClick={() => onVerdict('not_complaint')}>Not a complaint</button>
+        {c.original_url && <a href={c.original_url} target="_blank" rel="noreferrer" className="small">Open the email</a>}
+      </div>
+    </section>
   );
 }
 

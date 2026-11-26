@@ -120,49 +120,40 @@ export function loadConfig(env = process.env) {
     }
   }
 
-  // Live SMS through RingCentral (docs/sms.md). A server-side app with JWT sign-in, separate
-  // from the calling widget above. Production must use the production platform; development
-  // and QA may only use the RingCentral sandbox, and their sends are always sandboxed anyway
-  // (NOTIFICATIONS_MODE is forced to sandbox outside production).
-  let ringcentralSms = null;
-  const smsSet = !!(env.RINGCENTRAL_SMS_CLIENT_ID || env.RINGCENTRAL_SMS_JWT);
-  if (smsSet) {
-    const server = (env.RINGCENTRAL_SMS_SERVER || (isProd ? 'https://platform.ringcentral.com' : 'https://platform.devtest.ringcentral.com')).replace(/\/+$/, '');
-    const sandboxServer = /devtest|sandbox/i.test(server);
-    const numbers = String(env.RINGCENTRAL_SMS_NUMBERS || '').split(/[,\s]+/).filter(Boolean);
-    const webhookUrl = env.RINGCENTRAL_SMS_WEBHOOK_URL || null;
-    const webhookToken = env.RINGCENTRAL_SMS_WEBHOOK_TOKEN || null;
-    if (!(env.RINGCENTRAL_SMS_CLIENT_ID && env.RINGCENTRAL_SMS_CLIENT_SECRET && env.RINGCENTRAL_SMS_JWT)) warnings.push('RingCentral SMS needs RINGCENTRAL_SMS_CLIENT_ID, RINGCENTRAL_SMS_CLIENT_SECRET and RINGCENTRAL_SMS_JWT; SMS is not connected.');
-    else if (!isProd && !sandboxServer) warnings.push(`RingCentral SMS disabled in ${appEnv}: only the RingCentral sandbox (platform.devtest.ringcentral.com) is allowed outside production.`);
-    else if (isProd && sandboxServer) warnings.push('RingCentral SMS disabled: production must use the production platform (platform.ringcentral.com), not the sandbox.');
-    else if (webhookUrl && !/^https:\/\//.test(webhookUrl)) warnings.push('RINGCENTRAL_SMS_WEBHOOK_URL must be an https:// address; SMS is not connected.');
-    else if (webhookUrl && (!webhookToken || webhookToken.length < 16 || webhookToken.length > 64)) warnings.push('RINGCENTRAL_SMS_WEBHOOK_TOKEN must be 16-64 random characters when a webhook address is set; SMS is not connected.');
-    else {
-      ringcentralSms = { server, clientId: env.RINGCENTRAL_SMS_CLIENT_ID, clientSecret: env.RINGCENTRAL_SMS_CLIENT_SECRET, jwt: env.RINGCENTRAL_SMS_JWT, numbers, webhookUrl, webhookToken: webhookUrl ? webhookToken : null };
-      if (!webhookUrl) warnings.push('RingCentral SMS has no RINGCENTRAL_SMS_WEBHOOK_URL: incoming texts arrive through the Message Store check (every 5 minutes) instead of instantly.');
-    }
-  }
+  // SMS set-up problems are also shown on Support settings → Channels, not only in the logs.
+  const smsProblems = [];
+  const smsWarn = (provider, text) => {
+    warnings.push(text);
+    smsProblems.push({ provider, problem: text });
+  };
+  // SMS runs on Twilio only. The RingCentral SMS integration was removed (RingCentral calling,
+  // above, is unaffected); left-over RINGCENTRAL_SMS_* variables are ignored.
+  const leftover = Object.keys(env).filter((k) => /^RINGCENTRAL_SMS_/i.test(k) && env[k]).sort();
+  if (leftover.length) warnings.push(`RingCentral SMS was removed: SMS runs on Twilio only. ${leftover.join(', ')} ${leftover.length === 1 ? 'is' : 'are'} ignored and can be deleted. RingCentral calling is not affected.`);
 
-  // Live SMS through Twilio (docs/sms.md), alongside RingCentral: each number belongs to one
-  // provider. Production only: Twilio has no separate test data, so dev and QA would read real
+  // Live SMS through Twilio (docs/sms.md): every business number texts through Twilio.
+  // Production only: Twilio has no separate test data, so dev and QA would read real
   // customers' texts. They use the sandbox SMS channel instead.
   let twilioSms = null;
   if (env.TWILIO_ACCOUNT_SID || env.TWILIO_AUTH_TOKEN) {
     const numbers = String(env.TWILIO_SMS_NUMBERS || '').split(/[,\s]+/).filter(Boolean);
-    const rcNumbers = new Set((ringcentralSms?.numbers || []).map((n) => n.replace(/[^\d+]/g, '')));
-    const overlap = numbers.filter((n) => rcNumbers.has(n.replace(/[^\d+]/g, '')));
     const base = env.TWILIO_WEBHOOK_BASE_URL ? env.TWILIO_WEBHOOK_BASE_URL.replace(/\/+$/, '') : null;
     if (!isProd) warnings.push(`Twilio SMS settings ignored in ${appEnv}: only production reads and sends real texts. SMS runs in sandbox mode here.`);
-    else if (!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN)) warnings.push('Twilio SMS needs TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN; Twilio is not connected.');
-    else if (!numbers.length) warnings.push('TWILIO_SMS_NUMBERS is empty: list the Twilio numbers to text from; Twilio is not connected.');
-    else if (overlap.length) warnings.push(`A number can belong to only one SMS provider: ${overlap.join(', ')} is set for both RingCentral and Twilio. Twilio is not connected.`);
-    else if (base && !/^https:\/\//.test(base)) warnings.push('TWILIO_WEBHOOK_BASE_URL must be an https:// address; Twilio is not connected.');
+    else if (!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN)) smsWarn('twilio', 'Twilio SMS needs TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN; Twilio is not connected.');
+    else if (!numbers.length) smsWarn('twilio', 'TWILIO_SMS_NUMBERS is empty: list the Twilio numbers to text from; Twilio is not connected.');
+    else if (base && !/^https:\/\//.test(base)) smsWarn('twilio', 'TWILIO_WEBHOOK_BASE_URL must be an https:// address; Twilio is not connected.');
     else {
       twilioSms = { accountSid: env.TWILIO_ACCOUNT_SID, authToken: env.TWILIO_AUTH_TOKEN, apiKeySid: env.TWILIO_API_KEY_SID || null, apiKeySecret: env.TWILIO_API_KEY_SECRET || null, numbers, webhookBaseUrl: base };
-      if (!base) warnings.push('Twilio SMS has no TWILIO_WEBHOOK_BASE_URL: incoming texts arrive through the 5-minute check, and delivery status by polling.');
+      if (!base) smsWarn('twilio', 'Twilio SMS has no TWILIO_WEBHOOK_BASE_URL: incoming texts arrive through the 5-minute check, and delivery status by polling.');
     }
   }
-  if (isProd && !ringcentralSms && !twilioSms) warnings.push('SMS is not connected: set the RINGCENTRAL_SMS_* or TWILIO_* variables (docs/sms.md). Text replies are saved, not sent.');
+  if (isProd && !(env.TWILIO_ACCOUNT_SID || env.TWILIO_AUTH_TOKEN)) {
+    // Twilio is switched on by TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN. Name (never show the value
+    // of) any other TWILIO_* variable that is set, so a misnamed variable is easy to spot.
+    const other = Object.keys(env).filter((k) => /^TWILIO/i.test(k) && env[k]).sort();
+    if (other.length) smsWarn('twilio', `Twilio is not connected: TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN are not set on this service (found ${other.join(', ')}).`);
+  }
+  if (isProd && !twilioSms) smsWarn(null, 'SMS is not connected: set the TWILIO_* variables (docs/sms.md). Text replies are saved, not sent.');
 
   const placement = parsePlacementTokens(env.PLACEMENT_TOKENS);
   const placementIps = parseIpList(env.PLACEMENT_ALLOWED_IPS);
@@ -224,6 +215,7 @@ export function loadConfig(env = process.env) {
     sessionSecret: env.SESSION_SECRET || 'dev-only-secret',
     allowWrites,
     notificationsMode,
+    smsProblems,
     gmail,
     // Support workspace
     databaseUrl: env.DATABASE_URL || null,
@@ -232,18 +224,25 @@ export function loadConfig(env = process.env) {
     adminEmails: env.ADMIN_EMAILS || '',
     // Monthly raise check: who gets the bell notification (comma-separated). Empty = every admin.
     raiseDigestEmails: env.RAISE_DIGEST_EMAILS || '',
+    // Pay adjustments sheet (read-only): late cancels, no-shows, Google review bonuses. Set its id in
+    // PAY_ADJUSTMENTS_SHEET_ID and share it as Viewer with the Google service account.
+    paySheet: { id: env.PAY_ADJUSTMENTS_SHEET_ID || null, range: env.PAY_ADJUSTMENTS_RANGE || 'Sheet1!A2:I', serviceAccount: l27Mode === 'live' ? parseServiceAccount(env.GMAIL_SERVICE_ACCOUNT_JSON) : null },
     supervisorEmails: env.SUPERVISOR_EMAILS || '',
     // Utilization report (read-only): everyone, production included. UTILIZATION_EMAILS, if set,
     // narrows it to those logins.
     utilizationEnabled: true,
     utilizationEmails: String(env.UTILIZATION_EMAILS || '').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean),
+    // KPI scorecard (Reports → KPI scorecard). Dev and QA: everyone, synthetic data. Production:
+    // only these logins (comma-separated); empty = nobody.
+    // The one mailbox that receives the monthly Syft management report (read-only, production only).
+    kpiSyftMailbox: isProd ? String(env.KPI_SYFT_MAILBOX || '').trim().toLowerCase() || null : null,
+    kpiEmails: String(env.KPI_EMAILS || '').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean),
     simulator: env.INBOX_SIMULATOR === undefined ? !isProd : truthy(env.INBOX_SIMULATOR),
     // Sample inbox conversations on an empty database. Never in production.
     sampleData: !isProd && truthy(env.SAMPLE_DATA),
     portalName,
     portalLinks,
     ringcentralClientId,
-    ringcentralSms,
     twilioSms,
     ringcentralServer,
     ringcentralRecord,

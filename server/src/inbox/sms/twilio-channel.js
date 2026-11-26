@@ -1,4 +1,4 @@
-// Live SMS through Twilio, alongside RingCentral: each business number belongs to one provider.
+// Live SMS through Twilio: every business number texts through Twilio.
 //
 //   Twilio ──signed webhook──▶ /webhooks/twilio/sms ──▶ sms_events ──worker──▶ ingestInbound()
 //   Twilio Messages list ──every 5 min, per number──▶ sms_events (same key: never twice)
@@ -54,6 +54,54 @@ export function createTwilioChannel({ db, client, smsConfig, identify, log = () 
     last.health = now();
     return { ok, health };
   }
+
+  // ---------- moving the numbers' incoming texts to the portal (and back) ----------
+  // Until then the numbers send incoming texts somewhere else (Kustomer) and the portal only
+  // finds them with the missed-text check. Moving a number saves where it pointed before,
+  // first, so "Hand back" restores it exactly. Only our configured, SMS-capable numbers.
+
+  const savedOf = (st) => (st?.previous_webhooks && typeof st.previous_webhooks === 'object' ? { ...st.previous_webhooks } : {});
+
+  async function takeOver() {
+    if (!smsUrl) throw new Error('TWILIO_WEBHOOK_BASE_URL is not set, so there is no portal address to send the texts to.');
+    const saved = savedOf(await state());
+    const moved = [];
+    for (const n of await client.incomingNumbers()) {
+      const num = normalizePhone(n.phone_number);
+      if (!allowed.includes(num) || !n.capabilities?.sms) continue;
+      if (n.sms_url === smsUrl && !n.sms_application_sid) continue;
+      if (!saved[num]) {
+        saved[num] = { sms_url: n.sms_url || '', sms_method: n.sms_method || 'POST', sms_application_sid: n.sms_application_sid || '', saved_at: new Date(now()).toISOString() };
+        await setState({ previous_webhooks: JSON.stringify(saved) });
+      }
+      await client.updateNumber(n.sid, { SmsUrl: smsUrl, SmsMethod: 'POST', SmsApplicationSid: '' });
+      moved.push(num);
+    }
+    log('info', 'sms (twilio): incoming texts moved to the portal', { numbers: moved.length });
+    await checkHealth();
+    return moved;
+  }
+
+  async function handBack() {
+    const saved = savedOf(await state());
+    const byNumber = new Map((await client.incomingNumbers()).map((n) => [normalizePhone(n.phone_number), n]));
+    const back = [];
+    for (const [num, prev] of Object.entries(saved)) {
+      const n = byNumber.get(num);
+      if (n) {
+        await client.updateNumber(n.sid, { SmsUrl: prev.sms_url || '', SmsMethod: prev.sms_method || 'POST', SmsApplicationSid: prev.sms_application_sid || '' });
+        back.push(num);
+      }
+      delete saved[num];
+      await setState({ previous_webhooks: Object.keys(saved).length ? JSON.stringify(saved) : null });
+    }
+    log('info', 'sms (twilio): incoming texts handed back', { numbers: back.length });
+    await checkHealth();
+    return back;
+  }
+
+  // While some numbers still send their texts elsewhere, look for missed texts every minute.
+  const reconcileEvery = (st) => ((st?.health?.webhook_elsewhere || []).length ? MIN : EVERY.reconcile);
 
   // ---------- outbound ----------
 
@@ -174,6 +222,8 @@ export function createTwilioChannel({ db, client, smsConfig, identify, log = () 
     checkHealth,
     updateDeliveries,
     check: () => guarded('health', checkHealth),
+    takeOver,
+    handBack,
     async start() {
       await guarded('health', checkHealth);
     },
@@ -183,7 +233,7 @@ export function createTwilioChannel({ db, client, smsConfig, identify, log = () 
       if (!st.enabled) return;
       const t = now();
       if (t - last.health >= EVERY.health) await guarded('health', checkHealth);
-      if (t - last.reconcile >= EVERY.reconcile) await guarded('missed-text check', reconcile);
+      if (t - last.reconcile >= reconcileEvery(st)) await guarded('missed-text check', reconcile);
       if (t - last.delivery >= EVERY.delivery) await guarded('delivery status', updateDeliveries);
     },
     async status() {
@@ -194,7 +244,12 @@ export function createTwilioChannel({ db, client, smsConfig, identify, log = () 
         health_ok: st.health_ok,
         health: st.health,
         configured_numbers: allowed,
-        receiving: smsUrl ? 'webhook + missed-text check every 5 minutes' : 'missed-text check every 5 minutes (no webhook address set)',
+        receiving: !smsUrl
+          ? 'missed-text check every 5 minutes (no webhook address set)'
+          : (st.health?.webhook_elsewhere || []).length
+            ? 'missed-text check every minute: some numbers still send their texts somewhere else'
+            : 'webhook + missed-text check every 5 minutes',
+        handed_over: Object.keys(savedOf(st)),
         webhook_url: smsUrl,
         status_callback_url: statusUrl,
         last_webhook_at: st.last_webhook_at,

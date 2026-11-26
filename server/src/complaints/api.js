@@ -1,6 +1,7 @@
-// /api/complaints/*: the Phase 1 playbook, cases and rules. Complaint cases hold client
-// names and what they wrote, so reading is supervisors and admins only; starting a run,
-// Kustomer discovery and changing the rules are admins only.
+// /api/complaints/*: the Phase 1 playbook, cases and rules. Reading and checking cases is
+// open to everyone with a staff login (Derek's call, Nov 2026: the whole office team works
+// with client names already); starting a run, Kustomer discovery and changing the rules are
+// admins only.
 import { CATEGORY_KEYS, HARD_ROUTES } from './taxonomy.js';
 import { APPROVAL_PRESETS, RUNGS } from './settings.js';
 
@@ -8,7 +9,7 @@ const DAY = /^\d{4}-\d{2}-\d{2}$/;
 const isoDay = (ms) => new Date(ms).toISOString().slice(0, 10);
 
 export function registerComplaintRoutes(r, { complaints, needRole, wrap, now = () => Date.now() }) {
-  const lead = needRole('supervisor', 'admin');
+  const lead = (req, res, next) => next(); // any signed-in staff member (the router requires a login)
   const admin = needRole('admin');
   const h = (fn) => wrap(async (req, res) => {
     try {
@@ -48,6 +49,19 @@ export function registerComplaintRoutes(r, { complaints, needRole, wrap, now = (
     if (hard_route && !HARD_ROUTES[hard_route]) return res.status(400).json({ error: 'Unknown hard route' });
     await complaints.setCategory(Number(req.params.id), { category, hard_route }, req.user.id);
     res.json(await complaints.getCase(Number(req.params.id)));
+  }));
+  r.get('/complaints/review', lead, h(async (req, res) => {
+    const category = CATEGORY_KEYS.includes(req.query.category) ? req.query.category : null;
+    const source = /^[a-z0-9_]{2,30}$/.test(req.query.source || '') ? req.query.source : null;
+    const [queue, stats] = await Promise.all([complaints.reviewQueue({ per: Number(req.query.per) || 20, category, source }), complaints.reviewStats()]);
+    res.json({ queue, stats });
+  }));
+  r.post('/complaints/cases/:id/review', lead, h(async (req, res) => {
+    const { verdict, category, note } = req.body || {};
+    if (!['correct', 'wrong_category', 'not_complaint'].includes(verdict)) return res.status(400).json({ error: 'Unknown verdict' });
+    if (verdict === 'wrong_category' && !CATEGORY_KEYS.includes(category)) return res.status(400).json({ error: 'Pick the right category' });
+    await complaints.reviewCase(Number(req.params.id), { verdict, category, note }, req.user.id);
+    res.json({ ok: true, stats: await complaints.reviewStats() });
   }));
   r.get('/complaints/clients', lead, h(async (req, res) => res.json(await complaints.clients())));
   r.post('/complaints/run', admin, h(async (req, res) => {

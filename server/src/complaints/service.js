@@ -656,17 +656,17 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     return { running: !!running, sources: sources(), last_run: last, mined, auto };
   }
 
-  async function listCases({ from, to, category, limit = 500 }) {
+  async function listCases({ from, to, category, limit = 5000 }) {
     const params = [from || '2000-01-01', to || '2999-12-31'];
-    let where = 'c.merged_into IS NULL AND c.opened_at >= $1 AND c.opened_at < $2::date + 1';
+    let where = 'c.merged_into IS NULL AND c.excluded_at IS NULL AND c.opened_at >= $1 AND c.opened_at < $2::date + 1';
     if (category) {
       params.push(category);
       where += ` AND c.category = $${params.length}`;
     }
-    params.push(Math.min(2000, Number(limit) || 500));
+    params.push(Math.min(5000, Number(limit) || 5000));
     const rows = await many(
       db,
-      `SELECT c.id, c.source, c.opened_at, c.service_date, c.customer_name, c.l27_customer_id, c.l27_booking_id, c.category, c.tone, c.severity, c.hard_route, c.summary, c.status, c.source_status, c.classified_by,
+      `SELECT c.id, c.source, c.source_id, c.opened_at, c.service_date, c.customer_name, c.l27_customer_id, c.l27_booking_id, c.category, c.tone, c.severity, c.hard_route, c.summary, c.status, c.source_status, c.classified_by,
               (SELECT coalesce(sum(amount), 0) FROM complaint_costs k WHERE k.case_id = c.id) AS total_cost,
               (SELECT string_agg(DISTINCT coalesce(r.rung, r.action), ', ') FROM complaint_resolutions r WHERE r.case_id = c.id) AS rungs,
               (SELECT outcome FROM complaint_outcomes o WHERE o.case_id = c.id AND o.day = 60) AS outcome_60,
@@ -677,7 +677,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       params,
     );
     const byId = await visitIndex();
-    return rows.map((r) => ({ ...r, ...visitInfo(byId.get(Number(r.l27_booking_id)), r.frequency) }));
+    return rows.map(({ source_id, ...r }) => ({ ...r, original_url: gmailUrl(r.source, source_id), ...visitInfo(byId.get(Number(r.l27_booking_id)), r.frequency) }));
   }
 
   // Service type and client type of the visit complained about, from the Launch27 snapshot.
@@ -722,7 +722,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     const settings = await getSettings();
     const cases = await many(db, `SELECT j.*, c.id, c.source, c.opened_at, c.category, c.tone, c.severity, c.hard_route, c.first_response_at, c.exchanges, c.handled_by, c.l27_customer_id, c.l27_booking_id, c.classified_by
       FROM complaint_cases c LEFT JOIN complaint_journeys j ON j.case_id = c.id
-      WHERE c.merged_into IS NULL AND c.opened_at >= $1 AND c.opened_at < $2::date + 1`, [from, to]);
+      WHERE c.merged_into IS NULL AND c.excluded_at IS NULL AND c.opened_at >= $1 AND c.opened_at < $2::date + 1`, [from, to]);
     const ids = cases.map((c) => c.id);
     const [resolutions, costs, outcomes] = ids.length
       ? await Promise.all([
@@ -751,11 +751,110 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
         (SELECT json_agg(json_build_object('day', o.day, 'outcome', o.outcome, 'next', o.next_booking_on)) FROM complaint_outcomes o WHERE o.case_id = c.id) AS outcomes,
         j.cleans_total, j.cleaner_changed_last_visit, j.price_change_pct, j.frequency, j.tenure_days
       FROM complaint_cases c LEFT JOIN complaint_journeys j ON j.case_id = c.id
-      WHERE c.merged_into IS NULL AND c.l27_customer_id IS NOT NULL AND c.opened_at >= $1 ORDER BY c.opened_at`, [since]);
+      WHERE c.merged_into IS NULL AND c.excluded_at IS NULL AND c.l27_customer_id IS NOT NULL AND c.opened_at >= $1 ORDER BY c.opened_at`, [since]);
     return buildClients(rows, now());
   }
 
-  return { getSettings, saveSettings, kustomerDiscover, start, run, status, markInterrupted, maybeRun, listCases, getCase, setCategory, playbook, clients, sources };
+
+  // ---- Checking the taxonomy by hand ----
+  // A random sample per category of cases nobody has checked yet. Message bodies aren't
+  // stored, so the reviewer sees the one-line summary, the subject or title, the source's own
+  // status and what we did, plus a link to the original where there is one.
+  async function reviewQueue({ per = 20, category = null, source = null } = {}) {
+    const rows = await many(
+      db,
+      `SELECT * FROM (
+         SELECT c.id, c.source, c.source_id, c.l27_booking_id, c.opened_at, c.service_date, c.customer_name, c.category, c.tone, c.severity, c.hard_route, c.summary,
+                c.source_status, c.classified_by, c.classifier_confidence, c.areas_cited, c.raw,
+                (SELECT string_agg(DISTINCT coalesce(r.rung, r.action), ', ') FROM complaint_resolutions r WHERE r.case_id = c.id) AS rungs,
+                row_number() OVER (PARTITION BY c.category ORDER BY random()) AS pick
+           FROM complaint_cases c
+          WHERE c.merged_into IS NULL AND c.excluded_at IS NULL AND c.classified_by <> 'human'
+            AND NOT EXISTS (SELECT 1 FROM complaint_reviews v WHERE v.case_id = c.id)
+            AND ($2::text IS NULL OR c.category = $2) AND ($3::text IS NULL OR c.source = $3)
+       ) q WHERE pick <= $1 ORDER BY category, pick`,
+      [Math.max(1, Math.min(100, Number(per) || 20)), category, source],
+    );
+    const byId = await visitIndex();
+    return rows.map(({ raw, source_id, l27_booking_id, pick: _pick, ...c }) => ({
+      ...c,
+      // The client's own words where we already hold them: the Launch27 rating comment, or the
+      // longest text field on the Kustomer complaint. Emails are opened from the link instead.
+      text: (c.source === 'launch27_rating' ? byId.get(Number(l27_booking_id))?.rating?.comment : c.source === 'kustomer' ? longestText(raw?.custom) : null) || null,
+      title: raw?.subject || raw?.title || null,
+      resolution_text: raw?.resolution_text || null,
+      rating: raw?.rating ?? null,
+      original_url: gmailUrl(c.source, source_id),
+    }));
+  }
+
+  async function reviewCase(id, { verdict, category = null, note = null }, userId) {
+    const c = await one(db, 'SELECT id, category, classified_by FROM complaint_cases WHERE id = $1', [id]);
+    if (!c) throw Object.assign(new Error('Not found'), { status: 404 });
+    if (verdict === 'wrong_category' && category === c.category) verdict = 'correct';
+    // Keep what the engine said the first time; a second look only changes the verdict.
+    await db.query(
+      `INSERT INTO complaint_reviews (case_id, reviewer_id, verdict, was_category, was_classified_by, now_category, note)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT (case_id) DO UPDATE SET reviewer_id = EXCLUDED.reviewer_id, verdict = EXCLUDED.verdict, now_category = EXCLUDED.now_category, note = EXCLUDED.note, reviewed_at = now()`,
+      [id, userId, verdict, c.category, c.classified_by, verdict === 'wrong_category' ? category : null, note ? String(note).slice(0, 500) : null],
+    );
+    if (verdict === 'wrong_category') await db.query("UPDATE complaint_cases SET category = $2, classified_by = 'human', excluded_at = NULL, updated_at = now() WHERE id = $1", [id, category]);
+    else if (verdict === 'not_complaint') await db.query("UPDATE complaint_cases SET excluded_at = now(), classified_by = 'human', updated_at = now() WHERE id = $1", [id]);
+    else await db.query("UPDATE complaint_cases SET classified_by = 'human', excluded_at = NULL, updated_at = now() WHERE id = $1", [id]);
+    await db.query("INSERT INTO audit_log (actor_id, action, object_type, object_id, detail) VALUES ($1, 'complaint.reviewed', 'complaint_case', $2, $3::jsonb)", [userId, String(id), json({ verdict, category })]);
+  }
+
+  async function reviewStats() {
+    const rows = await many(db, `SELECT v.verdict, v.was_category, v.was_classified_by, v.now_category, c.source
+      FROM complaint_reviews v JOIN complaint_cases c ON c.id = v.case_id`);
+    const waiting = await many(db, `SELECT category, count(*)::int AS n FROM complaint_cases c
+      WHERE c.merged_into IS NULL AND c.excluded_at IS NULL AND c.classified_by <> 'human' AND NOT EXISTS (SELECT 1 FROM complaint_reviews v WHERE v.case_id = c.id) GROUP BY category`);
+    return buildReviewStats(rows, waiting);
+  }
+
+  return { getSettings, saveSettings, kustomerDiscover, start, run, status, markInterrupted, maybeRun, listCases, getCase, setCategory, playbook, clients, sources, reviewQueue, reviewCase, reviewStats };
+}
+
+// Measured accuracy from hand checks: of the cases the engine put in a category, how many a
+// person agreed with. Under REVIEW_MIN checks a number is shown as thin, not as a result.
+function gmailUrl(source, sourceId) {
+  const [account, thread] = String(sourceId).split(':');
+  if (source !== 'gmail' || !/^[0-9a-f]{8,}$/i.test(thread || '')) return null;
+  return `https://mail.google.com/mail/?authuser=${encodeURIComponent(account)}#all/${thread}`;
+}
+
+function longestText(custom) {
+  const texts = Object.values(custom || {}).filter((v) => typeof v === 'string' && v.trim().length > 20);
+  return texts.sort((a, b) => b.length - a.length)[0]?.slice(0, 1500) || null;
+}
+
+export const REVIEW_MIN = 20;
+export function buildReviewStats(rows, waiting = []) {
+  const tally = (list) => {
+    const n = list.length;
+    const correct = list.filter((r) => r.verdict === 'correct').length;
+    return { checked: n, correct, wrong_category: list.filter((r) => r.verdict === 'wrong_category').length, not_complaint: list.filter((r) => r.verdict === 'not_complaint').length, accuracy: n ? correct / n : null, enough: n >= REVIEW_MIN };
+  };
+  const group = (key) => {
+    const m = new Map();
+    for (const r of rows) m.set(r[key] || 'unknown', [...(m.get(r[key] || 'unknown') || []), r]);
+    return [...m].map(([k, list]) => ({ key: k, ...tally(list) })).sort((a, b) => b.checked - a.checked);
+  };
+  const left = new Map(waiting.map((w) => [w.category || 'unknown', Number(w.n)]));
+  const by_category = group('was_category').map((g) => ({ ...g, waiting: left.get(g.key) || 0 }));
+  for (const [k, n] of left) if (!by_category.some((g) => g.key === k)) by_category.push({ key: k, ...tally([]), waiting: n });
+  const moves = new Map();
+  for (const r of rows) if (r.verdict === 'wrong_category') moves.set(`${r.was_category}>${r.now_category}`, (moves.get(`${r.was_category}>${r.now_category}`) || 0) + 1);
+  return {
+    total: tally(rows),
+    by_category,
+    by_source: group('source'),
+    by_classifier: group('was_classified_by'),
+    confusions: [...moves].map(([k, n]) => ({ from: k.split('>')[0], to: k.split('>')[1], n })).sort((a, b) => b.n - a.n).slice(0, 15),
+    min_checks: REVIEW_MIN,
+    waiting: [...left.values()].reduce((a, b) => a + b, 0),
+  };
 }
 
 
