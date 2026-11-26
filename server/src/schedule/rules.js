@@ -161,6 +161,9 @@ export function workingWindow(rows = [], d, unavailableDates = null) {
   if (!open.length) return null;
   return [Math.min(...open.map((r) => toMinutes(r.start_time))), Math.max(...open.map((r) => toMinutes(r.end_time)))];
 }
+// A day's capacity as Scheduling insights counts it (first start to last end). The Utilization
+// report's "Check the numbers" uses the same, so the two always tie.
+export const capacityMinutes = (w) => (w ? w[1] - w[0] : 0);
 // Every open block of a date, in time order, overlaps joined (a split Friday 8–1 and 2:15–6 is
 // two blocks; the 1–2:15 break is not open).
 export function workingBlocks(rows = [], d, unavailableDates = null) {

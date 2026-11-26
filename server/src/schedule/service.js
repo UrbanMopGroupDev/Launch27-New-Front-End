@@ -4,7 +4,7 @@ import { SAMPLE_VERSION } from '../mock/launch27.js';
 import { torontoInstant } from '../reports/raise.js';
 import { clientId, clientLabel, harmonizePartners, noteHints, partnerOf } from '../commercial/partners.js';
 import {
-  FREQ_LABEL, STATUS_LABEL, addDays, areaOf, customerPrefs, cycleWeek, cycleWeeks, daysBetween, fitsDay, frequencyKind,
+  FREQ_LABEL, STATUS_LABEL, addDays, areaOf, capacityMinutes, customerPrefs, cycleWeek, cycleWeeks, daysBetween, fitsDay, frequencyKind,
   isPrepaid, km, nameMatches, localDate, localMinutes, mainCleaner, mondayOf, openGaps, parseCleaner, rankCleaners, seriesDates,
   weekday, weeklyHours, workingWindow, toMinutes as toMinutesHM, travelMinutes,
 } from './rules.js';
@@ -232,7 +232,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     let min = 0;
     for (let d = from; d <= to; d = addDays(d, 1)) {
       const w = windowFor(c, d);
-      if (w) min += w[1] - w[0];
+      if (w) min += capacityMinutes(w);
     }
     return min / 60;
   }

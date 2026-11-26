@@ -19,7 +19,7 @@
 // Every booking counts its full scheduled Duration from Launch27 for each cleaner on it, never the
 // time on site and never trimmed to the cleaner's hours (time past their hours is shown in Data
 // check as "over availability").
-import { addDays, areaOf, km, mondayOf, toMinutes, travelMinutes, weekday, workingBlocks, workingMinutes, workingWindow } from '../schedule/rules.js';
+import { addDays, areaOf, capacityMinutes, km, mondayOf, toMinutes, travelMinutes, weekday, workingBlocks, workingMinutes, workingWindow } from '../schedule/rules.js';
 import { UTILIZATION } from './utilization-config.js';
 
 const r1 = (x) => (x == null || !Number.isFinite(x) ? null : Math.round(x * 10) / 10);
@@ -161,7 +161,7 @@ export function utilizationFacts({ today, start = today, cleaners, visits, holid
       const gaps = blocks.flatMap((b) => openStretches(b, [...closed, ...busyBlocks]));
       days.push({
         d, sunday, cid: c.id, area: c.area || 'Unknown', extra: !cleanerInBrand(c),
-        window: w ? w[1] - w[0] : 0, base, excluded: excludedMin, closed: closedMin, other: otherMin, avail,
+        window: capacityMinutes(w), base, excluded: excludedMin, closed: closedMin, other: otherMin, avail,
         assigned, commercial, travel, over, visits: mine.length, commercial_visits: other.length, gaps,
       });
     }
