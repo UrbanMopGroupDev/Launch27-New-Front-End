@@ -1344,7 +1344,7 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
     // ?from=YYYY-MM-DD&to=YYYY-MM-DD (clamped to today … the end of the planner's 8 weeks).
     r.get('/reports/utilization', rep(async (req, res) => {
       if (!canSeeUtilization(config, req.user.email)) return res.status(404).json({ error: 'Not found' });
-      res.json(await reports.utilization({ from: req.query.from ? String(req.query.from) : null, to: req.query.to ? String(req.query.to) : null, locations: repLocs(req) }));
+      res.json(await reports.utilization({ from: req.query.from ? String(req.query.from) : null, to: req.query.to ? String(req.query.to) : null, locations: repLocs(req), mode: req.query.mode === 'residential' ? 'residential' : 'all' }));
     }));
     // Raise readiness: drops with a reason (Dispatch, Changes card) and Google reviews.
     r.post('/reports/drops', rep(async (req, res) => {

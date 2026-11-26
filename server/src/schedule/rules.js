@@ -161,10 +161,22 @@ export function workingWindow(rows = [], d, unavailableDates = null) {
   if (!open.length) return null;
   return [Math.min(...open.map((r) => toMinutes(r.start_time))), Math.max(...open.map((r) => toMinutes(r.end_time)))];
 }
+// Every open block of a date, in time order, overlaps joined (a split Friday 8–1 and 2:15–6 is
+// two blocks; the 1–2:15 break is not open).
+export function workingBlocks(rows = [], d, unavailableDates = null) {
+  if (!workingWindow(rows, d, unavailableDates)) return [];
+  const list = dayRows(rows, d).filter((r) => !r.dayoff && hasTimes(r)).map((r) => [toMinutes(r.start_time), toMinutes(r.end_time)]).sort((a, b) => a[0] - b[0]);
+  const out = [];
+  for (const [a, b] of list) {
+    const last = out[out.length - 1];
+    if (last && a <= last[1]) last[1] = Math.max(last[1], b);
+    else out.push([a, b]);
+  }
+  return out;
+}
 // Minutes a cleaner is open on a date: the sum of that day's blocks (a split day counts its gap as closed).
 export function workingMinutes(rows = [], d, unavailableDates = null) {
-  if (!workingWindow(rows, d, unavailableDates)) return 0;
-  return dayRows(rows, d).filter((r) => !r.dayoff && hasTimes(r)).reduce((m, r) => m + toMinutes(r.end_time) - toMinutes(r.start_time), 0);
+  return workingBlocks(rows, d, unavailableDates).reduce((m, [a, b]) => m + b - a, 0);
 }
 export function weeklyHours(rows = []) {
   let min = 0;
