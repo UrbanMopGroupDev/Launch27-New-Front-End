@@ -953,6 +953,9 @@ button.wide { width: 100%; margin-top: 8px; }
 .composer-box { margin: 0; padding: 10px 14px; }
 .composer-box textarea { border: 0; resize: vertical; outline: none; font-size: 14px; line-height: 1.5; padding: 0; min-height: 72px; background: transparent; }
 .composer > input.full { margin: 10px 14px 0; width: calc(100% - 28px); }
+/* "Add Cc" lines up with the Cc field and the reply text, with room above and below. */
+button.link.composer-cc { display: inline-flex; align-items: center; margin: 8px 14px 0; padding: 2px 0; font-size: 13px; font-weight: 600; }
+button.link.composer-cc:hover { text-decoration: underline; }
 .composer > .error { margin: 0 14px 8px; }
 .composer-foot { margin: 0; padding: 8px 10px 8px 14px; border-top: 1px solid #eef0f2; }
 .kbd { font-family: 'Geist Mono', ui-monospace, monospace; font-size: 11px; border: 1px solid var(--border-strong); border-radius: 4px; padding: 0 4px; }
@@ -963,6 +966,7 @@ button.wide { width: 100%; margin-top: 8px; }
   .tl-msg { max-width: 88%; }
   .assist, .composer { margin-left: 12px; margin-right: 12px; }
   .composer { margin-bottom: 12px; }
+  button.link.composer-cc { min-height: 32px; margin-top: 4px; font-size: 14px; }
 }
 .shell:has(> .env-banner) .workspace { height: calc(100vh - 30px); }
 @media (max-width: 760px) { .shell:has(> .env-banner) .workspace { height: calc(100vh - 52px - 46px); } }
