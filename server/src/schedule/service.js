@@ -1092,6 +1092,96 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     return { cleaner: c.name, day, unavailable: on, affected };
   }
 
+  // ---------- one cleaner's availability, read and changed in Launch27 (docs/availability.md) ----------
+  const availPath = (id) => `/v1/staff/teams/${Number(id)}/availability`;
+  const hm = (t) => (t ? String(t).slice(0, 5) : null);
+  const datedRow = (r) => ({ id: r.id ?? null, date: String(r.date).slice(0, 10), dayoff: !!r.dayoff, start_time: hm(r.start_time), end_time: hm(r.end_time), weekday: null });
+  const fits = (w, a, b) => windowBlocks(w).some(([x, y]) => a >= x && b <= y);
+
+  /** A cleaner in the planner's active list ({ id, name }), or null. */
+  async function cleanerBrief(cleanerId) {
+    const c = (await need()).byId.get(Number(cleanerId));
+    return c ? { id: c.id, name: c.name } : null;
+  }
+
+  /** Launch27's rows for one cleaner, read now: the weekly hours and the one-off changes from..to. */
+  async function readAvailability(cleanerId, from, to, bearer) {
+    const [weekly, dated] = await Promise.all([get(bearer, availPath(cleanerId)), get(bearer, availPath(cleanerId), { from, to })]);
+    const list = (x) => (Array.isArray(x) ? x : []);
+    return {
+      weekly: list(weekly).filter((r) => !r.date).map((r) => ({ weekday: Number(r.weekday), dayoff: !!r.dayoff, start_time: hm(r.start_time), end_time: hm(r.end_time) })),
+      dated: list(dated).filter((r) => r.date && String(r.date).slice(0, 10) >= from && String(r.date).slice(0, 10) <= to).map(datedRow),
+    };
+  }
+
+  /** One cleaner's days from..to: their hours, how they came about, and their visits (from the planner's copy). */
+  async function availabilityDays(cleanerId, from, to, { weekly, dated }) {
+    const s = await need();
+    const c = s.byId.get(Number(cleanerId));
+    const off = unavailable.get(Number(cleanerId)) || new Set();
+    const days = [];
+    for (let d = from; d <= to; d = addDays(d, 1)) {
+      const dayRows = dated.filter((r) => r.date === d);
+      const change = dayRows[0] || null;
+      const usualW = workingWindow(weekly, d, null);
+      const w = workingWindow([...weekly, ...dayRows], d, null);
+      const visits = (c ? s.busy.get(`${c.id}|${d}`) || [] : []).slice().sort((a, b) => a.start - b.start)
+        .map((v) => ({ ...visitOut(s, v), end: clock(v.end), outside: !w || !fits(w, v.start, v.end) }));
+      const same = !!w && !!usualW && hoursText(w) === hoursText(usualW);
+      days.push({
+        date: d,
+        usual: usualW ? hoursText(usualW) : null,
+        hours: w ? hoursText(w) : null,
+        // A date saved with the usual hours ("back to usual hours": Launch27 has no delete) reads as usual.
+        kind: change && !same ? (w ? 'changed' : 'day_off') : usualW || w ? 'usual' : 'off',
+        change,
+        portal_off: off.has(d),
+        booked_h: Math.round(visits.reduce((m, v) => m + v.duration / Math.max(v.cleaners.length, 1), 0) / 6) / 10,
+        visits,
+      });
+    }
+    return days;
+  }
+
+  /**
+   * Save one-off changes (days off, hours on a date) in Launch27: the request its own "Specific date"
+   * screen sends, a list of dated rows; each replaces that date's change and nothing else is touched.
+   * Logged like every write; the planner's copy takes the saved rows at once (the next sync confirms).
+   */
+  async function saveAvailability(cleanerId, rows, bearer, email = null, source = 'cleaner availability') {
+    const body = rows.map((r) => (r.dayoff ? { date: r.date, dayoff: true } : { date: r.date, start_time: r.start_time, end_time: r.end_time, dayoff: false }));
+    const path = availPath(cleanerId);
+    const logWrite = (entry) => (writes ? writes.record({ email, source, method: 'POST', path, ...entry }) : Promise.resolve());
+    if (!config.allowWrites) {
+      await logWrite({ outcome: 'blocked', status: 403, body });
+      throw Object.assign(new Error('Writes to Launch27 are turned off here'), { status: 403 });
+    }
+    let res;
+    try {
+      res = await fetchImpl(`${config.l27BaseUrl}${path}`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json', accept: 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch (err) {
+      await logWrite({ outcome: 'failed', body, error: err.message });
+      throw Object.assign(new Error(`Launch27 didn't answer: ${err.message}`), { status: 502 });
+    }
+    const answer = await res.json().catch(() => null);
+    await logWrite({ outcome: res.ok ? 'done' : 'refused', status: res.status, body, error: res.ok ? null : `Launch27 answered ${res.status}${answer?.error ? `: ${answer.error}` : ''}` });
+    if (!res.ok) throw Object.assign(new Error(`Launch27 refused the change (${res.status})${answer?.error ? `: ${answer.error}` : ''}`), { status: 502 });
+    const saved = (Array.isArray(answer) ? answer : body).filter((r) => r?.date).map(datedRow);
+    const s = await load();
+    const c = s?.byId.get(Number(cleanerId));
+    if (c) {
+      const dates = new Set(saved.map((r) => r.date));
+      c.availability = [...(c.availability || []).filter((r) => !(r.date && dates.has(String(r.date).slice(0, 10)))), ...saved];
+      await db.tx((q) => recordChanges(q, problems(s))).catch(() => {});
+    }
+    return saved;
+  }
+
   // Everything the cleaner profile needs from the planner's stored schedule.
   async function cleanerProfile(cleanerId) {
     const s = await need();
@@ -1264,6 +1354,6 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     return out;
   }
 
-  return { utilizationSource, recommendFor, recordedDays, firstRecordedDay, reset, dataChanged, cleanerProfile, cleanerForBooking, clientWishes: clientWishesOut, sync, start, soon, maybeRun, status, overview, plan, gapOptions, unassigned, continuity, changes, resolveChange, findSlots, checkSlot, assign, markUnavailable, cleaners, isRunning: () => !!running, _load: load, _window: windowFor };
+  return { utilizationSource, cleanerBrief, readAvailability, availabilityDays, saveAvailability, recommendFor, recordedDays, firstRecordedDay, reset, dataChanged, cleanerProfile, cleanerForBooking, clientWishes: clientWishesOut, sync, start, soon, maybeRun, status, overview, plan, gapOptions, unassigned, continuity, changes, resolveChange, findSlots, checkSlot, assign, markUnavailable, cleaners, isRunning: () => !!running, _load: load, _window: windowFor };
 }
 

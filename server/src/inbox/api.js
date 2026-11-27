@@ -13,6 +13,7 @@ import { EMAIL_READ_ONLY_MESSAGE, EMAIL_SENDING_ENABLED, connectedChannels, send
 import { formatPhone, normalizeEmail, normalizeIdentity, normalizePhone, kindForChannel } from './normalize.js';
 import * as svc from './service.js';
 import { CHANNELS, canEditSettings, getSettings, normalizeCapacity, validateSettings } from './workforce.js';
+import { checkChanges, createAvailabilityHistory, dateRange, toRows, visitsAffected } from '../schedule/availability.js';
 
 const one = async (q, sql, p) => (await q.query(sql, p)).rows[0] || null;
 
@@ -1430,6 +1431,62 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       res.json(await schedule.overview({ locations: brandLocs(req) }));
     }));
     r.get('/schedule/cleaners', sched(async (req, res) => res.json(await schedule.cleaners())));
+
+    // ---------- a cleaner's availability, changed in Launch27 (docs/availability.md) ----------
+    // Days off and one-off hours are saved in Launch27 (its own "Specific date" request); each change
+    // is checked against the cleaner's visits that day, kept in the portal's history and logged.
+    const availHistory = db && schedule.saveAvailability ? createAvailabilityHistory({ db }) : null;
+    const torontoDate = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Toronto' }).format(new Date());
+    const l27Read = (err) => Object.assign(new Error(`Couldn't read the cleaner's hours from Launch27${err.l27Status ? ` (${err.l27Status})` : ''}.`), { status: 502 });
+    const plannerCleaner = async (id) => {
+      const c = await schedule.cleanerBrief(id);
+      if (!c) throw Object.assign(new Error("This cleaner is not in the planner's active list."), { status: 404 });
+      return c;
+    };
+    const applyAvailability = async (req, id, changes, { confirm = false, note = null, source = 'calendar' } = {}) => {
+      const c = await plannerCleaner(id);
+      const list = checkChanges(changes, torontoDate());
+      const dates = list.map((x) => x.date).sort();
+      const live = await schedule.readAvailability(c.id, dates[0], dates.at(-1), req.bearer).catch((err) => { throw l27Read(err); });
+      const rows = toRows(list, live.weekly);
+      const wanted = new Set(dates);
+      const days = (await schedule.availabilityDays(c.id, dates[0], dates.at(-1), live)).filter((d) => wanted.has(d.date));
+      const affected = visitsAffected(rows, days);
+      if (affected.length && !confirm) return { needs_confirm: true, affected, rows };
+      const who = { by_id: req.user.id, by_name: req.user.name || req.user.email || null };
+      const before = new Map(days.map((d) => [d.date, { hours: d.hours, kind: d.kind }]));
+      const entry = (r, extra) => ({ cleaner_id: c.id, cleaner_name: c.name, date: r.date, before: before.get(r.date) || null, after: r, note, source, ...who, ...extra });
+      try {
+        const saved = await schedule.saveAvailability(c.id, rows, req.bearer, req.user.email || null, source === 'mark_off' ? 'mark a day off' : 'cleaner availability');
+        await availHistory.record(rows.map((r) => entry(r, { outcome: 'saved' })));
+        await svc.audit(db, req.user.id, 'schedule.cleaner.availability', 'cleaner', c.id, { dates, source, affected: affected.length });
+        return { saved, affected, rows };
+      } catch (err) {
+        await availHistory.record(rows.map((r) => entry(r, { outcome: 'failed', error: err.message }))).catch(() => {});
+        throw err;
+      }
+    };
+    if (availHistory) {
+      // A cleaner's days (Launch27 read now, with their visits). 409 { code: 'visits' } on a save lists
+      // the visits a change would leave outside their hours, until it is sent again with confirm.
+      r.get('/schedule/cleaner/:id/availability', sched(async (req, res) => {
+        const c = await plannerCleaner(req.params.id);
+        const from = String(req.query.from || torontoDate());
+        const to = String(req.query.to || from);
+        dateRange(from, to);
+        const live = await schedule.readAvailability(c.id, from, to, req.bearer).catch((err) => { throw l27Read(err); });
+        const days = await schedule.availabilityDays(c.id, from, to, live);
+        res.json({ cleaner: c, editable: true, today: torontoDate(), weekly: live.weekly, days });
+      }));
+      r.post('/schedule/cleaner/:id/availability', sched(async (req, res) => {
+        const b = req.body || {};
+        const changes = b.from || b.to ? dateRange(String(b.from || ''), String(b.to || '')).map((date) => ({ date, dayoff: true })) : b.changes;
+        const out = await applyAvailability(req, req.params.id, changes, { confirm: !!b.confirm, note: b.note ? String(b.note).slice(0, 300) : null });
+        if (out.needs_confirm) return res.status(409).json({ code: 'visits', error: `${out.affected.length} visit${out.affected.length === 1 ? '' : 's'} would be outside their hours.`, affected: out.affected });
+        res.json(out);
+      }));
+      r.get('/schedule/cleaner/:id/availability/history', sched(async (req, res) => res.json({ changes: await availHistory.list(req.params.id) })));
+    }
     r.get('/schedule/plan/:id', sched(async (req, res) => res.json(await schedule.plan(req.params.id))));
     r.get('/schedule/cleaner/:id/profile', sched(async (req, res) => res.json(await schedule.cleanerProfile(req.params.id))));
     r.get('/schedule/gap', sched(async (req, res) => res.json(await schedule.gapOptions(req.query.cleaner, String(req.query.date), Number(req.query.start), Number(req.query.end)))));
@@ -1462,6 +1519,23 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       res.json(out);
     }));
     r.put('/schedule/unavailable', sched(async (req, res) => {
+      // The day off is saved in Launch27, so Launch27, the planner and every tab agree (one source of
+      // days off); unmarking puts that date back to their usual hours there. A day marked in the portal
+      // only (before this release) is cleared. Without the history table (no database): portal only.
+      const on = req.body?.unavailable !== false;
+      const day = String(req.body?.day || '');
+      if (availHistory) {
+        const c = await plannerCleaner(req.body?.cleaner_id);
+        let affected = 0;
+        if (on) affected = (await applyAvailability(req, c.id, [{ date: day, dayoff: true }], { confirm: true, note: req.body?.note || null, source: 'mark_off' })).affected.length;
+        else {
+          const live = await schedule.readAvailability(c.id, day, day, req.bearer).catch((err) => { throw l27Read(err); });
+          if (live.dated.some((x) => x.date === day && x.dayoff)) await applyAvailability(req, c.id, [{ date: day, usual: true }], { confirm: true, source: 'mark_off' });
+        }
+        const out = await schedule.markUnavailable(c.id, day, { userId: req.user.id, on: false });
+        await svc.audit(db, req.user.id, 'schedule.unavailable', 'cleaner', c.id, { day, on, launch27: true });
+        return res.json({ ...out, unavailable: on, launch27: true, affected: on ? affected : out.affected });
+      }
       const out = await schedule.markUnavailable(req.body?.cleaner_id, req.body?.day, { note: req.body?.note, userId: req.user.id, on: req.body?.unavailable !== false });
       await svc.audit(db, req.user.id, 'schedule.unavailable', 'cleaner', req.body?.cleaner_id, { day: req.body?.day, on: req.body?.unavailable !== false });
       res.json(out);

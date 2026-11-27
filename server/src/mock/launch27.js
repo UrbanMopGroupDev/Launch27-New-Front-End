@@ -508,6 +508,9 @@ export function createMockLaunch27({ password = 'demo', now = () => Date.now(), 
   const overlay = new Map(); // booking id -> partial changes
   const created = new Map(); // booking id -> booking created through the API
   let nextId = 900_000;
+  // Availability saved through the API (one-off changes by team, then date).
+  const availSaved = new Map();
+  let nextAvailId = 500_000;
 
   function bookingsForDay(date) {
     if (snap) {
@@ -805,6 +808,21 @@ export function createMockLaunch27({ password = 'demo', now = () => Date.now(), 
     if (path === '/v1/staff/teams') return [200, page(teamList(), q)];
     if (path === '/v1/staff/teams/count') return [200, { count: teamList().length }];
     if ((m = path.match(/^\/v1\/staff\/teams\/(\d+)\/availability$/))) {
+      // As Launch27 (recorded from its own "Specific date" screen): POST a list of dated rows; each
+      // replaces that date's one-off change and comes back with a new id. There is no delete.
+      const saved = availSaved.get(Number(m[1])) || new Map();
+      if (method === 'POST') {
+        if (!Array.isArray(body)) return [400, { error: 'json: cannot unmarshal object into Go value of type []validator.Availability' }];
+        const out = [];
+        for (const r of body) {
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(String(r?.date || ''))) return [400, { error: 'date: invalid' }];
+          const row = r.dayoff ? { id: nextAvailId++, date: r.date, start_time: null, end_time: null, weekday: null, dayoff: true } : { id: nextAvailId++, date: r.date, start_time: r.start_time, end_time: r.end_time, weekday: null, dayoff: false };
+          saved.set(r.date, row);
+          out.push(row);
+        }
+        availSaved.set(Number(m[1]), saved);
+        return [200, out];
+      }
       const weekly = snap ? copyAvailability(m[1], snapHours) : mockAvailability(m[1]);
       // Like Launch27: one-day changes (a day off, a short day) only come back with a date range.
       const from = q.get('from');
@@ -820,7 +838,8 @@ export function createMockLaunch27({ password = 'demo', now = () => Date.now(), 
         if (h === 0) dated.push({ id: Number(m[1]) * 1000 + dated.length, date, weekday: null, dayoff: true, start_time: null, end_time: null });
         else if (h === 1) dated.push({ id: Number(m[1]) * 1000 + dated.length, date, weekday: null, dayoff: false, start_time: base.start_time, end_time: '12:30' });
       }
-      return [200, [...weekly, ...dated]];
+      const inRange = [...saved.values()].filter((r) => r.date >= from && r.date <= to);
+      return [200, [...weekly, ...dated.filter((r) => !saved.has(r.date)), ...inRange]];
     }
     if ((m = path.match(/^\/v1\/staff\/teams\/(\d+)$/))) return (t => (t ? [200, t] : [404, { error: 'Not found' }]))(teams.find((t) => t.id === Number(m[1])));
 

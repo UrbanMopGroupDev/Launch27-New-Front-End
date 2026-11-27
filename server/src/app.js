@@ -126,6 +126,12 @@ export function createApp(
 
     const isWrite = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
     const logWrite = (entry) => (isWrite && writes ? writes.record({ email: session.email, source: 'app screens', method: req.method, path: req.url, body: req.body, ...entry }) : Promise.resolve());
+    // A cleaner's availability is changed only through the portal's own routes (availability
+    // calendar, Mark off): they warn about visits and keep a history (docs/availability.md).
+    if (isWrite && /^\/v1\/staff\/teams\/\d+\/availability\/?$/i.test(req.path)) {
+      await logWrite({ outcome: 'blocked', status: 403, error: "availability is changed from the cleaner's page" });
+      return res.status(403).json({ error: "Change a cleaner's availability from their page in the portal.", code: 'use_cleaner_page' });
+    }
     if (isWrite && !config.allowWrites) {
       await logWrite({ outcome: 'blocked', status: 403 });
       return res.status(403).json({ error: config.production ? 'Writes to Launch27 are turned off (set L27_ALLOW_WRITES=true)' : `Writes to the live Launch27 are blocked in ${config.appEnv}` });

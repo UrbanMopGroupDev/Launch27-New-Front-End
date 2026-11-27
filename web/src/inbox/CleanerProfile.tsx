@@ -8,6 +8,7 @@ import { CallButton } from '../components/CallButton';
 import { scheduleApi, type CleanerProfileData } from '../schedule/api';
 import { reportsApi } from '../reports/api';
 import { FreqPill } from '../schedule/ui';
+import { AvailabilityCalendar } from '../schedule/AvailabilityCalendar';
 import type { Contact } from './api';
 import { ConversationHistory } from './Customer360';
 import { displayIdentity } from './util';
@@ -173,6 +174,7 @@ export function CleanerProfile({ tid, contact, onText, onEmail, editContact }: {
         <div className="cp-main">
           <TodayCard p={p} trackingFor={trackingFor} />
           <WeekCard p={p} />
+          <AvailabilityCalendar cleanerId={c.id} today={p.today_date} />
           {contact && (
             <section className="card cp-card">
               <div className="cp-card-head"><h2>Messages with {c.name.split(' ')[0]}</h2></div>
@@ -286,7 +288,7 @@ function HoursCard({ p }: { p: CleanerProfileData }) {
           <button disabled={!day || mark.isPending} onClick={() => mark.mutate({ d: day, on: true })}>Mark off</button>
         </div>
       )}
-      <span className="muted small">From Launch27. Days marked off here flag their visits in Changes to handle.</span>
+      <span className="muted small">From Launch27. Mark off saves the day off in Launch27 too, and flags their visits in Changes to handle. Hours on a date and time off: in Availability.</span>
     </section>
   );
 }
