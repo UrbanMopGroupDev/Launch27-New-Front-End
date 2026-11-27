@@ -451,7 +451,12 @@ export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}
     const t = useCause ? byCause : (book.taxonomy || []).find((x) => x.key === category);
     const escalated = ['damage', 'missing_item', 'conduct_safety'].includes(category);
     const pick = (b) => b && { rung: b.rung, name: b.name, saved: b.saved, decided: b.decided, avg_cost: b.avg_cost, n: b.n };
+    const oneTime = /one time/i.test(r.frequency || '');
+    // Ranked responses from every past complaint like this one (what we offered, what the
+    // client took, who stayed): the agent's options, best first.
+    const ranked = complaints.rankFor ? await complaints.rankFor({ category, cause, one_time: oneTime }).catch(() => null) : null;
     return {
+      ranked,
       available: true,
       category,
       label: categoryLabel(category),
@@ -464,7 +469,7 @@ export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}
       based_on: useCause ? 'cause' : 'category',
       window: { from, to },
       escalation: escalated ? `${HARD_ROUTES.damage_over_100}, theft, safety or misconduct goes to the Office Manager, not the usual ladder.` : null,
-      one_time: /one time/i.test(r.frequency || ''),
+      one_time: oneTime,
       cases: t?.n || 0,
       typical: t?.typical_name || null,
       saved: t?.saved ?? null,

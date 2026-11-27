@@ -303,12 +303,19 @@ describe('Complaints tracker', () => {
           one_time: { n: 12, decided_90: 8, rebooked_90: 0.25, decided: 6, rebooked_120: 0.33, ids: [1] },
         }],
       };
-      const complaints = { getSettings: async () => ({ pilot_months: 6 }), playbook: async ({ from, to }) => { built++; assert.deepEqual([from, to], ['2026-05-26', '2026-11-25']); return book; } };
+      const asked = [];
+      const complaints = {
+        getSettings: async () => ({ pilot_months: 6 }),
+        playbook: async ({ from, to }) => { built++; assert.deepEqual([from, to], ['2026-05-26', '2026-11-25']); return book; },
+        rankFor: async (q) => { asked.push(q); return { groups: [], options: [{ rank: 1, response: 'reclean' }], considered: 1 }; },
+      };
       const t = createTracker({ db, config: { l27Mode: 'mock' }, log: quiet, now: () => NOW, complaints });
       const typed = Number((await t.create(user, { title: 'x', complaint_type: 'Quality of Cleaning', frequency: 'One Time' })).record.id);
       const g = await t.guidance(typed);
       assert.deepEqual([g.category, g.label, g.basis, g.cases, g.typical, g.cheapest.name, g.one_time, g.one_time_stats.rebooked_90], ['quality_missed', 'Quality: missed areas', 'type', 120, 'Reclean', '$10 credit', true, 0.25]);
       assert.deepEqual(g.options.map((o) => o.name), ['$10 credit', 'Reclean'], 'responses never used are left out');
+      assert.equal(g.ranked.options[0].response, 'reclean', 'the ranked options come with the guidance');
+      assert.deepEqual(asked[0], { category: 'quality_missed', cause: null, one_time: true });
       assert.equal(g.escalation, null);
 
       const fromNotes = Number((await t.create(user, { title: 'Broken vase', complaint_notes: 'The cleaner broke a vase in the hallway.' })).record.id);

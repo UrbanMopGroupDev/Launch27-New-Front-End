@@ -101,6 +101,59 @@ the root-cause layer went first.
   accuracy is measured separately, by cause and by who set it (rules, Claude, facts), with
   the common mix-ups. The codebook is on the same tab.
 
+### Customer success brain, step 1: mining what we offered (`solutions.js`)
+
+Derek, Nov 27: the full Kustomer history is migrated into our own conversations and messages
+tables, so the engine should learn from it: what we proposed on each complaint, how the client
+took it, and what kept them. Ranked options for agents come next (step 2), drafted replies
+only after Derek has trusted the rankings for a few weeks (his call: ranked options first).
+
+- **What's read.** For every complaint case, whatever its source, the client's conversations
+  (matched by email, phone or Launch27 client) from 3 days before to 45 days after: their
+  messages, our replies and internal notes. Each message is redacted on its own (the case's
+  name, every name on the matched contacts, staff names) before it's labelled CLIENT / US /
+  NOTE and sent to Claude.
+- **What comes out** (`complaint_solutions`, one row per case): what the client asked for,
+  every offer in order with the client's response (took it, turned it down, asked for
+  something else, no reply), the final answer, how the client sounded at the end, whether they
+  said they'd leave or stay, and one line on how we handled it. Offer kinds are a fixed list
+  (`OFFER_KINDS`).
+- **Pace.** Each update reads up to 300 cases: never-read cases first, newest first, so the
+  daily update works back through the whole history on its own. Recent cases (45 days) are
+  read again when their thread grows. Cases with no conversation on file are marked and skipped.
+- **Feeds the ladder.** Offers the client took and the final answer become "what we did" on
+  the case (`complaint_resolutions`, source `conversation`), so cases with no refund post or
+  $0 visit behind them still count under the right response. Money moved stays as recorded
+  by Launch27 and Slack.
+- **Playbook.** "What we offered, and how clients took it": per offer, how often it was asked
+  for, offered, taken or turned down, the final answer, happy at the end, and saved / lost and
+  cost for the cases where it was the final answer. Each case shows its conversation summary.
+
+### Customer success brain, step 2: ranked options for agents (`rank.js`)
+
+On every complaint in Complaint tracking, "What's worked before" lists up to five responses,
+best first, from every past complaint (all history, refreshed hourly; escalated cases left
+out, they go to the Office Manager).
+
+- **A past case's response** is the final answer read from its conversation, or the highest
+  ladder step recorded (refund, credit, $0 reclean) when its conversation hasn't been read.
+- **Kept** is still booking 60 days later for recurring clients (partial save counts half);
+  for one-time clients it is booking again within 120 days, and they're ranked only on other
+  one-time clients.
+- **Similar cases** narrow as far as the data allows: same root cause and complaint, then same
+  root cause, then same complaint, then everything. Each response is measured in the closest
+  group where it has at least 5 known outcomes.
+- **Order.** Responses with 5+ known outcomes always come first. Within each, the kept rate
+  pulled toward the group's overall rate by 10 pseudo-cases (three lucky cases can't beat forty
+  solid ones), then happier endings, then lower cost. The cheapest response within 5 points of
+  the top one is flagged "best value".
+- **Shown per option:** clients kept (x of y), happy at the end, taken when offered, average
+  cost, confidence (High 30+, Medium 10+, else Low), and a warning when it is often turned
+  down as a first offer.
+
+Agents still decide; Derek can step in on any complaint. Drafted replies come later, once the
+rankings have earned trust (Derek's call, Nov 27).
+
 ### Still to come
 
 2. Cost lines per case (actual vs estimated) and the escalation audit.
