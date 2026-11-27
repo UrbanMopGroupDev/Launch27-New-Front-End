@@ -226,6 +226,18 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
   }
 
   const windowFor = (c, d) => workingWindow(c.availability, d, unavailable.get(c.id));
+  // A date's one-off change in Launch27, against the usual weekly hours: 'off' (a day off on a usual
+  // working day), 'changed' (other hours that day) or null. Days off saved from the portal live there.
+  const dateChange = (c, d) => {
+    const rows = c.availability || [];
+    if (!rows.some((r) => r.date && String(r.date).slice(0, 10) === d)) return null;
+    const usual = workingWindow(rows.filter((r) => !r.date), d);
+    const w = workingWindow(rows, d);
+    if (!w) return usual ? { kind: 'off' } : null;
+    return !usual || hoursText(w) !== hoursText(usual) ? { kind: 'changed', hours: hoursText(w), usual: usual ? hoursText(usual) : null } : null;
+  };
+  // Off that day: marked in the portal (before days off went to Launch27) or a day off in Launch27.
+  const dayOff = (c, d) => !!unavailable.get(c.id)?.has(d) || dateChange(c, d)?.kind === 'off';
   const busyFor = (s) => (id, d) => (s.busy.get(`${id}|${d}`) || []).map((v) => ({ start: v.start, end: v.end, lat: v.lat, lng: v.lng, key: v.key }));
   function bookedHours(s, id, from, to) {
     let min = 0;
@@ -718,7 +730,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
         const visits = (s.busy.get(`${c.id}|${d}`) || []).slice().sort((a, b) => a.start - b.start);
         const w = windowFor(c, d);
         const gaps = d < s.today ? [] : openGaps(w, visits, 120).map(([a, b]) => ({ start: a, end: b, label: `${clock(a)}–${clock(b)}`, hours: Math.round((b - a) / 6) / 10 }));
-        return { date: d, past: d < s.today, off: !w, unavailable: !!unavailable.get(c.id)?.has(d), hours: w ? `${clock(w[0])}–${clock(w[1])}` : null, visits: visits.map((v) => visitOut(s, v)), gaps };
+        return { date: d, past: d < s.today, off: !w, unavailable: dayOff(c, d), hours: w ? `${clock(w[0])}–${clock(w[1])}` : null, visits: visits.map((v) => visitOut(s, v)), gaps };
       });
       const booked = bookedHours(s, c.id, from, addDays(from, 6));
       return { cycle: cycleWeek(from), from, to: addDays(from, 6), booked: Math.round(booked * 10) / 10, capacity: Math.round(capacityHours(c, from, addDays(from, 6)) * 10) / 10, cells };
@@ -1243,7 +1255,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       const d = addDays(weekStart, (wd + 6) % 7);
       const w = windowFor(c, d);
       const booked = (s.busy.get(`${c.id}|${d}`) || []).reduce((m, v) => m + v.duration, 0);
-      return { date: d, day: DAYNAME[wd], past: d < t, working: !!w, unavailable: !!unavailable.get(c.id)?.has(d), capacity_h: w ? Math.round(openMinutes(w) / 6) / 10 : 0, booked_h: Math.round(booked / 6) / 10 };
+      return { date: d, day: DAYNAME[wd], past: d < t, working: !!w, unavailable: dayOff(c, d), capacity_h: w ? Math.round(openMinutes(w) / 6) / 10 : 0, booked_h: Math.round(booked / 6) / 10 };
     });
     // Today: their day in order, with drive estimates between visits and any problems.
     const w0 = windowFor(c, t);
@@ -1273,13 +1285,23 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       else groups.push({ label, days: [DAYNAME[wd]] });
     }
     const hours = groups.map((g) => ({ days: g.days.length > 2 ? `${g.days[0]} – ${g.days.at(-1)}` : g.days.join(', '), label: g.label }));
-    const daysOff = [...(unavailable.get(c.id) || [])].filter((d) => d >= t).sort();
+    // Upcoming days off (portal marks and Launch27) and dates with other hours, next 8 weeks.
+    const daysOff = [];
+    const changedDays = [];
+    for (let d = t; d <= addDays(t, AHEAD_DAYS); d = addDays(d, 1)) {
+      if (dayOff(c, d)) daysOff.push(d);
+      else {
+        const ch = dateChange(c, d);
+        if (ch?.kind === 'changed') changedDays.push({ date: d, hours: ch.hours, usual: ch.usual });
+      }
+    }
     return {
       taken_at: s.taken_at,
       today_date: t,
       cleaner: { ...cleanerOut(c), title: c.title },
       hours,
       days_off: daysOff,
+      changed_days: changedDays,
       week: { days: week, booked_h: Math.round(week.reduce((a, d) => a + d.booked_h, 0) * 10) / 10, capacity_h: Math.round(week.reduce((a, d) => a + d.capacity_h, 0) * 10) / 10 },
       today,
       today_drive_min: today.reduce((a, v) => a + (v.drive_before || 0), 0),

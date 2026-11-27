@@ -96,7 +96,7 @@ function Row({ label, sub, cells, selected, onGap, onUnavailable, busy }: { labe
               ? <button className="link small" disabled={busy} onClick={() => onUnavailable(c.date, false)}>Available again</button>
               : !c.off && <button className="link small" disabled={busy} onClick={() => onUnavailable(c.date, true)} title="Mark unavailable this day">Mark off</button>)}
           </div>
-          {c.unavailable && <span className="small warn">Marked unavailable</span>}
+          {c.unavailable && <span className="small warn"><b>Day off</b></span>}
           {c.visits.map((v) => (
             <Link key={v.key} to={v.id ? `/bookings/${v.id}` : '#'} className={`sch-visit f-${v.kind}`}>
               <span className="sch-visit-top"><b>{v.time}</b><FreqPill visit={v} /></span>

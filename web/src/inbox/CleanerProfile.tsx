@@ -254,7 +254,7 @@ function WeekCard({ p }: { p: CleanerProfileData }) {
             <div className={d.working && !d.unavailable ? 'cp-bar' : 'cp-bar off'} title={d.working ? `${d.booked_h}h booked of ${d.capacity_h}h` : 'Not working'}>
               {d.working && !d.unavailable && <div className={d.capacity_h && d.booked_h / d.capacity_h > 1 ? 'over' : d.capacity_h && d.booked_h / d.capacity_h < 0.6 ? 'low' : ''} style={{ height: `${Math.min(d.capacity_h ? (d.booked_h / d.capacity_h) * 100 : 0, 100)}%` }} />}
             </div>
-            <span className="muted small">{d.unavailable ? 'Off (marked)' : d.working ? `${d.booked_h}/${d.capacity_h}h` : 'Off'}</span>
+            <span className="muted small">{d.unavailable ? 'Day off' : d.working ? `${d.booked_h}/${d.capacity_h}h` : 'Off'}</span>
           </div>
         ))}
       </div>
@@ -279,16 +279,18 @@ function HoursCard({ p }: { p: CleanerProfileData }) {
     <section className="card cp-card">
       <div className="cp-card-head"><h2>Working hours</h2><button className="link small" onClick={() => setOpen(!open)}>Mark a day off</button></div>
       {p.hours.map((h) => <div key={h.days} className={h.label === 'Off' ? 'cp-line muted' : 'cp-line'}><span>{h.days}</span><b>{h.label}</b></div>)}
-      {p.days_off.map((d) => (
-        <div key={d} className="cp-line warn"><span>{niceDay(d)}</span><span>Off (marked) <button className="link small" disabled={mark.isPending} onClick={() => mark.mutate({ d, on: false })}>undo</button></span></div>
-      ))}
+      {(p.days_off.length > 0 || p.changed_days.length > 0) && <div className="eyebrow" style={{ marginTop: 8 }}>Coming up</div>}
+      {[...p.days_off.map((d) => ({ date: d, off: true as const })), ...p.changed_days.map((x) => ({ ...x, off: false as const }))].sort((a, b) => a.date.localeCompare(b.date)).map((x) => (x.off
+        ? <div key={x.date} className="cp-line warn"><span>{niceDay(x.date)}</span><span><b>Day off</b> <button className="link small" disabled={mark.isPending} onClick={() => mark.mutate({ d: x.date, on: false })}>undo</button></span></div>
+        : <div key={x.date} className="cp-line"><span>{niceDay(x.date)}</span><span><b>{x.hours}</b>{x.usual ? <span className="muted small"> (usually {x.usual})</span> : null}</span></div>))}
+      {mark.isError && <p className="error small">{(mark.error as Error).message}</p>}
       {open && (
         <div className="cp-off">
           <label><span className="sr-only">Day off</span><input type="date" min={p.today_date} value={day} onChange={(e) => setDay(e.target.value)} /></label>
           <button disabled={!day || mark.isPending} onClick={() => mark.mutate({ d: day, on: true })}>Mark off</button>
         </div>
       )}
-      <span className="muted small">From Launch27. Mark off saves the day off in Launch27 too, and flags their visits in Changes to handle. Hours on a date and time off: in Availability.</span>
+      <span className="muted small">From Launch27. A day off is saved in Launch27 and flags their visits in Changes to handle. Hours on a date and time off: in Availability.</span>
     </section>
   );
 }

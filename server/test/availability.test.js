@@ -101,6 +101,12 @@ describe('availability: read and save through the planner', () => {
     assert.equal(logged[0].user_email, 'ops@example.com');
     // The planner's copy has the day off now: her visit that day is flagged.
     assert.ok((await s.changes()).items.some((i) => i.title.includes('Ann Usual')));
+    // The profile's Working hours and the plan show the Launch27 day off (not only portal marks).
+    const prof = await s.cleanerProfile(1);
+    assert.ok(prof.days_off.includes('2026-11-03'));
+    assert.equal((await s.plan(1)).weeks[0].cells.find((x) => x.date === '2026-11-03').unavailable, true);
+    await s.saveAvailability(1, [{ date: '2026-11-04', start_time: '09:00', end_time: '13:00' }], 'b');
+    assert.deepEqual((await s.cleanerProfile(1)).changed_days.map((x) => x.date), ['2026-11-04']);
     const after = await s.availabilityDays(1, '2026-11-03', '2026-11-03', await s.readAvailability(1, '2026-11-03', '2026-11-03', 'b'));
     assert.equal(after[0].kind, 'day_off');
     assert.equal(after[0].visits[0].outside, true);

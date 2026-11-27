@@ -61,6 +61,7 @@ export interface CleanerProfileData {
   cleaner: Cleaner & { title: string };
   hours: { days: string; label: string }[];
   days_off: string[];
+  changed_days: { date: string; hours: string; usual: string | null }[];
   week: { days: { date: string; day: string; past: boolean; working: boolean; unavailable: boolean; capacity_h: number; booked_h: number }[]; booked_h: number; capacity_h: number };
   today: (Visit & { end: string; services: string[]; drive_before: number | null; issues: string[]; note: string | null })[];
   today_drive_min: number;
