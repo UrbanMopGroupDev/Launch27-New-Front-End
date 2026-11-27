@@ -1,6 +1,7 @@
-// /api/complaints/*: the Phase 1 playbook, cases and rules. Complaint cases hold client
-// names and what they wrote, so reading is supervisors and admins only; starting a run,
-// Kustomer discovery and changing the rules are admins only.
+// /api/complaints/*: the Phase 1 playbook, cases and rules. Reading and checking cases is
+// open to everyone with a staff login (Derek's call, Nov 2026: the whole office team works
+// with client names already); starting a run, Kustomer discovery and changing the rules are
+// admins only.
 import { CATEGORY_KEYS, HARD_ROUTES } from './taxonomy.js';
 import { APPROVAL_PRESETS, RUNGS } from './settings.js';
 
@@ -8,7 +9,7 @@ const DAY = /^\d{4}-\d{2}-\d{2}$/;
 const isoDay = (ms) => new Date(ms).toISOString().slice(0, 10);
 
 export function registerComplaintRoutes(r, { complaints, needRole, wrap, now = () => Date.now() }) {
-  const lead = needRole('supervisor', 'admin');
+  const lead = (req, res, next) => next(); // any signed-in staff member (the router requires a login)
   const admin = needRole('admin');
   const h = (fn) => wrap(async (req, res) => {
     try {
