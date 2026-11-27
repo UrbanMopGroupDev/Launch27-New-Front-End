@@ -56,8 +56,8 @@ Input to UM Portal - Positive Feedback.
 **Launch27 ratings.** Launch27 stays the source of truth for ratings (they feed the cleaner app
 and scores); this module is the source of truth for complaints. Nothing is written to Launch27.
 "Input to UM Portal Required" shows the days left before the booking's rating link expires and
-sorts by it. The window is `RATING_LINK_DAYS` (default 7): **confirm the real number in
-Launch27's settings.** Phase 2 (not built): submitting the rating from here. The captured
+sorts by it. The window is `RATING_LINK_DAYS` (default 5: the link is believed to last 7 days,
+and 5 leaves a safety margin; confirm the real number in Launch27's settings). Phase 2 (not built): submitting the rating from here. The captured
 Launch27 API (`docs/API.md`) has the ratings report only, no call that submits one, so whether
 staff can submit a rating, and after the link expires, still has to be captured from Launch27's
 admin screens.

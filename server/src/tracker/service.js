@@ -83,7 +83,7 @@ export function fromKustomer(kobject) {
 const unescapeComment = (s) => String(s || '').replace(/\\([\\`*_{}[\]()#+\-.!>~|])/g, '$1');
 
 export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}, warn() {}, error() {} }, now = () => Date.now() }) {
-  const ratingDays = Number(config.ratingLinkDays) > 0 ? Number(config.ratingLinkDays) : 7;
+  const ratingDays = Number(config.ratingLinkDays) > 0 ? Number(config.ratingLinkDays) : 5;
   const today = () => torontoDay(now());
   // Days until the booking's Launch27 rating link stops working (service date + the window).
   const daysLeftSql = (pToday) => `(r.original_service_date + ${ratingDays} - $${pToday}::date)`;

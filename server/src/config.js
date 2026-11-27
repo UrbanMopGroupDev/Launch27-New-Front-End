@@ -273,7 +273,7 @@ export function loadConfig(env = process.env) {
     kustomerApiKey: isProd ? env.KUSTOMER_API_KEY || null : null,
     kustomerComplaintKlass: env.KUSTOMER_COMPLAINT_KLASS || null,
     // Complaints tracker: days after a visit that its Launch27 rating link still works.
-    ratingLinkDays: Math.min(60, Math.max(1, Number(env.RATING_LINK_DAYS) || 7)),
+    ratingLinkDays: Math.min(60, Math.max(1, Number(env.RATING_LINK_DAYS) || 5)),
     // Kustomer migration (docs/kustomer-migration.md): exported records are encrypted with this.
     // Production must set its own; dev and QA (synthetic Kustomer only) use a fixed test key.
     kustomerExportKey: isProd ? env.KUSTOMER_EXPORT_KEY || null : env.KUSTOMER_EXPORT_KEY || 'dev-and-qa-only-kustomer-export-key-synthetic-data',
