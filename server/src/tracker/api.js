@@ -41,6 +41,7 @@ export function registerTrackerRoutes(r, { tracker, adjustments, needRole, wrap,
       res.status(out.existing ? 200 : 201).json(out);
     }));
     r.post('/tracker/complaints/bulk', h(async (req, res) => res.json(await tracker.bulk(req.user, req.body?.ids, await withCleaner(req, req.body?.patch || {})))));
+    r.get('/tracker/complaints/:id/guidance', h(async (req, res) => found(res, await tracker.guidance(id(req)))));
     r.get('/tracker/complaints/:id', h(async (req, res) => found(res, await tracker.get(id(req)))));
     r.patch('/tracker/complaints/:id', h(async (req, res) => found(res, await tracker.patch(req.user, id(req), await withCleaner(req, req.body || {})))));
     r.post('/tracker/complaints/:id/comments', h(async (req, res) => res.status(201).json(await tracker.comment(req.user, id(req), req.body?.body))));

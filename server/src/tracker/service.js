@@ -5,7 +5,8 @@
 // (src/complaints, complaint_cases) is separate and is not read or changed here.
 import { createKustomerClient, discover } from '../complaints/sources/kustomer.js';
 import { audit } from '../inbox/service.js';
-import { FIELDS, FIELD_KEYS, LIST_COLUMNS, PANELS, STATUSES, USER_LINKS, VIEWS, cleanValue } from './fields.js';
+import { CLOSE_FIELDS, FIELDS, FIELD_KEYS, LIST_COLUMNS, PANELS, STATUSES, TYPE_TO_PLAYBOOK, USER_LINKS, VIEWS, cleanValue, missingToClose } from './fields.js';
+import { categoryLabel, classifyRules, HARD_ROUTES } from '../complaints/taxonomy.js';
 
 const one = async (q, sql, p) => (await q.query(sql, p)).rows[0] || null;
 const many = async (q, sql, p) => (await q.query(sql, p)).rows;
@@ -108,7 +109,7 @@ export function cleanerIndex(teams) {
   return seen;
 }
 
-export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}, warn() {}, error() {} }, now = () => Date.now() }) {
+export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}, warn() {}, error() {} }, now = () => Date.now(), complaints = null }) {
   const ratingDays = Number(config.ratingLinkDays) > 0 ? Number(config.ratingLinkDays) : 5;
   const today = () => torontoDay(now());
   // Days until the booking's Launch27 rating link stops working (service date + the window).
@@ -129,6 +130,8 @@ export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}
       rating_days: ratingDays,
       users,
       kustomer: config.kustomerApiKey ? 'connected' : 'not connected',
+      close_fields: CLOSE_FIELDS,
+      playbook: !!complaints,
     };
   }
 
@@ -275,7 +278,7 @@ export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}
   }
 
   async function applyPatch(q, user, id, set) {
-    const before = await one(q, 'SELECT id, status, closed_date, case_closed_by, assigned_user_id FROM complaint_records WHERE id = $1', [id]);
+    const before = await one(q, `SELECT id, status, closed_date, case_closed_by, assigned_user_id, ${CLOSE_FIELDS.join(', ')} FROM complaint_records WHERE id = $1`, [id]);
     if (!before) throw fail(404, 'Complaint not found');
     const values = { ...set };
     // A staff login picked for a name field: the name shown is that login's.
@@ -292,6 +295,16 @@ export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}
       values.customer_name = co.name || null;
       values.l27_customer_id = co.l27_customer_id || null;
     } else if (values.contact_id === null) values.l27_customer_id = null;
+    // A Closed complaint carries its outcome and cost. Closing needs all of it; on a complaint
+    // already Closed (older ones may have gaps), a change may fill gaps one field at a time but
+    // never open a new one.
+    const after = { ...before, ...values };
+    if (after.status === 'Closed') {
+      const missing = missingToClose(after);
+      const already = before.status === 'Closed' ? new Set(missingToClose(before)) : new Set();
+      const added = missing.filter((m) => !already.has(m));
+      if (added.length) throw fail(400, before.status === 'Closed' ? `A closed complaint needs: ${added.join('; ')}` : `To close this complaint, fill in: ${missing.join('; ')}`);
+    }
     // Kustomer stamps the closed date when the status becomes Closed; who closed it is stamped too.
     if (values.status === 'Closed' && before.status !== 'Closed') {
       if (!before.closed_date && values.closed_date === undefined) values.closed_date = today();
@@ -323,7 +336,14 @@ export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}
     const set = patchValues(user, body);
     if (!Object.keys(set).length) throw fail(400, 'Nothing to change');
     await db.tx(async (q) => {
-      for (const id of list) await applyPatch(q, user, id, set);
+      for (const id of list) {
+        try {
+          await applyPatch(q, user, id, set);
+        } catch (err) {
+          if (err.status === 400) err.message = `Complaint #${id}: ${err.message}. Nothing was changed.`;
+          throw err;
+        }
+      }
     });
     return { updated: list.length };
   }
@@ -385,6 +405,62 @@ export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}
     else throw fail(400, 'Unknown action');
     await audit(db, user.id, `um_portal_feedback.${action}`, 'conversation', convId, {});
     return positiveFor(convId);
+  }
+
+  // ---------- what has worked before (the Complaint playbook) ----------
+  // The playbook is built from history over the playbook's own window; it is heavy, so one
+  // copy is kept for an hour.
+  let pbCache = null;
+  async function playbookNow() {
+    if (pbCache && pbCache.at > now() - 3_600_000) return pbCache.value;
+    const months = (await complaints.getSettings()).pilot_months || 6;
+    const to = new Date(now() - 86_400_000).toISOString().slice(0, 10);
+    const from = new Date(Date.parse(to) - months * 30.44 * 86_400_000).toISOString().slice(0, 10);
+    const value = { from, to, book: await complaints.playbook({ from, to }) };
+    pbCache = { at: now(), value };
+    return value;
+  }
+
+  /** For one complaint: its playbook category, and what has kept clients for that kind before. */
+  async function guidance(id) {
+    if (!complaints) return { available: false, reason: 'The Complaint playbook is not running here.' };
+    const r = await one(db, 'SELECT complaint_type, complaint_notes, frequency, title FROM complaint_records WHERE id = $1', [id]);
+    if (!r) return null;
+    let category = null;
+    let basis = 'type';
+    if (r.complaint_type && Object.hasOwn(TYPE_TO_PLAYBOOK, r.complaint_type)) category = TYPE_TO_PLAYBOOK[r.complaint_type];
+    else if (!r.complaint_type) {
+      // No Complaint Type yet: read the notes the way the playbook reads complaints.
+      const text = [r.title, r.complaint_notes].filter(Boolean).join('. ');
+      const guess = text.trim() ? classifyRules(text).category : 'other';
+      category = guess !== 'other' ? guess : null;
+      basis = 'notes';
+    }
+    if (!category) {
+      return { available: true, category: null, basis, complaint_type: r.complaint_type, reason: r.complaint_type ? `"${r.complaint_type}" has no matching playbook category.` : 'Pick a Complaint Type (or add notes) to see what has worked before.' };
+    }
+    const { from, to, book } = await playbookNow();
+    const t = (book.taxonomy || []).find((x) => x.key === category);
+    const escalated = ['damage', 'missing_item', 'conduct_safety'].includes(category);
+    const pick = (b) => b && { rung: b.rung, name: b.name, saved: b.saved, decided: b.decided, avg_cost: b.avg_cost, n: b.n };
+    return {
+      available: true,
+      category,
+      label: categoryLabel(category),
+      basis,
+      complaint_type: r.complaint_type,
+      window: { from, to },
+      escalation: escalated ? `${HARD_ROUTES.damage_over_100}, theft, safety or misconduct goes to the Office Manager, not the usual ladder.` : null,
+      one_time: /one time/i.test(r.frequency || ''),
+      cases: t?.n || 0,
+      typical: t?.typical_name || null,
+      saved: t?.saved ?? null,
+      decided: t?.decided || 0,
+      avg_cost: t?.avg_cost ?? null,
+      cheapest: t?.cheapest_that_works || null,
+      options: (t?.by_rung || []).filter((b) => b.n > 0).map(pick),
+      one_time_stats: t?.one_time ? { n: t.one_time.n, decided_90: t.one_time.decided_90, rebooked_90: t.one_time.rebooked_90, decided: t.one_time.decided, rebooked_120: t.one_time.rebooked_120 } : null,
+    };
   }
 
   // ---------- names -> records ----------
@@ -533,5 +609,5 @@ export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}
     return samples.length;
   }
 
-  return { meta, counts, list, get, create, patch, bulk, comment, forConversation, forContact, positiveList, positiveFor, positiveSet, linkNames, startLoad, loadStatus, loadDone, ensureSample, FIELD_KEYS };
+  return { meta, counts, list, get, create, patch, bulk, comment, forConversation, forContact, positiveList, positiveFor, positiveSet, linkNames, guidance, startLoad, loadStatus, loadDone, ensureSample, FIELD_KEYS };
 }

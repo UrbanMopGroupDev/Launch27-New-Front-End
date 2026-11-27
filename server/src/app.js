@@ -254,7 +254,7 @@ export function createApp(
   // The support workspace (conversations, contacts, routing). Needs a database.
   if (db) {
     const l27 = createL27Client({ baseUrl: config.l27BaseUrl, fetchImpl });
-    app.use('/api', createInboxRouter({ db, sessions, cookieName: COOKIE, config, l27, connectors: guardConnectors(connectors, config.notificationsMode), log, qa, segments, schedule, reports, writes, commercial, placement, commercialPlan, complaints, smsProviders, kustomerMigration, kpi, tracker: tracker || createTracker({ db, config, fetchImpl, log }), adjustments: adjustments || createAdjustments({ db, config, fetchImpl, log }) }));
+    app.use('/api', createInboxRouter({ db, sessions, cookieName: COOKIE, config, l27, connectors: guardConnectors(connectors, config.notificationsMode), log, qa, segments, schedule, reports, writes, commercial, placement, commercialPlan, complaints, smsProviders, kustomerMigration, kpi, tracker: tracker || createTracker({ db, config, fetchImpl, log, complaints }), adjustments: adjustments || createAdjustments({ db, config, fetchImpl, log }) }));
   }
 
   // Last-resort error handler: log it (without personal data), answer generically.

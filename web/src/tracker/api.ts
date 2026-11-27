@@ -13,6 +13,8 @@ export interface TrackerMeta {
   rating_days: number;
   users: { id: number; name: string | null; email: string }[];
   kustomer: 'connected' | 'not connected';
+  close_fields: string[];
+  playbook: boolean;
 }
 export type ComplaintState = 'open' | 'snoozed' | 'done';
 // One complaint. The picklist and text fields are keyed by TrackerField.key.
@@ -58,6 +60,28 @@ export interface PositiveFeedback {
 export interface LoadStatus { connected: boolean; running: boolean; started_at: string | null; finished_at: string | null; error: string | null; result: null | { seen: number; loaded: number; kept_as_edited: number; comments: number; linked_conversation: number; linked_contact: number; linked?: { users: number; cleaners: number } } }
 export interface ConversationComplaints { complaints: Pick<ComplaintRecord, 'id' | 'title' | 'state'>[]; positive: { conversation_id: number; flagged_at: string; done_at: string | null } | null }
 
+// What has kept clients before for this kind of complaint (the Complaint playbook).
+export interface GuidanceOption { rung: string; name: string; saved: number | null; decided: number; avg_cost: number | null; n: number }
+export interface Guidance {
+  available: boolean;
+  reason?: string;
+  category: string | null;
+  label?: string;
+  basis?: 'type' | 'notes';
+  complaint_type?: string | null;
+  window?: { from: string; to: string };
+  escalation?: string | null;
+  one_time?: boolean;
+  cases?: number;
+  typical?: string | null;
+  saved?: number | null;
+  decided?: number;
+  avg_cost?: number | null;
+  cheapest?: { name: string; saved: number | null; avg_cost: number | null; n: number; grade: 'High' | 'Medium' | 'Low'; reason: string } | null;
+  options?: GuidanceOption[];
+  one_time_stats?: { n: number; decided_90: number; rebooked_90: number | null; decided: number; rebooked_120: number | null } | null;
+}
+
 export interface AdjustmentMeta { categories: string[]; net_impacts: string[]; reason_max: number; sheet_url: string | null; mode: 'live' | 'sandbox' | 'not_set_up' }
 export interface AdjustmentForm {
   cleaner_name: string; amount: string; category: string; reason: string; customer_name: string; net_impact: string;
@@ -83,6 +107,7 @@ export const tracker = {
   counts: () => call<Record<string, number>>('GET', '/tracker/counts'),
   list: (p: { view: string; sort?: string; dir?: string; q?: string }) => call<ComplaintList>('GET', `/tracker/complaints${qs(p)}`),
   get: (id: number) => call<ComplaintDetail>('GET', `/tracker/complaints/${id}`),
+  guidance: (id: number) => call<Guidance>('GET', `/tracker/complaints/${id}/guidance`),
   create: (body: ComplaintPatch) => call<ComplaintDetail>('POST', '/tracker/complaints', body),
   patch: (id: number, body: ComplaintPatch) => call<ComplaintDetail>('PATCH', `/tracker/complaints/${id}`, body),
   bulk: (ids: number[], patch: ComplaintPatch) => call<{ updated: number }>('POST', '/tracker/complaints/bulk', { ids, patch }),

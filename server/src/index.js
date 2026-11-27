@@ -154,7 +154,7 @@ const kustomerMigration = createKustomerMigration({
 await kustomerMigration.recover();
 // Complaints tracker and Cleaner Adjustment form (the office's two Kustomer tools). Production
 // loads recent complaints from Kustomer on request; dev and QA get a few invented ones.
-const tracker = createTracker({ db, config, fetchImpl, log });
+const tracker = createTracker({ db, config, fetchImpl, log, complaints });
 const adjustments = createAdjustments({ db, config, fetchImpl, log });
 const app = createApp(config, { db, sessions, fetchImpl, log, jobs, connectors, qa: { store: qaStore, sender: qaSender }, segments, schedule, reports, writes, commercial, placement, commercialPlan, complaints, smsProviders, kustomerMigration, kpi, tracker, adjustments });
 if (config.sampleData && config.l27Mode === 'mock') {
