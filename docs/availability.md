@@ -36,3 +36,14 @@ hours (8–12 and 1–5) can't be sent as one row, so that is refused with a mes
 - `POST /cleaner/:id/availability` — `{ changes: [...] }` or `{ from, to }` (time off), `confirm`, `note`.
 - `GET /cleaner/:id/availability/history`
 - `PUT /unavailable` — Mark off / undo (now saved in Launch27).
+
+## Contacts › Cleaners
+
+The team in one place (`/contacts?list=cleaners`), read from the planner's copy of Launch27:
+
+- **Availability**: one row per cleaner, two weeks across (‹ › for more): usual hours (green), other
+  hours that day (blue), **Day off** (orange), – not a working day, and the hours booked under the times.
+  "Working on" keeps only the cleaners working that day; the last row counts who is working each day.
+- **Team**: name, phone, status, area, today, hours booked of available and days off over the next 7 days.
+- Search by name or phone; on hold and not ready cleaners are hidden unless ticked. Each name opens the
+  cleaner's page, where days off are changed. API: `GET /api/schedule/team-availability?from&days` (max 28).

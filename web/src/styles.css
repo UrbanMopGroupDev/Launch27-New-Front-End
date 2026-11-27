@@ -2451,3 +2451,32 @@ a.rep-factor:hover b { text-decoration: underline; }
 .ct-close-tag { margin-left: 6px; font-size: 11px; color: var(--muted); font-weight: normal; }
 .ct-needs input, .ct-needs select { outline: 2px solid var(--danger); outline-offset: 1px; }
 .cmp-offers { margin: 0; padding-left: 18px; }
+
+/* Contacts › Cleaners: team list and day-by-day availability */
+.team-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 10px; }
+.team-bar label { margin-bottom: 0; }
+.team-bar select { width: auto; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.seg-btn { background: var(--panel); color: var(--muted); border: 0; border-radius: 0; padding: 6px 12px; }
+.seg-btn.active { background: var(--accent); color: #fff; }
+.team-grid { table-layout: fixed; min-width: 980px; }
+.team-grid th.team-name, .team-grid td.team-name { width: 170px; position: sticky; left: 0; background: var(--panel); z-index: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.team-dh { text-align: center; font-weight: 500; font-size: 11px; color: var(--muted); padding: 6px 2px; }
+.team-dh span { display: block; }
+.team-dh b { font-size: 13px; color: var(--text); }
+.team-dh.today { background: var(--accent-wash); }
+.team-dh.today b { color: var(--accent); }
+.team-dh.wkend { opacity: .75; }
+.team-day { text-align: center; font-size: 12px; padding: 4px 2px; line-height: 1.25; border-left: 1px solid var(--border); }
+.team-day.work { background: var(--ok-soft); color: var(--text); }
+.team-day.changed { background: var(--accent-soft); color: var(--accent-ink); font-weight: 600; }
+.team-day.off { background: var(--warn-soft); color: var(--warn-ink); font-weight: 600; }
+.team-day.none { color: var(--muted); }
+.team-day.sum { font-weight: 600; color: var(--muted); }
+.team-hours { display: block; white-space: nowrap; }
+.team-booked { display: block; font-size: 11px; color: var(--muted); }
+.team-legend { padding: 8px 12px; margin: 0; }
+.team-key { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; }
+.team-key.work { background: var(--ok-soft); border: 1px solid var(--ok); }
+.team-key.changed { background: var(--accent-soft); border: 1px solid var(--accent); }
+.team-key.off { background: var(--warn-soft); border: 1px solid var(--warn); }

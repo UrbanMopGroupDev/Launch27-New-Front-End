@@ -5,14 +5,19 @@ import { inbox, type ContactList, type ContactListRow } from '../inbox/api';
 import { AddContact, contactLabel, deleteContactQuestion } from '../inbox/AddContact';
 import { ago, displayIdentity } from '../inbox/util';
 import { Icon } from '../components/Icon';
+import { TeamCleaners } from '../schedule/TeamCleaners';
+import { scheduleApi } from '../schedule/api';
 
 // Everyone the portal talks to, one contact per person: an email or phone number is on one
 // contact only. "All" includes Launch27 customers and cleaners; the other lists are the people
 // who are not (yet) a Launch27 customer or cleaner: leads to follow up, job applicants, vendors
 // and others, numbers nobody named, and numbers marked spam or wrong. A lead who books is linked
 // to their Launch27 customer from their contact page (or automatically on their next call).
-const LISTS: { id: ContactList; label: string; empty: string }[] = [
+// "Cleaners" is the team from the planner (Launch27), with their availability day by day.
+type ListId = ContactList | 'cleaners';
+const LISTS: { id: ListId; label: string; empty: string }[] = [
   { id: 'all', label: 'All', empty: 'No contacts yet. Use Add contact, or they are added when someone texts, emails or calls.' },
+  { id: 'cleaners', label: 'Cleaners', empty: '' },
   { id: 'leads', label: 'Leads', empty: 'No open leads. Callers saved as "New lead" show here until they are linked to a Launch27 customer.' },
   { id: 'applicants', label: 'Job applicants', empty: 'No job applicants saved.' },
   { id: 'other', label: 'Vendors and others', empty: 'Nobody here.' },
@@ -35,7 +40,9 @@ export function ContactsPage() {
   const [params, setParams] = useSearchParams();
   const location = useLocation();
   const queryClient = useQueryClient();
-  const list = (LISTS.some((l) => l.id === params.get('list')) ? params.get('list') : 'all') as ContactList;
+  const picked = (LISTS.some((l) => l.id === params.get('list')) ? params.get('list') : 'all') as ListId;
+  const cleanersTab = picked === 'cleaners';
+  const list: ContactList = cleanersTab ? 'all' : picked;
   const [q, setQ] = useState(params.get('q') || '');
   const [term, setTerm] = useState(q.trim());
   const [adding, setAdding] = useState(false);
@@ -55,9 +62,11 @@ export function ContactsPage() {
       return next;
     }, { replace: true });
   }, [term, setParams]);
-  const data = useQuery({ queryKey: ['inbox', 'contact-list', list, term], queryFn: () => inbox.contactList(list, term || undefined), staleTime: 30_000, placeholderData: keepPreviousData });
-  const current = LISTS.find((l) => l.id === list)!;
-  const pick = (id: ContactList) =>
+  const data = useQuery({ queryKey: ['inbox', 'contact-list', list, term], queryFn: () => inbox.contactList(list, term || undefined), staleTime: 30_000, placeholderData: keepPreviousData, enabled: !cleanersTab });
+  const team = useQuery({ queryKey: ['schedule', 'team-availability', null], queryFn: () => scheduleApi.teamAvailability(undefined, 14), staleTime: 60_000, retry: false });
+  const teamCount = team.data?.cleaners.filter((c) => c.assignable).length || 0;
+  const current = LISTS.find((l) => l.id === picked)!;
+  const pick = (id: ListId) =>
     setParams((p) => {
       const next = new URLSearchParams(p);
       next.set('list', id);
@@ -98,16 +107,18 @@ export function ContactsPage() {
       {adding && <AddContact onClose={() => setAdding(false)} />}
       <div className="tabs">
         {LISTS.map((l) => (
-          <button key={l.id} className={l.id === list ? 'tab active' : 'tab'} onClick={() => pick(l.id)}>
+          <button key={l.id} className={l.id === picked ? 'tab active' : 'tab'} onClick={() => pick(l.id)}>
             {l.label}
-            {data.data?.counts[l.id] ? ` (${data.data.counts[l.id]})` : ''}
+            {l.id === 'cleaners' ? (teamCount ? ` (${teamCount})` : '') : data.data?.counts[l.id] ? ` (${data.data.counts[l.id]})` : ''}
           </button>
         ))}
       </div>
       <div className="contacts-search">
         <Icon name="search" />
-        <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search by name, phone number, email or notes" aria-label="Search contacts" />
+        <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder={cleanersTab ? 'Search cleaners by name or phone number' : 'Search by name, phone number, email or notes'} aria-label="Search contacts" />
       </div>
+      {cleanersTab ? <TeamCleaners term={term} /> : (
+        <>
       {notice && <div className="notice small">{notice}</div>}
       {error && <div className="error">{error}</div>}
       {data.isLoading && <div className="muted">Loading…</div>}
@@ -165,6 +176,8 @@ export function ContactsPage() {
         </div>
       )}
       {data.data && rows.length >= data.data.limit && <p className="muted small">Showing the {data.data.limit} most recent. Search to find anyone else.</p>}
+        </>
+      )}
     </>
   );
 }

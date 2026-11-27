@@ -1151,6 +1151,34 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     return { cleaner: c.name, day, unavailable: on, affected };
   }
 
+  // ---------- the whole team's availability, day by day (Contacts › Cleaners) ----------
+  // From the planner's copy (Launch27's weekly hours and one-off changes, portal marks): per
+  // cleaner and day, 'work' (usual hours), 'changed' (other hours that date), 'off' (a day off)
+  // or 'none' (not a working day), with the hours booked.
+  async function teamAvailability({ from = null, days = 14 } = {}) {
+    const s = await need();
+    const t = s.today;
+    const start = /^\d{4}-\d{2}-\d{2}$/.test(String(from || '')) ? String(from) : t;
+    const n = Math.min(Math.max(Number(days) || 14, 1), 28);
+    const dates = Array.from({ length: n }, (_, i) => addDays(start, i));
+    const cleaners = s.cleaners.map((c) => {
+      const out = dates.map((d) => {
+        const w = windowFor(c, d);
+        const booked = (s.busy.get(`${c.id}|${d}`) || []).reduce((m, v) => m + v.duration / Math.max(v.team_ids.length, 1), 0);
+        const ch = dateChange(c, d);
+        const state = dayOff(c, d) ? 'off' : w ? (ch?.kind === 'changed' ? 'changed' : 'work') : 'none';
+        return { date: d, state, hours: w ? hoursText(w) : null, usual: ch?.usual ?? null, capacity_h: w ? Math.round(openMinutes(w) / 6) / 10 : 0, booked_h: Math.round(booked / 6) / 10 };
+      });
+      const week = out.slice(0, 7);
+      return {
+        id: c.id, name: c.name, status: c.status, status_label: STATUS_LABEL[c.status], assignable: c.assignable, phone: c.phone || null, color: c.color, area: c.area || null,
+        week: { booked_h: Math.round(week.reduce((m, x) => m + x.booked_h, 0) * 10) / 10, capacity_h: Math.round(week.reduce((m, x) => m + x.capacity_h, 0) * 10) / 10, days_off: week.filter((x) => x.state === 'off').length },
+        days: out,
+      };
+    }).sort((a, b) => Number(b.assignable) - Number(a.assignable) || a.name.localeCompare(b.name));
+    return { today: t, taken_at: s.taken_at, dates, cleaners };
+  }
+
   // ---------- one cleaner's availability, read and changed in Launch27 (docs/availability.md) ----------
   const availPath = (id) => `/v1/staff/teams/${Number(id)}/availability`;
   const hm = (t) => (t ? String(t).slice(0, 5) : null);
@@ -1425,6 +1453,6 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     return out;
   }
 
-  return { utilizationSource, cleanerBrief, readAvailability, availabilityDays, saveAvailability, recommendFor, recordedDays, firstRecordedDay, reset, dataChanged, cleanerProfile, cleanerForBooking, clientWishes: clientWishesOut, sync, start, soon, maybeRun, status, overview, plan, gapOptions, unassigned, continuity, changes, resolveChange, findSlots, checkSlot, assign, markUnavailable, cleaners, isRunning: () => !!running, _load: load, _window: windowFor };
+  return { utilizationSource, teamAvailability, cleanerBrief, readAvailability, availabilityDays, saveAvailability, recommendFor, recordedDays, firstRecordedDay, reset, dataChanged, cleanerProfile, cleanerForBooking, clientWishes: clientWishesOut, sync, start, soon, maybeRun, status, overview, plan, gapOptions, unassigned, continuity, changes, resolveChange, findSlots, checkSlot, assign, markUnavailable, cleaners, isRunning: () => !!running, _load: load, _window: windowFor };
 }
 

@@ -107,6 +107,14 @@ describe('availability: read and save through the planner', () => {
     assert.equal((await s.plan(1)).weeks[0].cells.find((x) => x.date === '2026-11-03').unavailable, true);
     await s.saveAvailability(1, [{ date: '2026-11-04', start_time: '09:00', end_time: '13:00' }], 'b');
     assert.deepEqual((await s.cleanerProfile(1)).changed_days.map((x) => x.date), ['2026-11-04']);
+    // The team view shows the same day off and the changed hours.
+    const team = await s.teamAvailability({ from: '2026-11-02', days: 7 });
+    const ann = team.cleaners.find((x) => x.id === 1);
+    assert.equal(ann.days.find((x) => x.date === '2026-11-03').state, 'off');
+    assert.equal(ann.days.find((x) => x.date === '2026-11-04').state, 'changed');
+    assert.equal(ann.days.find((x) => x.date === '2026-11-05').state, 'work');
+    assert.equal(ann.days.find((x) => x.date === '2026-11-07').state, 'none');
+    assert.equal(ann.week.days_off, 1);
     const after = await s.availabilityDays(1, '2026-11-03', '2026-11-03', await s.readAvailability(1, '2026-11-03', '2026-11-03', 'b'));
     assert.equal(after[0].kind, 'day_off');
     assert.equal(after[0].visits[0].outside, true);
