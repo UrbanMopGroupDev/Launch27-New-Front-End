@@ -68,6 +68,7 @@ export interface Playbook {
     by_category: { key: string; label: string; n: number; ids: number[] }[];
   })[];
   cause_groups: (OutcomeStats & { key: string; label: string; share: number | null })[];
+  threats: (OutcomeStats & { key: 'none' | 'leave' | 'review'; label: string; share: number | null; by_response: (OutcomeStats & { response: string; label: string })[] })[];
   solutions: {
     enabled: boolean;
     read: number; read_ids: number[];

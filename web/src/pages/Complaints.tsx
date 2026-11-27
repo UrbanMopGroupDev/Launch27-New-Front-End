@@ -411,6 +411,8 @@ function PlaybookTab({ period }: { period: Period }) {
 
       <WhatWeOffered p={p} open={open} labels={L} />
 
+      <Threats p={p} open={open} labels={L} />
+
       <section className="card">
         <h2>One-time clients: did they book again?</h2>
         <p className="muted small">One-time clients have no schedule to keep, so they are left out of Saved and Lost above. The question here is whether they booked again within 90 and 120 days of the complaint. Recleans and free visits don't count as booking again.</p>
@@ -564,6 +566,44 @@ function WhatWeOffered({ p, open, labels }: { p: Playbook; open: Open; labels: R
         </div>
       )}
       <p className="small muted">Saved / Lost and cost are for the cases where this was the final answer. An offer the client took also counts under "What we did" below.</p>
+    </section>
+  );
+}
+
+// Threats: does giving more keep a client who threatens to leave or to post a review?
+function Threats({ p, open, labels }: { p: Playbook; open: Open; labels: Record<ExcludedReason, string> }) {
+  const levels = (p.threats || []).filter((t) => t.n > 0);
+  if (!levels.some((t) => t.key !== 'none')) return null;
+  return (
+    <section className="card">
+      <h2>When clients threaten to leave or post a review</h2>
+      <p className="muted small">The same responses, split by how hard the client pushed. A threat is read from the complaint's tone, or from the client saying in the conversation that they'd leave. Compare a response's Saved rate under a threat with the same response under no threat: that is whether giving more actually keeps them. Google reviews aren't connected yet, so this shows who stayed, not which threats became reviews.</p>
+      <div className="cmp-arms">
+        {levels.map((t) => (
+          <div className="cmp-arm" key={t.key}>
+            <span className="small muted">{t.label}</span>
+            <span className="cmp-arm-value"><Num ids={t.ids} title={`${t.label}: every case`} open={open}>{t.n}</Num></span>
+            <span className="small muted">{pct(t.share)} of complaints{t.decided ? ` · ${pct(t.saved)} kept (${t.saved_n} of ${t.decided}) · avg ${money(t.avg_cost)}` : ''}</span>
+          </div>
+        ))}
+      </div>
+      <div className="table-scroll">
+        <table>
+          <thead><tr><th>What we did</th><th>Cases</th>{STAT_HEADS}</tr></thead>
+          <tbody>
+            {levels.map((t) => [
+              <tr key={`t-${t.key}`} className="static"><th colSpan={8}>{t.label}</th></tr>,
+              ...t.by_response.map((r) => (
+                <tr key={`${t.key}-${r.response}`} className="static">
+                  <td>{r.label}</td>
+                  <td><Num ids={r.ids} title={`${t.label}: ${r.label}`} open={open}>{r.n}</Num></td>
+                  <StatCells s={r} name={`${t.label}: ${r.label}`} labels={labels} open={open} />
+                </tr>
+              )),
+            ])}
+          </tbody>
+        </table>
+      </div>
     </section>
   );
 }
