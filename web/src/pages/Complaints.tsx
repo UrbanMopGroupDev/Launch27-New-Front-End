@@ -6,7 +6,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useInboxMe } from '../inbox/util';
-import { complaintsApi, CAUSE_BY_LABEL, OUTCOME_LABEL, RUNG_NAME, SOURCE_LABEL, TONE_LABEL, whatWeDid, type CaseRow, type CauseTally, type ClientRow, type Codebook, type ReviewItem, type ReviewTally, type Confidence, type ExcludedReason, type OutcomeStats, type Playbook, type Settings, type Status } from '../complaints/api';
+import { complaintsApi, CAUSE_BY_LABEL, ENDING_LABEL, OFFER_LABEL, RESPONSE_LABEL, OUTCOME_LABEL, RUNG_NAME, SOURCE_LABEL, TONE_LABEL, whatWeDid, type CaseRow, type CauseTally, type ClientRow, type Codebook, type ReviewItem, type ReviewTally, type Confidence, type ExcludedReason, type OutcomeStats, type Playbook, type Settings, type Status } from '../complaints/api';
 import { Kpi } from '../reports/ui';
 import { money, pct } from '../reports/api';
 
@@ -409,6 +409,8 @@ function PlaybookTab({ period }: { period: Period }) {
 
       <WhyItHappened p={p} open={open} labels={L} />
 
+      <WhatWeOffered p={p} open={open} labels={L} />
+
       <section className="card">
         <h2>One-time clients: did they book again?</h2>
         <p className="muted small">One-time clients have no schedule to keep, so they are left out of Saved and Lost above. The question here is whether they booked again within 90 and 120 days of the complaint. Recleans and free visits don't count as booking again.</p>
@@ -511,6 +513,57 @@ function WhyItHappened({ p, open, labels }: { p: Playbook; open: Open; labels: R
           </tbody>
         </table>
       </div>
+    </section>
+  );
+}
+
+// What we offered and how clients took it, read from the conversations themselves (the whole
+// migrated Kustomer history and everything since). The raw material for ranking responses.
+function WhatWeOffered({ p, open, labels }: { p: Playbook; open: Open; labels: Record<ExcludedReason, string> }) {
+  const s = p.solutions;
+  if (!s) return null;
+  if (!s.enabled && !s.read) return null;
+  const e = s.endings;
+  const heard = e.satisfied.length + e.neutral.length + e.unhappy.length;
+  return (
+    <section className="card">
+      <h2>What we offered, and how clients took it</h2>
+      <p className="muted small">Read by Claude from each client's own conversations around the complaint (client messages, our replies and internal notes, names removed). Every update reads a few hundred more, newest first, until the whole history is done.{s.not_yet ? ` ${s.not_yet} of these cases haven't been read yet.` : ''}{s.no_thread ? <> <Num ids={s.no_thread_ids} title="No conversation on file" open={open}>{s.no_thread}</Num> have no conversation on file.</> : null}</p>
+      <div className="cmp-arms">
+        <div className="cmp-arm"><span className="small muted">Conversations read</span><span className="cmp-arm-value"><Num ids={s.read_ids} title="Cases whose conversation was read" open={open}>{s.read}</Num></span><span className="small muted">of {p.totals.cases} cases</span></div>
+        <div className="cmp-arm"><span className="small muted">Client happy at the end</span><span className="cmp-arm-value">{pct(heard ? e.satisfied.length / heard : null)}</span><span className="small muted"><Num ids={e.satisfied} title="Happy at the end of the conversation" open={open}>{e.satisfied.length}</Num> of {heard} who wrote back · <Num ids={e.unhappy} title="Still unhappy at the end" open={open}>{e.unhappy.length}</Num> still unhappy</span></div>
+        <div className="cmp-arm"><span className="small muted">Turned down our first offer</span><span className="cmp-arm-value"><Num ids={s.pushed_back_first_ids} title="Turned down or countered our first offer" open={open}>{s.pushed_back_first_ids.length}</Num></span><span className="small muted">declined it or asked for something else</span></div>
+        <div className="cmp-arm"><span className="small muted">Said they'd leave</span><span className="cmp-arm-value"><Num ids={s.said_will_leave_ids} title="Said in the conversation they would leave" open={open}>{s.said_will_leave_ids.length}</Num></span><span className="small muted">in the conversation</span></div>
+      </div>
+      {s.offers.length === 0 ? <p className="muted">No conversations read for these dates yet.</p> : (
+        <div className="table-scroll">
+          <table>
+            <thead><tr>
+              <th>Offer</th>
+              <th title="Clients who asked for this before we offered anything">Asked for</th>
+              <th title="Cases where we offered it at some point">Offered</th>
+              <th title="Of the times the client answered the offer, how often they took it">Taken</th>
+              <th title="Cases where this is what was finally agreed or done">Final answer</th>
+              <th title="Of those final answers, how the client sounded in their last message">Happy at the end</th>
+              {STAT_HEADS}
+            </tr></thead>
+            <tbody>
+              {s.offers.map((o) => (
+                <tr key={o.key} className="static">
+                  <td>{o.label}</td>
+                  <td>{o.asked_for ? <Num ids={o.asked_for_ids} title={`Asked for: ${o.label}`} open={open}>{o.asked_for}</Num> : <span className="muted">—</span>}</td>
+                  <td><Num ids={o.offered_ids} title={`Offered: ${o.label}`} open={open}>{o.offered}</Num></td>
+                  <td>{o.accept_rate == null ? <span className="muted">—</span> : <><b>{pct(o.accept_rate)}</b> <span className="small muted cmp-nd"><Num ids={o.accepted_ids} title={`Took it: ${o.label}`} open={open}>{o.accepted}</Num> took it, <Num ids={o.pushed_back_ids} title={`Turned down: ${o.label}`} open={open}>{o.pushed_back}</Num> didn't</span></>}</td>
+                  <td>{o.final.n ? <Num ids={o.final.ids} title={`Final answer: ${o.label}`} open={open}>{o.final.n}</Num> : <span className="muted">0</span>}</td>
+                  <td>{o.ended_happy == null ? <span className="muted">—</span> : <><b>{pct(o.ended_happy)}</b> <span className="small muted cmp-nd"><Num ids={o.ended_happy_ids} title={`Happy at the end: ${o.label}`} open={open}>{o.ended_happy_n}</Num> of {o.ended_heard}</span></>}</td>
+                  <StatCells s={o.final} name={`Final answer: ${o.label}`} labels={labels} open={open} />
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <p className="small muted">Saved / Lost and cost are for the cases where this was the final answer. An offer the client took also counts under "What we did" below.</p>
     </section>
   );
 }
@@ -765,6 +818,20 @@ function CaseDetailCard({ id, onClose }: { id: number; onClose: () => void }) {
             <dt>Cleaner</dt><dd>{String(j.cleaner_name || '—')} ({j.cleaner_visits_before ?? '?'} visits before){j.cleaner_changed_last_visit ? ' · different from the visit before' : ''} · {j.distinct_cleaners_90d} {Number(j.distinct_cleaners_90d) === 1 ? 'cleaner' : 'cleaners'} in 90 days{j.regular_cleaner_name ? ` · regular: ${String(j.regular_cleaner_name)}${j.regular_cleaner_left ? `, stopped working with us${j.regular_cleaner_last_worked ? ` after ${day(String(j.regular_cleaner_last_worked))}` : ''}` : ''}` : ''}</dd>
             <dt>Signals</dt><dd>{j.prior_complaints} earlier {Number(j.prior_complaints) === 1 ? 'complaint' : 'complaints'} · {j.prior_unhappy_ratings} earlier unhappy {Number(j.prior_unhappy_ratings) === 1 ? 'rating' : 'ratings'} · {j.price_change_pct != null ? `price ${Number(j.price_change_pct) > 0 ? '+' : ''}${pct(Number(j.price_change_pct))}` : 'no price history'} · {j.days_since_last_clean ?? '—'} days since last clean</dd>
           </dl>
+        </>
+      )}
+      {c.solution && c.solution.read_by === 'claude' && (
+        <>
+          <h3>From the conversation</h3>
+          <dl className="kv">
+            <dt>Asked for</dt><dd>{OFFER_LABEL[c.solution.asked_for || 'nothing_specific'] || c.solution.asked_for}</dd>
+            <dt>We offered</dt>
+            <dd>{c.solution.offers.length ? <ol className="cmp-offers">{c.solution.offers.map((o, i) => <li key={i}><b>{OFFER_LABEL[o.kind] || o.kind}</b>{o.pct != null ? ` ${o.pct}%` : ''}{o.amount != null ? ` ${money(o.amount)}` : ''}{o.detail ? <span className="muted"> · {o.detail}</span> : null} → {RESPONSE_LABEL[o.client_response] || o.client_response}</li>)}</ol> : <span className="muted">nothing</span>}</dd>
+            <dt>Final answer</dt><dd>{c.solution.final_kind ? OFFER_LABEL[c.solution.final_kind] || c.solution.final_kind : 'nothing agreed'}{c.solution.final_detail ? <span className="muted"> · {c.solution.final_detail}</span> : null}</dd>
+            <dt>Client at the end</dt><dd>{ENDING_LABEL[c.solution.client_end || 'unknown']}{c.solution.said_will_leave ? ' · said they would leave' : ''}{c.solution.said_will_stay ? ' · said they would stay' : ''}</dd>
+            {c.solution.handling && (<><dt>How we handled it</dt><dd>{c.solution.handling}</dd></>)}
+          </dl>
+          <p className="small muted">Read from {c.solution.thread_messages} messages and notes on {day(c.solution.mined_at)}.</p>
         </>
       )}
       <h3>What we did</h3>
