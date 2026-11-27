@@ -623,7 +623,12 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     const today = torontoDay(now());
     const mined = await many(db, "SELECT window_from::text AS f, window_to::text AS t FROM complaint_runs WHERE status IN ('done', 'partial')");
     const recent = await one(db, "SELECT cursor FROM complaint_sync_state WHERE source = 'auto_recent'");
-    return planAuto({ mined: mined.map((m) => ({ from: m.f.slice(0, 10), to: m.t.slice(0, 10) })), today, historyDays: Math.round(settings.auto.history_months * 30.44), recentDone: recent?.cursor || null });
+    // Root causes for the last CAUSE_BACKFILL_DAYS: once, and only while cases there have none
+    // and Claude is available to read them (no need to re-read the whole history).
+    const causesDone = await one(db, "SELECT cursor FROM complaint_sync_state WHERE source = 'auto_causes'");
+    const missing = causesDone || !classifier ? null : await one(db, `SELECT count(*)::int AS n FROM complaint_cases
+      WHERE merged_into IS NULL AND excluded_at IS NULL AND cause_by IS NULL AND opened_at >= now() - make_interval(days => $1)`, [CAUSE_BACKFILL_DAYS]);
+    return planAuto({ mined: mined.map((m) => ({ from: m.f.slice(0, 10), to: m.t.slice(0, 10) })), today, historyDays: Math.round(settings.auto.history_months * 30.44), recentDone: recent?.cursor || null, causesPending: Number(missing?.n) > 0 });
   }
   async function maybeRun({ bearer = null } = {}) {
     if (running) return false;
@@ -641,6 +646,8 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     running = run({ from: job.from, to: job.to, bearer: login, label: job.label, refreshFrom: job.refreshFrom })
       .then(async (r) => {
         if (job.kind === 'recent') await db.query("INSERT INTO complaint_sync_state (source, cursor, last_run_at, last_ok_at) VALUES ('auto_recent', $1, now(), now()) ON CONFLICT (source) DO UPDATE SET cursor = EXCLUDED.cursor, last_run_at = now(), last_ok_at = now()", [torontoDay(now())]);
+        // One pass is enough: a case Claude can't read (no text stored) shouldn't keep it coming back.
+        if (job.kind === 'causes' && !r?.error) await db.query("INSERT INTO complaint_sync_state (source, cursor, last_run_at, last_ok_at) VALUES ('auto_causes', $1, now(), now()) ON CONFLICT (source) DO UPDATE SET cursor = EXCLUDED.cursor, last_run_at = now(), last_ok_at = now()", [torontoDay(now())]);
         return r;
       })
       .catch((err) => ({ error: err.message }))
@@ -927,10 +934,14 @@ export function buildReviewStats(rows, waiting = []) {
  * What should an automatic update read next? Pure.
  *   mined: finished runs' windows [{from, to}] (YYYY-MM-DD); today: local date;
  *   historyDays: how far back to keep history; recentDone: the day the daily update last ran.
- * 1. The newest stretch of days (up to a month) that hasn't been read, back to the history target.
- * 2. Otherwise, once a day: the last two weeks again, refreshing outcomes for ~4 months.
+ * 1. The days since the last update, if any.
+ * 2. Then, once: the last CAUSE_BACKFILL_DAYS again, when cases there have no root cause yet
+ *    (ahead of older history: recent causes matter more than old months).
+ * 3. The newest stretch of days (up to a month) not read yet, back to the history target.
+ * 4. Otherwise, once a day: the last two weeks again, refreshing outcomes for ~4 months.
  */
-export function planAuto({ mined, today, historyDays, recentDone }) {
+export const CAUSE_BACKFILL_DAYS = 90;
+export function planAuto({ mined, today, historyDays, recentDone, causesPending = false }) {
   const add = (d, n) => {
     const x = new Date(`${d}T12:00:00Z`);
     x.setUTCDate(x.getUTCDate() + n);
@@ -949,6 +960,7 @@ export function planAuto({ mined, today, historyDays, recentDone }) {
       }
     }
   }
+  if (causesPending && p !== yesterday) return { kind: 'causes', from: add(today, -CAUSE_BACKFILL_DAYS), to: yesterday, refreshFrom: null, label: `Automatic update: root causes for the last ${CAUSE_BACKFILL_DAYS} days` };
   if (p >= target) {
     // Unread days end at p. Start a month earlier, but not before anything already read or the target.
     const readBelow = mined.filter((m) => m.to < p).map((m) => m.to).sort().pop();

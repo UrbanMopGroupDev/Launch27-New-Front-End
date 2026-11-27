@@ -547,6 +547,14 @@ describe('complaints: automatic updates', () => {
     j = planAuto({ mined: all, today, historyDays: 365, recentDone: '2026-11-18' });
     assert.deepEqual([j.kind, j.from, j.to, j.refreshFrom], ['recent', '2026-11-05', '2026-11-18', '2026-07-12']);
     assert.equal(planAuto({ mined: all, today, historyDays: 365, recentDone: today }), null);
+    // Root causes missing in the last 90 days: one pass over them, after catching up the newest
+    // days but ahead of older history and the daily refresh.
+    j = planAuto({ mined: all, today, historyDays: 365, recentDone: today, causesPending: true });
+    assert.deepEqual([j.kind, j.from, j.to], ['causes', '2026-08-21', '2026-11-18']);
+    j = planAuto({ mined: [{ from: '2026-08-15', to: '2026-11-18' }], today, historyDays: 365, recentDone: null, causesPending: true });
+    assert.equal(j.kind, 'causes', 'before older history');
+    j = planAuto({ mined: [{ from: '2026-08-15', to: '2026-11-15' }], today, historyDays: 365, recentDone: null, causesPending: true });
+    assert.deepEqual([j.kind, j.from], ['history', '2026-11-16'], 'the newest days come first');
     // The last chunk stops at the history target.
     j = planAuto({ mined: [{ from: '2025-12-01', to: '2026-11-18' }], today, historyDays: 365, recentDone: today });
     assert.deepEqual([j.from, j.to], ['2025-11-19', '2025-11-30']);
