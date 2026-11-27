@@ -1,3 +1,4 @@
+import { CleanerAdjustmentCard } from '../tracker/CleanerAdjustment';
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { Link, NavLink, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -107,6 +108,7 @@ function Panel360({ detail, onInsert }: { detail: ConversationDetail; onInsert: 
       ) : (
         <Customer360 contact={contact} conversationId={detail.conversation.id} pinnedBookingId={detail.conversation.l27_booking_id} onInsert={onInsert} />
       )}
+      <CleanerAdjustmentCard contact={contact} conversationId={detail.conversation.id} cleanerName={detail.conversation.cleaner_name} />
     </>
   );
 }

@@ -1,7 +1,8 @@
+import { ComplaintButtons } from '../tracker/ConversationComplaint';
 import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { inbox, type Channel, type Complaint, type ConversationDetail, type Disposition, type Message } from './api';
+import { inbox, type Channel, type ConversationDetail, type Disposition, type Message } from './api';
 import { CHANNEL_LABEL, ROLE_LABEL, ago, displayIdentity, drafts, fillTemplate, firstName, slaText, useInboxMe, useMeta } from './util';
 import { fmtDateTime, fmtTime } from '../format';
 import { Icon } from '../components/Icon';
@@ -43,7 +44,7 @@ export function ConversationView({ id, composerRef, assist, onShowPerson }: { id
   };
   const me = useInboxMe();
   const meta = useMeta();
-  const [panel, setPanel] = useState<null | 'done' | 'snooze' | 'assign' | 'complaint'>(null);
+  const [panel, setPanel] = useState<null | 'done' | 'snooze' | 'assign'>(null);
   const [error, setError] = useState<string | null>(null);
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['inbox'] });
   const act = useMutation({
@@ -98,7 +99,7 @@ export function ConversationView({ id, composerRef, assist, onShowPerson }: { id
           {!c.owner_id && <button onClick={() => act.mutate(() => inbox.claim(id))}>Claim</button>}
           <button className="secondary" onClick={() => setPanel(panel === 'assign' ? null : 'assign')}>Assign</button>
           {c.status !== 'done' && <button className="secondary" onClick={() => setPanel(panel === 'snooze' ? null : 'snooze')}>Snooze</button>}
-          <button className="secondary" onClick={() => setPanel(panel === 'complaint' ? null : 'complaint')}>{c.complaint ? 'Complaint ●' : 'Complaint'}</button>
+          <ComplaintButtons detail={d} />
           {c.status !== 'done' ? (
             <button onClick={() => setPanel(panel === 'done' ? null : 'done')}>Done</button>
           ) : (
@@ -111,7 +112,6 @@ export function ConversationView({ id, composerRef, assist, onShowPerson }: { id
       {panel === 'done' && meta.data && <DonePanel initial={c.disposition || {}} roles={d.contact?.roles || []} meta={meta.data.dispositions} busy={act.isPending} onCancel={() => setPanel(null)} onSave={(disposition) => act.mutate(() => inbox.patch(id, { status: 'done', disposition }))} />}
       {panel === 'snooze' && <SnoozePanel onCancel={() => setPanel(null)} onSave={(until) => act.mutate(() => inbox.patch(id, { status: 'snoozed', snooze_until: until }))} />}
       {panel === 'assign' && <AssignPanel detail={d} onCancel={() => setPanel(null)} onAssign={(userId, reason) => act.mutate(() => inbox.assign(id, userId, reason))} onMove={(queueId) => act.mutate(() => inbox.patch(id, { queue_id: queueId }))} />}
-      {panel === 'complaint' && <ComplaintPanel initial={c.complaint} bookingId={c.l27_booking_id} onCancel={() => setPanel(null)} onSave={(complaint) => act.mutate(() => inbox.patch(id, { complaint }))} />}
 
       {d.contact && (d.others.length > 0 || (history.data?.conversations || 0) > 1) && (
         <div className="tl-scope small">
@@ -756,28 +756,5 @@ function CleanerField({ detail, onSave }: { detail: ConversationDetail; onSave: 
       Cleaner: {c.cleaner_id ? <b>{c.cleaner_name || `#${c.cleaner_id}`}</b> : suggested ? <><span className="muted">{suggested.name} (from booking)</span> <button className="link small" onClick={() => onSave({ cleaner_id: suggested.id, cleaner_name: suggested.name })}>Use</button></> : <span className="muted">none</span>}
       {' '}<button className="link small" onClick={() => setEditing(true)}>{c.cleaner_id ? 'Change' : 'Set'}</button>
     </span>
-  );
-}
-
-function ComplaintPanel({ initial, bookingId, onCancel, onSave }: { initial: Complaint | null; bookingId: number | null; onCancel: () => void; onSave: (c: Complaint | null) => void }) {
-  const [c, setC] = useState<Complaint>(initial || { booking_id: bookingId, status: 'open', outcome: 'pending' });
-  return (
-    <div className="inline-panel">
-      <div className="grid-3">
-        <label>Booking #<input value={c.booking_id ?? ''} onChange={(e) => setC({ ...c, booking_id: e.target.value ? Number(e.target.value) : null })} /></label>
-        <label>Cleaner<input value={c.cleaner || ''} placeholder="Set with Cleaner above" onChange={(e) => setC({ ...c, cleaner: e.target.value })} /></label>
-        <label>Outcome<select value={c.outcome} onChange={(e) => setC({ ...c, outcome: e.target.value as Complaint['outcome'] })}>{['pending', 'return clean', 'credit', 'refund', 'none'].map((o) => <option key={o}>{o}</option>)}</select></label>
-      </div>
-      <label>What went wrong<textarea rows={2} value={c.issue || ''} onChange={(e) => setC({ ...c, issue: e.target.value })} /></label>
-      <div className="grid-3">
-        <label>Cost to us ($)<input type="number" value={c.monetary_impact ?? ''} onChange={(e) => setC({ ...c, monetary_impact: e.target.value ? Number(e.target.value) : null })} /></label>
-        <label>Status<select value={c.status} onChange={(e) => setC({ ...c, status: e.target.value as Complaint['status'] })}><option value="open">open</option><option value="resolved">resolved</option></select></label>
-      </div>
-      <div className="actions end">
-        {initial && <button className="link" onClick={() => onSave(null)}>Remove complaint</button>}
-        <button className="secondary" onClick={onCancel}>Cancel</button>
-        <button onClick={() => onSave(c)}>Save complaint</button>
-      </div>
-    </div>
   );
 }

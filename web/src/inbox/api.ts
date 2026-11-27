@@ -492,6 +492,8 @@ export interface Notification {
   id: number;
   kind: string;
   conversation_id: number | null;
+  // A mention or assignment on a complaint (Complaint tracking) opens that complaint.
+  complaint_record_id?: number | null;
   // A page to open instead of a conversation (e.g. the monthly raise check).
   link: string | null;
   text: string;

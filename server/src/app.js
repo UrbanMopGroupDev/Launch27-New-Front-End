@@ -1,6 +1,8 @@
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import { SessionStore, COOKIE_MAX_AGE_MS } from './sessions.js';
+import { createTracker } from './tracker/service.js';
+import { createAdjustments } from './tracker/adjustments.js';
 import { createInboxRouter } from './inbox/api.js';
 import { tokenMatches } from './qa/service.js';
 import { guardConnectors } from './inbox/channels.js';
@@ -18,7 +20,7 @@ const FORWARD_HEADERS = ['accept', 'content-type'];
 
 export function createApp(
   config,
-  { fetchImpl = fetch, sessions = new SessionStore({ secret: config.sessionSecret }), db = null, connectors = {}, log = createLogger({ level: 'warn' }), jobs = null, qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, complaints = null, smsProviders = {}, kustomerMigration = null, kpi = null } = {},
+  { fetchImpl = fetch, sessions = new SessionStore({ secret: config.sessionSecret }), db = null, connectors = {}, log = createLogger({ level: 'warn' }), jobs = null, qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, complaints = null, smsProviders = {}, kustomerMigration = null, kpi = null, tracker = null, adjustments = null } = {},
 ) {
   const app = express();
   // Behind Railway's (or any) HTTPS proxy: trust X-Forwarded-* so secure cookies work.
@@ -252,7 +254,7 @@ export function createApp(
   // The support workspace (conversations, contacts, routing). Needs a database.
   if (db) {
     const l27 = createL27Client({ baseUrl: config.l27BaseUrl, fetchImpl });
-    app.use('/api', createInboxRouter({ db, sessions, cookieName: COOKIE, config, l27, connectors: guardConnectors(connectors, config.notificationsMode), log, qa, segments, schedule, reports, writes, commercial, placement, commercialPlan, complaints, smsProviders, kustomerMigration, kpi }));
+    app.use('/api', createInboxRouter({ db, sessions, cookieName: COOKIE, config, l27, connectors: guardConnectors(connectors, config.notificationsMode), log, qa, segments, schedule, reports, writes, commercial, placement, commercialPlan, complaints, smsProviders, kustomerMigration, kpi, tracker: tracker || createTracker({ db, config, fetchImpl, log }), adjustments: adjustments || createAdjustments({ db, config, fetchImpl, log }) }));
   }
 
   // Last-resort error handler: log it (without personal data), answer generically.
