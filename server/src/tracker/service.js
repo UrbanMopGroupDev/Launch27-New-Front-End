@@ -6,7 +6,7 @@
 import { createKustomerClient, discover } from '../complaints/sources/kustomer.js';
 import { audit } from '../inbox/service.js';
 import { CLOSE_FIELDS, FIELDS, FIELD_KEYS, LIST_COLUMNS, PANELS, STATUSES, TYPE_TO_PLAYBOOK, USER_LINKS, VIEWS, cleanValue, missingToClose } from './fields.js';
-import { categoryLabel, classifyRules, HARD_ROUTES } from '../complaints/taxonomy.js';
+import { categoryLabel, causeLabel, causeRules, classifyRules, HARD_ROUTES } from '../complaints/taxonomy.js';
 
 const one = async (q, sql, p) => (await q.query(sql, p)).rows[0] || null;
 const many = async (q, sql, p) => (await q.query(sql, p)).rows;
@@ -422,6 +422,7 @@ export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}
   }
 
   /** For one complaint: its playbook category, and what has kept clients for that kind before. */
+  const CAUSE_MIN = 10;
   async function guidance(id) {
     if (!complaints) return { available: false, reason: 'The Complaint playbook is not running here.' };
     const r = await one(db, 'SELECT complaint_type, complaint_notes, frequency, title FROM complaint_records WHERE id = $1', [id]);
@@ -440,7 +441,14 @@ export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}
       return { available: true, category: null, basis, complaint_type: r.complaint_type, reason: r.complaint_type ? `"${r.complaint_type}" has no matching playbook category.` : 'Pick a Complaint Type (or add notes) to see what has worked before.' };
     }
     const { from, to, book } = await playbookNow();
-    const t = (book.taxonomy || []).find((x) => x.key === category);
+    // Why it happened, read from the notes. When that cause has enough known outcomes
+    // (CAUSE_MIN), its history is the better guide than the whole category's: a quality
+    // complaint caused by a cleaner who left needs a different answer from one that wasn't.
+    const notes = [r.title, r.complaint_notes].filter(Boolean).join('. ');
+    const cause = notes.trim() ? causeRules(notes).cause : null;
+    const byCause = cause ? (book.by_cause || []).find((x) => x.key === cause) : null;
+    const useCause = !!byCause && byCause.decided >= CAUSE_MIN;
+    const t = useCause ? byCause : (book.taxonomy || []).find((x) => x.key === category);
     const escalated = ['damage', 'missing_item', 'conduct_safety'].includes(category);
     const pick = (b) => b && { rung: b.rung, name: b.name, saved: b.saved, decided: b.decided, avg_cost: b.avg_cost, n: b.n };
     return {
@@ -449,6 +457,11 @@ export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}
       label: categoryLabel(category),
       basis,
       complaint_type: r.complaint_type,
+      cause,
+      cause_label: cause ? causeLabel(cause) : null,
+      cause_cases: byCause?.n || 0,
+      cause_decided: byCause?.decided || 0,
+      based_on: useCause ? 'cause' : 'category',
       window: { from, to },
       escalation: escalated ? `${HARD_ROUTES.damage_over_100}, theft, safety or misconduct goes to the Office Manager, not the usual ladder.` : null,
       one_time: /one time/i.test(r.frequency || ''),

@@ -376,6 +376,14 @@ function WorkedBefore({ id, record }: { id: number; record: ComplaintRecord }) {
         <Link className="small" to="/complaints">Open the playbook</Link>
       </div>
       {d.escalation && <div className="ct-worked-alert small">{d.escalation}</div>}
+      {d.cause_label && (
+        <div className="small ct-worked-note">
+          Likely why (from the notes): <b>{d.cause_label}</b>.{' '}
+          {d.based_on === 'cause'
+            ? <span className="muted">The answer below is from the {d.cause_cases} past complaints with this root cause.</span>
+            : <span className="muted">Only {d.cause_decided} past {d.cause_decided === 1 ? 'complaint' : 'complaints'} with this root cause and a known outcome, so the answer below is for all {d.label} complaints.</span>}
+        </div>
+      )}
       {c ? (
         <div className="ct-worked-best">
           <div><span className="muted small">Cheapest that works</span><b>{c.name}</b></div>

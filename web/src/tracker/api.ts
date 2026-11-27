@@ -63,6 +63,11 @@ export interface ConversationComplaints { complaints: Pick<ComplaintRecord, 'id'
 // What has kept clients before for this kind of complaint (the Complaint playbook).
 export interface GuidanceOption { rung: string; name: string; saved: number | null; decided: number; avg_cost: number | null; n: number }
 export interface Guidance {
+  cause?: string | null;
+  cause_label?: string | null;
+  cause_cases?: number;
+  cause_decided?: number;
+  based_on?: 'cause' | 'category';
   available: boolean;
   reason?: string;
   category: string | null;
