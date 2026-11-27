@@ -37,15 +37,21 @@ Numbers are stored in E.164. A sender is matched to an existing contact by phone
 up in Launch27 (cleaners first, then customers; Launch27 stays the authority):
 
 - **customer** → their customer Story; **cleaner** → their cleaner profile;
-- **unknown** (no Launch27 customer or cleaner) → the **Who is this?** queue;
-- **several Launch27 customers share the number** → **Who is this?**, with their ids listed; never guessed.
+- **unknown** (no Launch27 customer or cleaner) → a **new contact** with just the number, routed
+  like any other text; an agent can name them or link them to Launch27 from their contact page;
+- **several Launch27 customers share the number** → a new contact linked to none of them (never
+  guessed), and the conversation notes the customers' ids so an agent can link the right one.
 
-Linking the contact to Launch27 takes the conversation out of Who is this?. Each business number
+A phone number or email belongs to one contact only, so the next text, call or email from it
+finds the same contact (see "Contacts" in the README). Each business number
 keeps its own conversation (a text to the hiring line never joins an Operations conversation),
 and routing rules decide the queue (e.g. the hiring number → HR Queue).
 
 STOP / START (and the other carrier keywords) mark the number opted out or back in; texts to an
-opted-out number are refused.
+opted-out number are refused. Only the person's START undoes a STOP (an agent can untick only an
+opt-out an agent ticked), and a STOP stays even if the number is removed from its contact or the
+contact is deleted. A text from a number an agent removed from a contact starts a new contact and
+conversation rather than continuing theirs (e.g. a number with a new owner).
 
 ## Environments
 

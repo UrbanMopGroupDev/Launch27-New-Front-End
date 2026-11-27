@@ -6,7 +6,7 @@ import { addDays, daysBetween, localDate, mondayOf } from '../schedule/rules.js'
 import { harmonizePartners } from '../commercial/partners.js';
 import { clampRange, utilizationFacts, utilizationReport, withRecordedDays } from './utilization.js';
 import { UTILIZATION } from './utilization-config.js';
-import { PERIODS, V2, findRecleans, cleanerRow, cleanerStats, emptyStats, mainBefore, flagsFor, indexVisits, median, outsideArea, pct, periodRange, regularClients, round1, sameCleaner, slimReportVisit, teamLong, timing, weeklySeries } from './compute.js';
+import { FIELD_COLUMNS, fieldDaily, PERIODS, V2, findRecleans, cleanerRow, cleanerStats, emptyStats, mainBefore, flagsFor, indexVisits, median, outsideArea, pct, periodRange, regularClients, round1, sameCleaner, slimReportVisit, teamLong, timing, weeklySeries } from './compute.js';
 import { CHANGE_LOG_START, CHURN, DROP_REASONS, RAISE_THRESHOLDS } from './raise-config.js';
 import { createSheetReader, nameMatcher, parseAdjustmentRows } from './adjustments.js';
 import { ladderOf, raiseReview, rateHistory, reliability, reliabilityWeeks, restrictiveTags, slackSummary } from './raise.js';
@@ -976,5 +976,27 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
 
   // The raw year of visits (for the Commercial area).
   const visitsSnapshot = () => need();
-  return { sync, start, maybeRun, scheduling, utilization, cleaners, cleaner, cleaners2, cleaner2, status, visitsSnapshot, syncAdjustments, recordDrop, codeChange, dropsForChanges, raiseDigest, raiseCheckCandidates, addReview, updateReview, deleteReview, isRunning: () => !!running, mondayOf };
+  // Daily field-operations counts and the next four weeks' hours by area, for the analytics feed.
+  async function fieldFeed({ from = null, to = null } = {}) {
+    const s = await need();
+    const day = (v) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
+    const end = day(to) || addDays(s.today, -1);
+    const start = day(from) || addDays(end, -364);
+    const { ov, util } = await plannerView(null);
+    const area = new Map((ov?.rows || []).map((r) => [r.id, r.area || 'Unknown']));
+    const areas = new Map();
+    for (const [, u] of util) {
+      if (!u.row.assignable) continue;
+      const a = areas.get(u.row.area) || { area: u.row.area || 'Unknown', cleaners: 0, booked: 0, capacity: 0 };
+      a.cleaners += 1; a.booked += u.booked; a.capacity += u.capacity;
+      areas.set(a.area, a);
+    }
+    return {
+      taken_at: s.taken_at, from: start, to: end, columns: FIELD_COLUMNS, rows: fieldDaily(s.visits, s.byCustomer, start, end, area),
+      capacity_columns: ['area', 'assignable_cleaners', 'booked_hours_per_week', 'capacity_hours_per_week', 'unassigned_visits'],
+      capacity: [...areas.values()].map((a) => [a.area, a.cleaners, round1(a.booked / 2), round1(a.capacity / 2), null]).concat([['All areas', [...areas.values()].reduce((x, a) => x + a.cleaners, 0), null, null, ov?.counts?.unassigned_visits ?? null]]),
+      planner: await plannerHealth('4w'),
+    };
+  }
+  return { fieldFeed, sync, start, maybeRun, scheduling, utilization, cleaners, cleaner, cleaners2, cleaner2, status, visitsSnapshot, syncAdjustments, recordDrop, codeChange, dropsForChanges, raiseDigest, raiseCheckCandidates, addReview, updateReview, deleteReview, isRunning: () => !!running, mondayOf };
 }

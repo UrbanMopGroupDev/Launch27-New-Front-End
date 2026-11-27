@@ -6,7 +6,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useInboxMe } from '../inbox/util';
-import { complaintsApi, OUTCOME_LABEL, RUNG_NAME, SOURCE_LABEL, TONE_LABEL, whatWeDid, type CaseRow, type ClientRow, type ReviewItem, type ReviewTally, type Confidence, type ExcludedReason, type OutcomeStats, type Playbook, type Settings, type Status } from '../complaints/api';
+import { complaintsApi, CAUSE_BY_LABEL, OUTCOME_LABEL, RUNG_NAME, SOURCE_LABEL, TONE_LABEL, whatWeDid, type CaseRow, type CauseTally, type ClientRow, type Codebook, type ReviewItem, type ReviewTally, type Confidence, type ExcludedReason, type OutcomeStats, type Playbook, type Settings, type Status } from '../complaints/api';
 import { Kpi } from '../reports/ui';
 import { money, pct } from '../reports/api';
 
@@ -25,6 +25,23 @@ const CATEGORY_LABEL: Record<string, string> = {
   other: 'Other / unclear',
 };
 const catLabel = (k: string) => CATEGORY_LABEL[k] || k;
+// Root causes (why it happened) come from the server's codebook, so the labels, definitions and
+// "not this when" lines people check against live in one place.
+function useCodebook() {
+  return useQuery({ queryKey: ['complaints', 'codebook'], queryFn: complaintsApi.codebook, staleTime: Infinity, retry: false }).data;
+}
+const causeName = (cb: Codebook | undefined, k: string | null | undefined) => (!k ? 'Not set' : k === 'other' ? 'Other / not on the list' : k === 'unset' ? 'Not set yet' : cb?.causes.find((c) => c.key === k)?.label || k);
+function CauseOptions({ cb, exclude = [] }: { cb: Codebook; exclude?: string[] }) {
+  return (
+    <>
+      {cb.groups.map((g) => (
+        <optgroup key={g.key} label={g.label}>
+          {cb.causes.filter((c) => c.group === g.key && !exclude.includes(c.key)).map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
+        </optgroup>
+      ))}
+    </>
+  );
+}
 const conf = (c: Confidence, n: number) => <span className={`pill ${c === 'thin' || c === 'none' ? 'late' : ''}`} title={`${n} cases with a 60-day outcome`}>{c === 'none' ? 'no data' : `${c} · n=${n}`}</span>;
 const day = (s: string | null) => (s ? new Date(s).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' }) : '—');
 
@@ -261,15 +278,16 @@ const STAT_HEADS = (
   </>
 );
 
-function csvOf(rows: CaseRow[], why?: Record<number, string>) {
+function csvOf(rows: CaseRow[], why: Record<number, string> | undefined, cb: Codebook | undefined) {
   const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-  const head = ['Case', 'Opened', 'Client', 'Booking', 'Service date', 'Cleaner', 'Client type', 'Service', 'Category', 'Escalated', 'Tone', 'What we did', 'Cost', 'Outcome', 'Source', 'Link', ...(why ? ['Why not counted'] : [])];
-  const lines = rows.map((c) => [c.id, c.opened_at.slice(0, 10), c.customer_name, c.l27_booking_id, c.service_date?.slice(0, 10), c.cleaner_name, c.client_type, c.service, catLabel(c.category), c.hard_route, c.tone, whatWeDid(c.rungs), Number(c.total_cost).toFixed(2), outcomeOf(c) ? OUTCOME_LABEL[outcomeOf(c) as string] : '', SOURCE_LABEL[c.source] || c.source, c.original_url, ...(why ? [why[c.id]] : [])].map(esc).join(','));
+  const head = ['Case', 'Opened', 'Client', 'Booking', 'Service date', 'Cleaner', 'Client type', 'Service', 'Category', 'Root cause', 'Also a factor', 'Escalated', 'Tone', 'What we did', 'Cost', 'Outcome', 'Source', 'Link', ...(why ? ['Why not counted'] : [])];
+  const lines = rows.map((c) => [c.id, c.opened_at.slice(0, 10), c.customer_name, c.l27_booking_id, c.service_date?.slice(0, 10), c.cleaner_name, c.client_type, c.service, catLabel(c.category), c.cause ? causeName(cb, c.cause) : '', (c.contributing_causes || []).map((k) => causeName(cb, k)).join('; '), c.hard_route, c.tone, whatWeDid(c.rungs), Number(c.total_cost).toFixed(2), outcomeOf(c) ? OUTCOME_LABEL[outcomeOf(c) as string] : '', SOURCE_LABEL[c.source] || c.source, c.original_url, ...(why ? [why[c.id]] : [])].map(esc).join(','));
   return [head.map(esc).join(','), ...lines].join('\n');
 }
 
 function DrillDialog({ drill, cases, loading, onClose }: { drill: Drill; cases: CaseRow[]; loading: boolean; onClose: () => void }) {
   const [openCase, setOpenCase] = useState<number | null>(null);
+  const cb = useCodebook();
   const rows = useMemo(() => {
     const want = new Set(drill.ids);
     return cases.filter((c) => want.has(c.id)).sort((a, b) => b.opened_at.localeCompare(a.opened_at));
@@ -277,7 +295,7 @@ function DrillDialog({ drill, cases, loading, onClose }: { drill: Drill; cases: 
   const total = rows.reduce((s, c) => s + Number(c.total_cost), 0);
   const download = () => {
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([csvOf(rows, drill.why)], { type: 'text/csv' }));
+    a.href = URL.createObjectURL(new Blob([csvOf(rows, drill.why, cb)], { type: 'text/csv' }));
     a.download = `complaints-${drill.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60)}.csv`;
     a.click();
     URL.revokeObjectURL(a.href);
@@ -296,7 +314,7 @@ function DrillDialog({ drill, cases, loading, onClose }: { drill: Drill; cases: 
         {loading ? <p className="muted">Loading…</p> : (
           <div className="table-scroll">
             <table className="rep-drill-table cmp-cases">
-              <thead><tr><th>Opened</th><th>Client</th><th>Booking</th><th>Cleaner</th><th>Category</th><th>What we did</th><th>Cost</th><th>Outcome</th><th>Source</th>{drill.why && <th>Why not counted</th>}</tr></thead>
+              <thead><tr><th>Opened</th><th>Client</th><th>Booking</th><th>Cleaner</th><th>Category</th><th>Root cause</th><th>What we did</th><th>Cost</th><th>Outcome</th><th>Source</th>{drill.why && <th>Why not counted</th>}</tr></thead>
               <tbody>
                 {rows.map((c) => (
                   <tr key={c.id} className={openCase === c.id ? 'selected' : ''} onClick={() => setOpenCase(c.id)}>
@@ -305,6 +323,7 @@ function DrillDialog({ drill, cases, loading, onClose }: { drill: Drill; cases: 
                     <td className="small">{c.l27_booking_id ? `#${c.l27_booking_id}` : '—'}{c.service_date ? ` · ${day(c.service_date)}` : ''}</td>
                     <td className="small">{c.cleaner_name || '—'}</td>
                     <td>{catLabel(c.category)}{c.hard_route && <span className="pill late" title={ESCALATED_TIP}>escalated</span>}</td>
+                    <td className="small">{c.cause ? causeName(cb, c.cause) : <span className="muted">not set</span>}</td>
                     <td>{whatWeDid(c.rungs)}</td>
                     <td>{money(Number(c.total_cost))}</td>
                     <td>{outcomeOf(c) ? OUTCOME_LABEL[outcomeOf(c) as string] : '—'}</td>
@@ -388,6 +407,8 @@ function PlaybookTab({ period }: { period: Period }) {
         </div>
       </section>
 
+      <WhyItHappened p={p} open={open} labels={L} />
+
       <section className="card">
         <h2>One-time clients: did they book again?</h2>
         <p className="muted small">One-time clients have no schedule to keep, so they are left out of Saved and Lost above. The question here is whether they booked again within 90 and 120 days of the complaint. Recleans and free visits don't count as booking again.</p>
@@ -439,6 +460,58 @@ function PlaybookTab({ period }: { period: Period }) {
       </section>
       {drill && <DrillDialog drill={drill} cases={cases.data || []} loading={cases.isLoading} onClose={() => setDrill(null)} />}
     </>
+  );
+}
+
+// Root causes: the same view as the taxonomy, by why it happened instead of what was said.
+// This is what the ranked responses per cause will be built on, once the causes are checked.
+function WhyItHappened({ p, open, labels }: { p: Playbook; open: Open; labels: Record<ExcludedReason, string> }) {
+  const rows = p.by_cause || [];
+  if (!rows.length) return null;
+  const unset = rows.find((r) => r.key === 'unset');
+  const order = [...(p.cause_groups || []).map((g) => g.key), null];
+  const groupName = (k: string | null) => p.cause_groups.find((g) => g.key === k)?.label || 'Everything else';
+  return (
+    <section className="card">
+      <h2>Why it happened: root causes</h2>
+      <p className="muted small">The category is what the client complained about; the root cause is why it happened. A complaint about missed areas can be caused by a cleaner who left. Each case counts once, under its root cause; "also a factor in" counts the cases where it contributed.{unset ? ` ${unset.n} ${unset.n === 1 ? 'case has' : 'cases have'} no root cause yet: older cases get one when their dates are updated again, or when someone checks them.` : ''}</p>
+      <div className="cmp-arms">
+        {p.cause_groups.map((g) => (
+          <div className="cmp-arm" key={g.key}>
+            <span className="small muted">{g.label}</span>
+            <span className="cmp-arm-value"><Num ids={g.ids} title={`${g.label}: every case`} open={open}>{g.n}</Num></span>
+            <span className="small muted">{pct(g.share)} of all complaints{g.decided ? ` · ${pct(g.saved)} kept (${g.saved_n} of ${g.decided})` : ''}</span>
+          </div>
+        ))}
+      </div>
+      <div className="table-scroll">
+        <table>
+          <thead><tr><th>Root cause</th><th title="This cause's cases as a share of every complaint in these dates">% of all complaints</th><th title="Cases where this was a contributing cause, not the root cause">Also a factor in</th><th>What clients complained about</th>{STAT_HEADS}<th title="The lowest-cost response whose save rate is within 10 points of the best one, among responses with at least 3 known outcomes.">Cheapest that works</th></tr></thead>
+          <tbody>
+            {order.map((gk) => {
+              const list = rows.filter((r) => (r.group || null) === gk);
+              if (!list.length) return null;
+              return [
+                <tr key={`g-${gk}`} className="static"><th colSpan={11}>{groupName(gk)}</th></tr>,
+                ...list.map((x) => {
+                  const c = x.cheapest_that_works;
+                  return (
+                    <tr key={x.key} className="static">
+                      <td>{x.label}{x.set_by.human ? <span className="small muted"> · {x.set_by.human} checked</span> : null}</td>
+                      <td>{pct(x.share)} <span className="small muted cmp-nd"><Num ids={x.ids} title={`${x.label}: every case`} open={open}>{x.n}</Num> of {x.total_n}</span></td>
+                      <td>{x.contributing_n ? <Num ids={x.contributing_ids} title={`${x.label}: a contributing cause`} open={open}>{x.contributing_n}</Num> : <span className="muted">—</span>}</td>
+                      <td className="small">{x.by_category.slice(0, 3).map((k, i) => <span key={k.key}>{i ? ', ' : ''}{catLabel(k.key)} <Num ids={k.ids} title={`${x.label} → ${catLabel(k.key)}`} open={open}>{k.n}</Num></span>)}{x.by_category.length > 3 ? ', …' : ''}</td>
+                      <StatCells s={x} name={x.label} labels={labels} open={open} />
+                      <td className="small">{c ? <><b>{c.name}</b>, {c.grade}: <Num ids={c.ids} title={`${x.label}: ${c.name}`} open={open}>{c.reason}</Num></> : <span className="muted">—</span>}</td>
+                    </tr>
+                  );
+                }),
+              ];
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 
@@ -561,7 +634,7 @@ function Baseline({ b, open }: { b: Playbook['baseline']; open: Open }) {
   );
 }
 
-type SortKey = 'opened_at' | 'customer_name' | 'category' | 'service' | 'client_type' | 'tone' | 'did' | 'total_cost' | 'outcome' | 'source';
+type SortKey = 'opened_at' | 'customer_name' | 'category' | 'cause' | 'service' | 'client_type' | 'tone' | 'did' | 'total_cost' | 'outcome' | 'source';
 const TONE_ORDER = ['mild', 'frustrated', 'angry', 'threat_leave', 'threat_review'];
 const outcomeOf = (c: CaseRow) => (c.client_type === 'one_time' ? c.outcome_120 : c.outcome_60);
 function sortValue(c: CaseRow, k: SortKey): string | number {
@@ -569,6 +642,7 @@ function sortValue(c: CaseRow, k: SortKey): string | number {
     case 'total_cost': return Number(c.total_cost) || 0;
     case 'tone': return c.tone ? TONE_ORDER.indexOf(c.tone) : -1;
     case 'category': return catLabel(c.category);
+    case 'cause': return c.cause || '~';
     case 'did': return whatWeDid(c.rungs);
     case 'outcome': return outcomeOf(c) || '';
     case 'source': return SOURCE_LABEL[c.source] || c.source;
@@ -577,7 +651,9 @@ function sortValue(c: CaseRow, k: SortKey): string | number {
 }
 
 function CasesTab({ period }: { period: Period }) {
+  const cb = useCodebook();
   const [category, setCategory] = useState('');
+  const [cause, setCause] = useState('');
   const [source, setSource] = useState('');
   const [open, setOpen] = useState<number | null>(null);
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: 'opened_at', dir: -1 });
@@ -585,13 +661,13 @@ function CasesTab({ period }: { period: Period }) {
   const all = useMemo(() => q.data || [], [q.data]);
   const sources = useMemo(() => [...new Set(all.map((c) => c.source))].sort(), [all]);
   const rows = useMemo(() => {
-    const list = source ? all.filter((c) => c.source === source) : [...all];
+    const list = all.filter((c) => (!source || c.source === source) && (!cause || (cause === 'unset' ? !c.cause : c.cause === cause)));
     return list.sort((a, b) => {
       const x = sortValue(a, sort.key);
       const y = sortValue(b, sort.key);
       return (typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y))) * sort.dir;
     });
-  }, [all, source, sort]);
+  }, [all, source, cause, sort]);
   const Th = ({ k, children }: { k: SortKey; children: string }) => (
     <th aria-sort={sort.key === k ? (sort.dir === 1 ? 'ascending' : 'descending') : 'none'}>
       <button className="link cmp-sort" onClick={() => setSort((s) => ({ key: k, dir: s.key === k ? (s.dir === 1 ? -1 : 1) : 1 }))}>{children}{sort.key === k ? (sort.dir === 1 ? ' ▲' : ' ▼') : ''}</button>
@@ -606,6 +682,12 @@ function CasesTab({ period }: { period: Period }) {
             <option value="">All categories</option>
             {cats.map((c) => <option key={c} value={c}>{catLabel(c)}</option>)}
           </select>
+          <select value={cause} onChange={(e) => setCause(e.target.value)} aria-label="Root cause">
+            <option value="">All root causes</option>
+            {cb && <CauseOptions cb={cb} />}
+            <option value="other">Other / not on the list</option>
+            <option value="unset">Not set yet</option>
+          </select>
           <select value={source} onChange={(e) => setSource(e.target.value)} aria-label="Source">
             <option value="">All sources</option>
             {sources.map((s) => <option key={s} value={s}>{SOURCE_LABEL[s] || s}</option>)}
@@ -614,7 +696,7 @@ function CasesTab({ period }: { period: Period }) {
         </div>
         <div className="table-scroll">
           <table>
-            <thead><tr><Th k="opened_at">Opened</Th><Th k="customer_name">Client</Th><Th k="client_type">Client type</Th><Th k="service">Service</Th><Th k="category">Category</Th><Th k="tone">Tone</Th><Th k="did">What we did</Th><Th k="total_cost">Cost</Th><Th k="outcome">Outcome</Th><Th k="source">From</Th></tr></thead>
+            <thead><tr><Th k="opened_at">Opened</Th><Th k="customer_name">Client</Th><Th k="client_type">Client type</Th><Th k="service">Service</Th><Th k="category">Category</Th><Th k="cause">Root cause</Th><Th k="tone">Tone</Th><Th k="did">What we did</Th><Th k="total_cost">Cost</Th><Th k="outcome">Outcome</Th><Th k="source">From</Th></tr></thead>
             <tbody>
               {rows.map((c: CaseRow) => (
                 <tr key={c.id} className={open === c.id ? 'selected' : ''} onClick={() => setOpen(c.id)}>
@@ -623,6 +705,7 @@ function CasesTab({ period }: { period: Period }) {
                   <td>{c.client_type === 'one_time' ? 'One-time' : c.client_type === 'recurring' ? 'Recurring' : '—'}</td>
                   <td className="small">{c.service || '—'}</td>
                   <td>{catLabel(c.category)}{c.hard_route && <span className="pill late" title={ESCALATED_TIP}>escalated</span>}</td>
+                  <td className="small">{c.cause ? causeName(cb, c.cause) : <span className="muted">not set</span>}</td>
                   <td>{c.tone ? TONE_LABEL[c.tone] : '—'}</td>
                   <td>{whatWeDid(c.rungs)}</td>
                   <td>{money(Number(c.total_cost))}</td>
@@ -641,6 +724,7 @@ function CasesTab({ period }: { period: Period }) {
 
 function CaseDetailCard({ id, onClose }: { id: number; onClose: () => void }) {
   const qc = useQueryClient();
+  const cb = useCodebook();
   const q = useQuery({ queryKey: ['complaints', 'case', id], queryFn: () => complaintsApi.case(id) });
   const fix = useMutation({ mutationFn: (category: string) => complaintsApi.reclassify(id, { category }), onSuccess: () => qc.invalidateQueries({ queryKey: ['complaints'] }) });
   const c = q.data;
@@ -658,6 +742,13 @@ function CaseDetailCard({ id, onClose }: { id: number; onClose: () => void }) {
           </select>{' '}
           <span className="muted small">classified by {c.classified_by}</span>
         </dd>
+        <dt>Root cause</dt>
+        <dd>
+          {c.cause ? causeName(cb, c.cause) : <span className="muted">not set yet</span>}
+          {c.contributing_causes?.length ? <span className="small"> · also: {c.contributing_causes.map((k) => causeName(cb, k)).join(', ')}</span> : null}
+          {c.cause_by && <span className="muted small"> · set by {CAUSE_BY_LABEL[c.cause_by] || c.cause_by}</span>}
+          {c.cause_evidence && <><br /><span className="small">“{c.cause_evidence}”</span></>}
+        </dd>
         <dt>Tone · severity</dt><dd>{c.tone ? TONE_LABEL[c.tone] : '—'} · {c.severity ?? '—'}/4</dd>
         {c.hard_route && (<><dt>Escalated</dt><dd className="neg">{c.hard_route.replace(/_/g, ' ')} → Office Manager</dd></>)}
         <dt>Areas</dt><dd>{c.areas_cited?.length ? c.areas_cited.join(', ') : '—'}</dd>
@@ -671,7 +762,7 @@ function CaseDetailCard({ id, onClose }: { id: number; onClose: () => void }) {
           <h3>Before the complaint</h3>
           <dl className="kv">
             <dt>Client</dt><dd>{j.tenure_days ?? '—'} days · {j.cleans_total} cleans · {String(j.frequency || '—')} · {money(Number(j.spend_12m))} in 12 months</dd>
-            <dt>Cleaner</dt><dd>{String(j.cleaner_name || '—')} ({j.cleaner_visits_before ?? '?'} visits before){j.cleaner_changed_last_visit ? ' · different from the visit before' : ''} · {j.distinct_cleaners_90d} {Number(j.distinct_cleaners_90d) === 1 ? 'cleaner' : 'cleaners'} in 90 days</dd>
+            <dt>Cleaner</dt><dd>{String(j.cleaner_name || '—')} ({j.cleaner_visits_before ?? '?'} visits before){j.cleaner_changed_last_visit ? ' · different from the visit before' : ''} · {j.distinct_cleaners_90d} {Number(j.distinct_cleaners_90d) === 1 ? 'cleaner' : 'cleaners'} in 90 days{j.regular_cleaner_name ? ` · regular: ${String(j.regular_cleaner_name)}${j.regular_cleaner_left ? `, stopped working with us${j.regular_cleaner_last_worked ? ` after ${day(String(j.regular_cleaner_last_worked))}` : ''}` : ''}` : ''}</dd>
             <dt>Signals</dt><dd>{j.prior_complaints} earlier {Number(j.prior_complaints) === 1 ? 'complaint' : 'complaints'} · {j.prior_unhappy_ratings} earlier unhappy {Number(j.prior_unhappy_ratings) === 1 ? 'rating' : 'ratings'} · {j.price_change_pct != null ? `price ${Number(j.price_change_pct) > 0 ? '+' : ''}${pct(Number(j.price_change_pct))}` : 'no price history'} · {j.days_since_last_clean ?? '—'} days since last clean</dd>
           </dl>
         </>
@@ -753,17 +844,59 @@ function AccuracyRows({ rows, label }: { rows: (ReviewTally & { waiting?: number
   );
 }
 
+type CheckAnswer = { verdict: 'correct' | 'wrong_category' | 'not_complaint'; category?: string; cause?: string; contributing?: string[] };
+
+function CauseAccuracyRows({ rows, label }: { rows: CauseTally[]; label: (k: string) => string }) {
+  return (
+    <>
+      {rows.map((r) => (
+        <tr key={r.key}>
+          <td>{label(r.key)}</td>
+          <td className="num">{r.checked}</td>
+          <td className="num">{r.accuracy == null ? '—' : pct(r.accuracy)}{r.checked > 0 && !r.enough && <span className="pill late" title="Too few checked to trust this number yet"> thin</span>}</td>
+          <td className="num">{r.wrong}</td>
+        </tr>
+      ))}
+    </>
+  );
+}
+
+// The codebook people check against: the same definitions Claude is given.
+function CodebookPanel({ cb }: { cb: Codebook }) {
+  return (
+    <details className="card cmp-codebook">
+      <summary><b>Root-cause codebook</b> <span className="muted small">· what each cause means, with examples and when not to use it</span></summary>
+      {cb.groups.map((g) => (
+        <div key={g.key}>
+          <h3>{g.label}</h3>
+          <dl className="kv">
+            {cb.causes.filter((c) => c.group === g.key).map((c) => (
+              <div key={c.key} className="cmp-code">
+                <dt>{c.label}</dt>
+                <dd>{c.definition}<br /><span className="small muted">e.g. “{c.examples.join('” · “')}”</span><br /><span className="small">Not this when: {c.not_when}</span></dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      ))}
+      <p className="small muted">None of these fit, or the client doesn't say why? Pick <b>Other / not on the list</b>. If the same "other" keeps coming up, it's a candidate for a new cause.</p>
+    </details>
+  );
+}
+
 function CheckTab() {
   const qc = useQueryClient();
+  const cb = useCodebook();
   const [category, setCategory] = useState('');
   const [source, setSource] = useState('');
+  const [cause, setCause] = useState('');
   const [done, setDone] = useState<number[]>([]);
-  const q = useQuery({ queryKey: ['complaints', 'review', category, source], queryFn: () => complaintsApi.review({ category: category || undefined, source: source || undefined }), retry: false, refetchOnWindowFocus: false });
+  const q = useQuery({ queryKey: ['complaints', 'review', category, source, cause], queryFn: () => complaintsApi.review({ category: category || undefined, source: source || undefined, cause: cause || undefined }), retry: false, refetchOnWindowFocus: false });
   const send = useMutation({
-    mutationFn: (v: { id: number; verdict: 'correct' | 'wrong_category' | 'not_complaint'; category?: string }) => complaintsApi.submitReview(v.id, { verdict: v.verdict, category: v.category }),
+    mutationFn: (v: CheckAnswer & { id: number }) => complaintsApi.submitReview(v.id, { verdict: v.verdict, category: v.category, cause: v.cause, contributing: v.contributing }),
     onSuccess: (r, v) => {
       setDone((d) => [...d, v.id]);
-      qc.setQueryData(['complaints', 'review', category, source], (old: typeof q.data) => (old ? { ...old, stats: r.stats } : old));
+      qc.setQueryData(['complaints', 'review', category, source, cause], (old: typeof q.data) => (old ? { ...old, stats: r.stats } : old));
       for (const k of ['playbook', 'cases', 'clients']) qc.invalidateQueries({ queryKey: ['complaints', k] });
     },
   });
@@ -772,10 +905,12 @@ function CheckTab() {
   const { stats } = q.data;
   const queue = q.data.queue.filter((c) => !done.includes(c.id));
   const t = stats.total;
+  const ct = stats.cause;
   return (
     <>
       <section className="card">
         <h2>How accurate is the sorting?</h2>
+        <p className="muted small">Each check answers two questions: is the <b>category</b> (what the client complained about) right, and is the <b>root cause</b> (why it happened) right. Both are measured against what the engine said before you looked.</p>
         <div className="cmp-arms">
           <div className="cmp-arm"><span className="small muted">Checked by a person</span><span className="cmp-arm-value">{t.checked}</span><span className="small muted">{stats.waiting} not checked yet</span></div>
           <div className="cmp-arm"><span className="small muted">Category was right</span><span className="cmp-arm-value">{t.accuracy == null ? '—' : pct(t.accuracy)}</span><span className="small muted">{t.checked < stats.min_checks ? `Needs at least ${stats.min_checks} checks to mean anything` : `${t.correct} of ${t.checked}`}</span></div>
@@ -800,7 +935,31 @@ function CheckTab() {
             <ul>{stats.confusions.map((c) => <li key={`${c.from}>${c.to}`}>{catLabel(c.from)} → should be <b>{catLabel(c.to)}</b> ({c.n})</li>)}</ul>
           </>
         )}
+        <h3>Root causes</h3>
+        <div className="cmp-arms">
+          <div className="cmp-arm"><span className="small muted">Root causes checked</span><span className="cmp-arm-value">{ct.total.checked}</span><span className="small muted">checks from before root causes don't count here</span></div>
+          <div className="cmp-arm"><span className="small muted">Root cause was right</span><span className="cmp-arm-value">{ct.total.accuracy == null ? '—' : pct(ct.total.accuracy)}</span><span className="small muted">{ct.total.checked < stats.min_checks ? `Needs at least ${stats.min_checks} checks to mean anything` : `${ct.total.correct} of ${ct.total.checked}`}</span></div>
+        </div>
+        {ct.total.checked > 0 && (
+          <div className="table-wrap">
+            <table className="table">
+              <thead><tr><th>Root cause the engine gave</th><th className="num">Checked</th><th className="num">Right</th><th className="num">Wrong</th></tr></thead>
+              <tbody>
+                <CauseAccuracyRows rows={ct.by_cause} label={(k) => (k === 'none' ? 'None given' : causeName(cb, k))} />
+                <tr><th colSpan={4}>By who set it</th></tr>
+                <CauseAccuracyRows rows={ct.by_setter} label={(k) => CAUSE_BY_LABEL[k] || k} />
+              </tbody>
+            </table>
+          </div>
+        )}
+        {ct.confusions.length > 0 && (
+          <>
+            <h3>Most common root-cause mix-ups</h3>
+            <ul>{ct.confusions.map((c) => <li key={`${c.from}>${c.to}`}>{c.from === 'none' ? 'None given' : causeName(cb, c.from)} → should be <b>{causeName(cb, c.to)}</b> ({c.n})</li>)}</ul>
+          </>
+        )}
       </section>
+      {cb && <CodebookPanel cb={cb} />}
       <section className="card cmp-filter">
         <label className="cmp-date">Category
           <select value={category} onChange={(e) => { setCategory(e.target.value); setDone([]); }}>
@@ -814,18 +973,32 @@ function CheckTab() {
             {['kustomer', 'gmail', 'launch27_rating', 'slack'].map((k) => <option key={k} value={k}>{SOURCE_LABEL[k]}</option>)}
           </select>
         </label>
+        <label className="cmp-date">Root cause
+          <select value={cause} onChange={(e) => { setCause(e.target.value); setDone([]); }}>
+            <option value="">All root causes</option>
+            {cb && <CauseOptions cb={cb} />}
+            <option value="other">Other / not on the list</option>
+          </select>
+        </label>
         <span className="muted small">{queue.length} to check in this batch</span>
         <button className="link" onClick={() => { setDone([]); q.refetch(); }}>New batch</button>
       </section>
       {send.isError && <p className="cmp-note">{(send.error as Error).message}</p>}
       {queue.length === 0 && <section className="card seg-empty"><p className="muted">Nothing left to check here. Pick another category or source, or get a new batch.</p></section>}
-      {queue.slice(0, 10).map((c) => <CheckCard key={c.id} c={c} busy={send.isPending} onVerdict={(verdict, cat) => send.mutate({ id: c.id, verdict, category: cat })} />)}
+      {cb && queue.slice(0, 10).map((c) => <CheckCard key={c.id} c={c} cb={cb} busy={send.isPending} onAnswer={(a) => send.mutate({ id: c.id, ...a })} />)}
       {queue.length > 10 && <p className="muted small">{queue.length - 10} more appear as you go.</p>}
     </>
   );
 }
 
-function CheckCard({ c, busy, onVerdict }: { c: ReviewItem; busy: boolean; onVerdict: (v: 'correct' | 'wrong_category' | 'not_complaint', category?: string) => void }) {
+function CheckCard({ c, cb, busy, onAnswer }: { c: ReviewItem; cb: Codebook; busy: boolean; onAnswer: (a: CheckAnswer) => void }) {
+  const [category, setCategory] = useState(c.category);
+  const [cause, setCause] = useState(c.cause || '');
+  const [also, setAlso] = useState<string[]>((c.contributing_causes || []).filter((k) => k !== c.cause).slice(0, 2));
+  const def = cb.causes.find((x) => x.key === cause);
+  const changedCategory = category !== c.category;
+  const save = () => onAnswer({ verdict: changedCategory ? 'wrong_category' : 'correct', category: changedCategory ? category : undefined, cause, contributing: also.filter((k) => k && k !== cause) });
+  const setAlsoAt = (i: number, v: string) => setAlso((a) => { const n = [...a]; n[i] = v; return n.filter(Boolean); });
   return (
     <section className="card cmp-check">
       <div className="cmp-runbar">
@@ -841,14 +1014,43 @@ function CheckCard({ c, busy, onVerdict }: { c: ReviewItem; busy: boolean; onVer
         <dt>Tone · severity</dt><dd>{c.tone ? TONE_LABEL[c.tone] : '—'} · {c.severity ?? '—'}/4{c.hard_route ? ` · hard route: ${c.hard_route.replace(/_/g, ' ')}` : ''}</dd>
         {c.areas_cited?.length > 0 && (<><dt>Areas</dt><dd>{c.areas_cited.join(', ')}</dd></>)}
         <dt>What we did</dt><dd>{whatWeDid(c.rungs)}{c.resolution_text ? ` · ${c.resolution_text}` : ''}</dd>
+        <dt>Engine's root cause</dt>
+        <dd>
+          {c.cause ? <b>{causeName(cb, c.cause)}</b> : <span className="muted">none given</span>}
+          {c.cause_by && <span className="muted small"> · by {CAUSE_BY_LABEL[c.cause_by] || c.cause_by}</span>}
+          {c.cause_evidence && <><br /><span className="small">“{c.cause_evidence}”</span></>}
+        </dd>
+        <dt>From Launch27</dt>
+        <dd>{c.facts.length ? c.facts.map((f) => <div key={f.cause} className="small">{f.text} <span className="muted">→ points at “{causeName(cb, f.cause)}”</span></div>) : <span className="muted small">Nothing that points at a cause{c.cleaner_name ? ` (cleaner: ${c.cleaner_name})` : ''}.</span>}</dd>
       </dl>
+      <div className="cmp-check-grid">
+        <label>What they complained about
+          <select value={category} disabled={busy} onChange={(e) => setCategory(e.target.value)}>
+            {Object.keys(CATEGORY_LABEL).map((k) => <option key={k} value={k}>{catLabel(k)}{k === c.category ? ' (engine)' : ''}</option>)}
+          </select>
+        </label>
+        <label>Why it happened (root cause)
+          <select value={cause} disabled={busy} onChange={(e) => { setCause(e.target.value); setAlso((a) => a.filter((k) => k !== e.target.value)); }}>
+            <option value="">Pick one…</option>
+            <CauseOptions cb={cb} />
+            <option value="other">Other / not on the list</option>
+          </select>
+        </label>
+        <label>Also a factor (optional)
+          <span className="cmp-also">
+            {[0, 1].map((i) => (
+              <select key={i} value={also[i] || ''} disabled={busy || (i === 1 && !also[0])} onChange={(e) => setAlsoAt(i, e.target.value)} aria-label={`Contributing cause ${i + 1}`}>
+                <option value="">—</option>
+                <CauseOptions cb={cb} exclude={[cause, ...also.filter((_, j) => j !== i)]} />
+              </select>
+            ))}
+          </span>
+        </label>
+      </div>
+      {def && <p className="small cmp-def"><b>{def.label}:</b> {def.definition} <span className="muted">Not this when: {def.not_when}</span></p>}
       <div className="cmp-check-actions">
-        <button disabled={busy} onClick={() => onVerdict('correct')}>Correct</button>
-        <select value="" disabled={busy} aria-label="Pick the right category" onChange={(e) => e.target.value && onVerdict('wrong_category', e.target.value)}>
-          <option value="">Wrong, it should be…</option>
-          {Object.keys(CATEGORY_LABEL).filter((k) => k !== c.category).map((k) => <option key={k} value={k}>{catLabel(k)}</option>)}
-        </select>
-        <button className="secondary" disabled={busy} onClick={() => onVerdict('not_complaint')}>Not a complaint</button>
+        <button disabled={busy || !cause} onClick={save} title={cause ? undefined : 'Pick the root cause first'}>{changedCategory ? 'Save: category fixed' : 'Save check'}</button>
+        <button className="secondary" disabled={busy} onClick={() => onAnswer({ verdict: 'not_complaint' })}>Not a complaint</button>
         {c.original_url && <a href={c.original_url} target="_blank" rel="noreferrer" className="small">Open the email</a>}
       </div>
     </section>

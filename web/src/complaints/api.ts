@@ -50,6 +50,24 @@ export interface Playbook {
     by_rung: (OutcomeStats & { rung: string; name: string })[];
     cheapest_that_works: Cheapest | null;
   })[];
+  by_cause: (OutcomeStats & {
+    key: string;
+    label: string;
+    group: string | null;
+    share: number | null;
+    total_n: number;
+    hard_routed: number;
+    hard_routed_ids: number[];
+    typical_rung: string | null;
+    typical_name: string | null;
+    by_rung: (OutcomeStats & { rung: string; name: string })[];
+    cheapest_that_works: Cheapest | null;
+    contributing_n: number;
+    contributing_ids: number[];
+    set_by: Record<string, number>;
+    by_category: { key: string; label: string; n: number; ids: number[] }[];
+  })[];
+  cause_groups: (OutcomeStats & { key: string; label: string; share: number | null })[];
   ladder: (Rung & OutcomeStats)[];
   reclean_vs_refund: { key: string; label: string; reclean: OutcomeStats; refund: OutcomeStats; neither: OutcomeStats; verdict: string }[];
   reclean_vs_refund_total: { reclean: OutcomeStats; refund: OutcomeStats; neither: OutcomeStats };
@@ -99,6 +117,9 @@ export interface CaseRow {
   status: string;
   source_status: string | null;
   classified_by: string;
+  cause: string | null;
+  contributing_causes: string[] | null;
+  cause_by: CauseBy | null;
   total_cost: string | number;
   rungs: string | null;
   outcome_60: Outcome | null;
@@ -112,6 +133,7 @@ export interface CaseRow {
 
 export interface CaseDetail extends CaseRow {
   areas_cited: string[];
+  cause_evidence: string | null;
   exchanges: number | null;
   first_response_at: string | null;
   journey: Record<string, string | number | boolean | null> | null;
@@ -162,6 +184,11 @@ export interface Clients {
 }
 
 export type Verdict = 'correct' | 'wrong_category' | 'not_complaint';
+// Root causes: why it happened (the category is what the client complained about).
+export type CauseBy = 'rules' | 'claude' | 'facts' | 'human';
+export interface CodebookCause { key: string; group: string; label: string; definition: string; examples: string[]; not_when: string }
+export interface Codebook { groups: { key: string; label: string }[]; causes: CodebookCause[] }
+export const CAUSE_BY_LABEL: Record<string, string> = { rules: 'Keyword rules', claude: 'Claude', facts: 'Launch27 facts', human: 'A person', none: 'Not set' };
 export interface ReviewItem {
   id: number;
   source: string;
@@ -182,10 +209,18 @@ export interface ReviewItem {
   resolution_text: string | null;
   rating: number | null;
   original_url: string | null;
+  cause: string | null;
+  contributing_causes: string[] | null;
+  cause_evidence: string | null;
+  cause_by: CauseBy | null;
+  cleaner_name: string | null;
+  facts: { cause: string; text: string }[];
 }
 export interface ReviewTally { key: string; checked: number; correct: number; wrong_category: number; not_complaint: number; accuracy: number | null; enough: boolean }
+export interface CauseTally { key: string; checked: number; correct: number; wrong: number; accuracy: number | null; enough: boolean }
 export interface ReviewStats {
   total: Omit<ReviewTally, 'key'>;
+  cause: { total: Omit<CauseTally, 'key'>; by_cause: CauseTally[]; by_setter: CauseTally[]; confusions: { from: string; to: string; n: number }[] };
   by_category: (ReviewTally & { waiting: number })[];
   by_source: ReviewTally[];
   by_classifier: ReviewTally[];
@@ -212,13 +247,14 @@ const qs = (w?: Record<string, string | number | undefined>) => {
 export const complaintsApi = {
   status: () => call<Status>('GET', '/status'),
   playbook: (w?: { from?: string; to?: string }) => call<Playbook>('GET', `/playbook${qs(w)}`),
-  cases: (w?: { from?: string; to?: string; category?: string }) => call<CaseRow[]>('GET', `/cases${qs(w)}`),
+  cases: (w?: { from?: string; to?: string; category?: string; cause?: string }) => call<CaseRow[]>('GET', `/cases${qs(w)}`),
+  codebook: () => call<Codebook>('GET', '/codebook'),
   clients: () => call<Clients>('GET', '/clients'),
   case: (id: number) => call<CaseDetail>('GET', `/cases/${id}`),
   reclassify: (id: number, patch: { category?: string; hard_route?: string | null }) => call<CaseDetail>('PATCH', `/cases/${id}`, patch),
   run: (w?: { from?: string; to?: string }) => call<{ started: boolean }>('POST', '/run', w || {}),
-  review: (w?: { category?: string; source?: string; per?: number }) => call<{ queue: ReviewItem[]; stats: ReviewStats }>('GET', `/review${qs(w)}`),
-  submitReview: (id: number, body: { verdict: Verdict; category?: string }) => call<{ ok: boolean; stats: ReviewStats }>('POST', `/cases/${id}/review`, body),
+  review: (w?: { category?: string; source?: string; cause?: string; per?: number }) => call<{ queue: ReviewItem[]; stats: ReviewStats }>('GET', `/review${qs(w)}`),
+  submitReview: (id: number, body: { verdict: Verdict; category?: string; cause?: string; contributing?: string[] }) => call<{ ok: boolean; stats: ReviewStats }>('POST', `/cases/${id}/review`, body),
   settings: () => call<{ settings: Settings; rungs: Rung[]; presets: Record<string, { label: string }>; categories: string[]; hard_routes: Record<string, string> }>('GET', '/settings'),
   saveSettings: (s: Settings) => call<{ settings: Settings }>('PUT', '/settings', s),
 };

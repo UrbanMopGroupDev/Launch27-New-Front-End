@@ -59,24 +59,28 @@ export function NewCaller({ caller, canSave, simulated = false, onDone, onClose 
       return `/customers/${c.id}`;
     });
 
-  // U-3 / U-4: someone new.
+  // U-3 / U-4: someone new. A number is on one contact only: if the call log already made a
+  // contact with just this number, the server fills that one in (name, type, notes) rather than
+  // making a second.
   const save = () =>
     run(async () => {
       const k = KINDS.find((x) => x.value === kind)!;
-      // Fill in the number-only contact if the call log already made one, rather than a second.
-      const existing = await numberOnly();
-      const contact = existing || (await inbox.createContact({ name: name.trim(), roles: k.roles, ...(hidden ? {} : { phone: caller.phone }) }));
-      const patch: Record<string, unknown> = existing ? { name: name.trim(), roles: k.roles } : {};
-      if (k.lead) Object.assign(patch, { lead_stage: 'New', lead_source: 'Phone call' });
-      if (notes.trim()) patch.notes = notes.trim();
-      if (Object.keys(patch).length) await inbox.updateContact(contact.id, patch as Parameters<typeof inbox.updateContact>[1]);
+      const contact = await inbox.createContact({
+        name: name.trim(),
+        roles: k.roles,
+        ...(hidden ? {} : { phone: caller.phone }),
+        ...(k.lead ? { lead_stage: 'New', lead_source: 'Phone call' } : {}),
+        ...(notes.trim() ? { notes: notes.trim() } : {}),
+      });
       return `/contacts/${contact.id}`;
     });
 
   // U-4: a wrong number or spam. The number is kept so the next call from it is labelled.
+  // (A number that turns out to be a Launch27 customer's or cleaner's is never marked.)
   const mark = (flag: 'spam' | 'wrong_number') =>
     run(async () => {
-      const contact = (await numberOnly()) || (await inbox.createContact({ name: '', roles: [], phone: caller.phone }));
+      const contact = await inbox.createContact({ name: '', roles: [], phone: caller.phone });
+      if (contact.l27_customer_id || contact.l27_team_id) return `/contacts/${contact.id}`;
       await inbox.updateContact(contact.id, { caller_flag: flag });
       return null;
     });

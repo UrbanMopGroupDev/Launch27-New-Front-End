@@ -203,7 +203,36 @@ export const scheduleApi = {
   assign: (visit_keys: string[], cleaner_id: number, recommended = false, override = false) => call<{ assigned: number; projected: number; cleaner: string; confirm_first: boolean }>('POST', '/assign', { visit_keys, cleaner_id, recommended, override }),
   unavailable: (cleaner_id: number, day: string, unavailable = true) => call<{ cleaner: string; day: string; unavailable: boolean; affected: number }>('PUT', '/unavailable', { cleaner_id, day, unavailable }),
   refresh: () => call<{ running: boolean }>('POST', '/refresh'),
+  availability: (id: number, from: string, to: string) => call<AvailabilityMonth>('GET', `/cleaner/${id}/availability?from=${from}&to=${to}`),
+  availabilityHistory: (id: number) => call<{ changes: AvailabilityHistoryRow[] }>('GET', `/cleaner/${id}/availability/history`),
 };
+
+// ---------- a cleaner's availability: read from Launch27 now, and changed there (days off, hours on a date) ----------
+export interface DayVisit extends Visit { end: string; outside: boolean }
+export interface AvailabilityDay {
+  date: string;
+  usual: string | null;
+  hours: string | null;
+  kind: 'usual' | 'changed' | 'day_off' | 'off';
+  change: { date: string; dayoff: boolean; start_time: string | null; end_time: string | null } | null;
+  portal_off: boolean;
+  booked_h: number;
+  visits: DayVisit[];
+}
+export interface AvailabilityMonth { cleaner: { id: number; name: string }; editable: boolean; today: string; weekly: { weekday: number; dayoff: boolean; start_time: string | null; end_time: string | null }[]; days: AvailabilityDay[] }
+export type AvailabilityChange = { date: string; dayoff: true } | { date: string; start_time: string; end_time: string } | { date: string; usual: true };
+export interface AffectedVisit { date: string; time: string; end: string; customer: string; booking_id: number | null }
+export interface AvailabilityHistoryRow { id: number; date: string; before: { hours: string | null; kind: string } | null; after: { dayoff?: boolean; start_time?: string; end_time?: string }; outcome: 'saved' | 'failed'; error: string | null; note: string | null; source: string; by_name: string | null; at: string }
+
+/** Save: { saved } done; { needs_confirm, affected } when visits would be left outside their hours (send again with confirm). */
+export async function saveAvailability(id: number, body: { changes?: AvailabilityChange[]; from?: string; to?: string; confirm?: boolean; note?: string }): Promise<{ saved?: unknown[]; affected: AffectedVisit[]; needs_confirm?: boolean }> {
+  try {
+    return await call('POST', `/cleaner/${id}/availability`, body);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 409 && err.fields?.code === 'visits') return { needs_confirm: true, affected: (err.fields.affected as AffectedVisit[]) || [] };
+    throw err;
+  }
+}
 
 // Assign from the planner. When the client's tags rule the cleaner out ("do not assign…",
 // female only), the server refuses; ask, and assign anyway only on a clear yes.

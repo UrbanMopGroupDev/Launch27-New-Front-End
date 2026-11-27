@@ -108,6 +108,10 @@ no teams) so admins can put them on teams now; signing in later uses the same ac
 They're only added to databases someone has already signed in to, so on a new database the
 first person to sign in still becomes admin.
 
+Migration 0043 adds vincentbuenaventura.work@gmail.com the same way (as Vincent Buenaventura),
+and also puts them in Operations Queue, as a first sign-in would. Someone who already signed
+in is left as they are.
+
 ## Undoing
 
 The migration writes the old rule list and old teams (members and queues) to the change

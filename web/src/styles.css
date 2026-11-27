@@ -701,6 +701,16 @@ label.check, label.inline { flex-direction: row; align-items: center; gap: 6px; 
 .card.no-pad { padding: 0; }
 .table-wrap.flat { border: 0; border-radius: 0; }
 .contact-grid { align-items: start; }
+.contacts-search { display: flex; align-items: center; gap: 8px; max-width: 420px; margin-bottom: 12px; padding: 0 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--muted); }
+.contacts-search input { flex: 1; border: 0; background: none; padding: 8px 0; min-width: 0; }
+.contacts-search input:focus { outline: none; }
+.contact-id { display: inline-flex; align-items: center; gap: 4px; margin-right: 10px; white-space: nowrap; }
+.contact-details { margin-bottom: 6px; }
+.identity-editor .row-line { align-items: center; flex-wrap: wrap; }
+.identity-editor .row-line > .actions { gap: 10px; }
+.id-edit input { flex: 1 1 140px; min-width: 0; }
+.identity-editor form.actions input { flex: 1 1 140px; min-width: 0; }
+.add-contact h2 { margin-top: 0; }
 
 @media (max-width: 1200px) {
   .workspace { grid-template-columns: 280px minmax(0, 1fr); }
@@ -943,6 +953,9 @@ button.wide { width: 100%; margin-top: 8px; }
 .composer-box { margin: 0; padding: 10px 14px; }
 .composer-box textarea { border: 0; resize: vertical; outline: none; font-size: 14px; line-height: 1.5; padding: 0; min-height: 72px; background: transparent; }
 .composer > input.full { margin: 10px 14px 0; width: calc(100% - 28px); }
+/* "Add Cc" lines up with the Cc field and the reply text, with room above and below. */
+button.link.composer-cc { display: inline-flex; align-items: center; margin: 8px 14px 0; padding: 2px 0; font-size: 13px; font-weight: 600; }
+button.link.composer-cc:hover { text-decoration: underline; }
 .composer > .error { margin: 0 14px 8px; }
 .composer-foot { margin: 0; padding: 8px 10px 8px 14px; border-top: 1px solid #eef0f2; }
 .kbd { font-family: 'Geist Mono', ui-monospace, monospace; font-size: 11px; border: 1px solid var(--border-strong); border-radius: 4px; padding: 0 4px; }
@@ -953,6 +966,7 @@ button.wide { width: 100%; margin-top: 8px; }
   .tl-msg { max-width: 88%; }
   .assist, .composer { margin-left: 12px; margin-right: 12px; }
   .composer { margin-bottom: 12px; }
+  button.link.composer-cc { min-height: 32px; margin-top: 4px; font-size: 14px; }
 }
 .shell:has(> .env-banner) .workspace { height: calc(100vh - 30px); }
 @media (max-width: 760px) { .shell:has(> .env-banner) .workspace { height: calc(100vh - 52px - 46px); } }
@@ -1997,7 +2011,7 @@ a.rep-factor:hover b { text-decoration: underline; }
 .cmp-sources { list-style: none; padding: 0; margin: 10px 0 4px; display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 4px 16px; }
 .cmp-sources .dot.ok { background: var(--ok); }
 .cmp-sources .dot.warn { background: var(--warn); }
-.cmp-filter { display: flex; gap: 12px; align-items: center; padding: 10px 14px; }
+.cmp-filter { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 10px 14px; }
 .cmp-cases tbody tr { cursor: pointer; }
 .cmp-cases tr.selected { background: var(--bg); }
 .cmp-detail h3 { font-size: 13px; margin: 14px 0 6px; }
@@ -2362,3 +2376,77 @@ a.rep-factor:hover b { text-decoration: underline; }
 
 /* Conversation list: the time in the same typeface as the row, numbers lined up, never split over two lines. */
 .wl-time { font-variant-numeric: tabular-nums; white-space: nowrap; letter-spacing: 0; }
+/* Complaint tracking (pages/ComplaintTracker.tsx) and the Cleaner Adjustment card */
+.ct { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 18px; align-items: start; }
+.ct-views { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px; position: sticky; top: 12px; }
+.ct-views-title { font-size: 12px; font-weight: 600; color: var(--muted); padding: 6px 8px; text-transform: uppercase; letter-spacing: 0.04em; }
+.ct-view { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 6px; color: var(--text); font-size: 13px; }
+.ct-view:hover { background: #f6f8fc; text-decoration: none; }
+.ct-view.active { background: #eaf1fe; font-weight: 600; }
+.ct-view .clip, .ct-clip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-clip { display: inline-block; max-width: 280px; vertical-align: bottom; }
+.ct-load { border-top: 1px solid var(--border); margin-top: 8px; padding: 10px 8px 4px; display: grid; gap: 6px; }
+.ct-main { min-width: 0; }
+.ct-table td { vertical-align: top; }
+.ct-table tr.picked td { background: #f3f7ff; }
+.ct-check { width: 28px; }
+.ct-sort { background: none; color: inherit; padding: 0; font: inherit; font-weight: 600; cursor: pointer; }
+.ct-title { font-weight: 600; margin-right: 6px; }
+.ct-bulk { background: #eaf1fe; border: 1px solid #cfdcf7; border-radius: 8px; padding: 8px 12px; margin-bottom: 10px; }
+.ct-new { margin-bottom: 12px; }
+.ct-record-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin: 6px 0 8px; }
+.ct-record-title { display: flex; align-items: center; gap: 10px; flex: 1 1 320px; min-width: 0; }
+.ct-title-input { font-size: 20px; font-weight: 600; border: 1px solid transparent; background: transparent; padding: 4px 6px; flex: 1; min-width: 0; }
+.ct-title-input:hover, .ct-title-input:focus { border-color: var(--border); background: var(--panel); }
+.ct-meta { margin-bottom: 12px; line-height: 1.9; }
+.ct-panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-bottom: 14px; align-items: start; }
+.ct-panel label { margin-bottom: 10px; }
+.ct-panel input, .ct-panel select, .ct-panel textarea, .ct-comments textarea, .ct-adjust-body input, .ct-adjust-body select, .ct-adjust-body textarea { width: 100%; }
+.ct-comment { border-top: 1px solid var(--border); padding: 8px 0; }
+.ct-comment-body { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ct-comments textarea { margin-top: 10px; }
+.ct-adjust { border-top: 1px solid var(--border); }
+.ct-adjust > summary { cursor: pointer; padding: 12px; font-weight: 600; }
+.ct-adjust-body { padding: 0 12px 12px; }
+.ct-adjust-wrap { margin-top: 14px; max-width: 520px; }
+.ct-adjust-wrap .ct-adjust { border-top: 0; }
+@media (max-width: 900px) {
+  .ct { grid-template-columns: 1fr; }
+  .ct-views { position: static; }
+}
+/* Complaint tracking: names linked to records (customer search) */
+.ct-linked { display: block; padding: 6px 0; }
+.ct-linked-search { display: flex; flex-direction: column; gap: 4px; }
+.ct-linked-search .assign-list { display: flex; flex-direction: column; }
+.ct-linked-search .assign-item { text-align: left; justify-content: flex-start; }
+/* Complaint checks: root cause (why it happened) beside the category */
+.cmp-check-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 14px; margin-top: 6px; }
+.cmp-check-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+.cmp-check-grid select { width: 100%; min-width: 0; }
+.cmp-also { display: flex; gap: 6px; }
+.cmp-also select { flex: 1; }
+.cmp-def { margin: 8px 0 0; }
+.cmp-codebook summary { cursor: pointer; }
+.cmp-codebook h3 { margin: 14px 0 6px; font-size: 14px; }
+.cmp-code { display: contents; }
+@media (max-width: 720px) {
+  .cmp-check-grid { grid-template-columns: 1fr; }
+}
+/* Complaint tracking: what has worked before (playbook), and what closing needs */
+.ct-worked { margin-bottom: 14px; }
+.ct-worked-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.ct-worked-head h2 { margin: 0; font-size: 15px; }
+.ct-worked-head a { margin-left: auto; }
+.ct-worked-best { display: flex; flex-wrap: wrap; gap: 8px 28px; align-items: flex-end; }
+.ct-worked-best > div:not(.ct-worked-why) { display: flex; flex-direction: column; gap: 2px; }
+.ct-worked-best b { font-size: 17px; }
+.ct-worked-why { flex-basis: 100%; }
+.ct-worked-alert { background: var(--warn-soft); color: var(--warn-ink); border-radius: 6px; padding: 6px 10px; margin-bottom: 8px; }
+.ct-worked-note { margin-top: 8px; }
+.ct-worked-table { margin-top: 8px; }
+.ct-row-best td { font-weight: 600; }
+.ct-grade.high { color: var(--ok); }
+.ct-grade.medium { color: var(--warn-ink); }
+.ct-grade.low { color: var(--muted); }
+.ct-close-tag { margin-left: 6px; font-size: 11px; color: var(--muted); font-weight: normal; }
+.ct-needs input, .ct-needs select { outline: 2px solid var(--danger); outline-offset: 1px; }

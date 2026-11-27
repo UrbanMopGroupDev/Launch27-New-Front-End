@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { l27, l27All } from '../api';
 import type { Booking, Customer, Tag, TimeTracking } from '../types';
@@ -10,7 +10,7 @@ import { Icon } from '../components/Icon';
 import { CallButton } from '../components/CallButton';
 import { insights, rhythmLabel, summarySentence, visitStatus, type Insights, type Stage } from '../lib/customer360';
 import { inbox, type Contact } from './api';
-import { linkToCustomer } from './caller';
+import { linkPatch } from './caller';
 import { ago, displayIdentity } from './util';
 import { segmentsApi, type CustomerSegment } from '../segments/api';
 import { SEGMENT_LABEL, SegmentPill, TraitTag, shortDate } from '../segments/ui';
@@ -851,13 +851,24 @@ export function ConversationHistory({ contact, currentId }: { contact: Contact; 
 // Unlinked contact: find their Launch27 customer by phone, email or name.
 function LinkToLaunch27({ contact, hideHistory = false }: { contact: Contact; hideHistory?: boolean }) {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [error, setError] = useState<string | null>(null);
   const seed = contact.identities.find((i) => i.kind === 'email')?.value || contact.identities[0]?.value.slice(-10) || contact.name || '';
   const [query, setQuery] = useState(seed);
   const results = useQuery({ queryKey: ['l27-customer-search', query], queryFn: () => l27<Customer[]>('/v1/staff/customers', { query, limit: 8 }), enabled: query.length >= 3 });
   // Linking a lead to the customer they became also moves an open lead to "Booked".
+  // If the customer already had a contact, this one was merged into it: open that one instead.
   const link = async (customerId: number) => {
-    await linkToCustomer(contact, customerId);
-    queryClient.invalidateQueries({ queryKey: ['inbox'] });
+    setError(null);
+    try {
+      const r = await inbox.updateContact(contact.id, linkPatch(contact, customerId));
+      const kept = r.merged_into ?? contact.id;
+      queryClient.invalidateQueries({ queryKey: ['inbox'] });
+      if (kept !== contact.id && location.pathname === `/contacts/${contact.id}`) navigate(`/contacts/${kept}`, { replace: true });
+    } catch (err) {
+      setError((err as Error).message);
+    }
   };
   const label = contact.name || displayIdentity(contact.identities[0]?.value) || 'Unknown';
   return (
@@ -888,6 +899,7 @@ function LinkToLaunch27({ contact, hideHistory = false }: { contact: Contact; hi
             </div>
           ))}
           {results.data?.length === 0 && <div className="muted small">No Launch27 customer matches.</div>}
+          {error && <div className="error small">{error}</div>}
         </div>
       </section>
       {!hideHistory && (
