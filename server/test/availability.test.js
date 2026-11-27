@@ -52,6 +52,7 @@ function world() {
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'content-type': 'application/json' } });
     if (u.pathname === '/latest/login') return json({ bearer: 'b' });
     if (u.pathname === '/v1/staff/teams') return json(Number(u.searchParams.get('offset')) ? [] : teams);
+    if (u.pathname === '/v1/staff/teams/1/availability/notes') return json([{ id: 5, start_date: '2026-11-03', end_date: '2026-11-04', note: 'Test appointment' }]);
     if (u.pathname === '/v1/staff/teams/1/availability') {
       if (init.method === 'POST') {
         const body = JSON.parse(init.body);
@@ -92,6 +93,7 @@ describe('availability: read and save through the planner', () => {
     assert.equal(before[0].kind, 'usual');
     assert.equal(before[0].visits.length, 1);
     assert.equal(before[0].visits[0].outside, false);
+    assert.deepEqual(before[0].notes, ['Test appointment']);
 
     await s.saveAvailability(1, [{ date: '2026-11-03', dayoff: true }], 'b', 'ops@example.com', 'mark a day off');
     assert.deepEqual(w.posts, [[{ date: '2026-11-03', dayoff: true }]]);

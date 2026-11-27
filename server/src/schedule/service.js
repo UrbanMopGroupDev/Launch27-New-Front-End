@@ -1193,16 +1193,18 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
 
   /** Launch27's rows for one cleaner, read now: the weekly hours and the one-off changes from..to. */
   async function readAvailability(cleanerId, from, to, bearer) {
-    const [weekly, dated] = await Promise.all([get(bearer, availPath(cleanerId)), get(bearer, availPath(cleanerId), { from, to })]);
+    // Time-off notes ("Doctor's appointment") are shown, not required: a refused read leaves them out.
+    const [weekly, dated, notes] = await Promise.all([get(bearer, availPath(cleanerId)), get(bearer, availPath(cleanerId), { from, to }), get(bearer, `${availPath(cleanerId)}/notes`, { from, to }).catch(() => [])]);
     const list = (x) => (Array.isArray(x) ? x : []);
     return {
+      notes: list(notes).filter((n) => n?.start_date && n?.end_date).map((n) => ({ id: n.id ?? null, start_date: String(n.start_date).slice(0, 10), end_date: String(n.end_date).slice(0, 10), note: String(n.note || '') })),
       weekly: list(weekly).filter((r) => !r.date).map((r) => ({ weekday: Number(r.weekday), dayoff: !!r.dayoff, start_time: hm(r.start_time), end_time: hm(r.end_time) })),
       dated: list(dated).filter((r) => r.date && String(r.date).slice(0, 10) >= from && String(r.date).slice(0, 10) <= to).map(datedRow),
     };
   }
 
   /** One cleaner's days from..to: their hours, how they came about, and their visits (from the planner's copy). */
-  async function availabilityDays(cleanerId, from, to, { weekly, dated }) {
+  async function availabilityDays(cleanerId, from, to, { weekly, dated, notes = [] }) {
     const s = await need();
     const c = s.byId.get(Number(cleanerId));
     const off = unavailable.get(Number(cleanerId)) || new Set();
@@ -1223,6 +1225,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
         kind: change && !same ? (w ? 'changed' : 'day_off') : usualW || w ? 'usual' : 'off',
         change,
         portal_off: off.has(d),
+        notes: notes.filter((n) => n.start_date <= d && n.end_date >= d).map((n) => n.note).filter(Boolean),
         booked_h: Math.round(visits.reduce((m, v) => m + v.duration / Math.max(v.cleaners.length, 1), 0) / 6) / 10,
         visits,
       });
