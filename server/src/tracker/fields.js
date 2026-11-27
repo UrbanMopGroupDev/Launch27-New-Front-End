@@ -143,3 +143,44 @@ export function cleanValue(field, value) {
   if (text.length > (field.type === 'long' ? 20_000 : 500)) throw bad('too long');
   return field.type === 'long' ? text : text.trim();
 }
+
+// Complaint Type (Kustomer's picklist) -> the Complaint playbook's category
+// (src/complaints/taxonomy.js), so a complaint can show what has worked before for its kind.
+// null: no playbook category fits (not a complaint, or the client's own doing).
+export const TYPE_TO_PLAYBOOK = {
+  'Quality of Cleaning': 'quality_missed',
+  "Not following Client's Instruction": 'quality_missed',
+  'Lack of Equipment/Supplies': 'quality_missed',
+  'Duration Conflict (Reported Time Mismatch)': 'quality_rushed',
+  Punctuality: 'punctuality',
+  'Assignment of Cleaner': 'cleaner_change',
+  Scheduling: 'scope_booking',
+  'Unclear Policy Complaint': 'scope_booking',
+  'Damage/Broken Item': 'damage',
+  'Behavior of the Cleaner': 'conduct_safety',
+  'Due to Health/Safety Risks': 'conduct_safety',
+  'Personal Hygiene': 'conduct_safety',
+  "Complaint but Client's Fault": null,
+  'Not a Complaint, but a Knowledge Gap Causing MIA': null,
+  'Not a Complaint, but an Internal Team Error Causing MIA': null,
+};
+
+// What a complaint needs before its status can be Closed, so closed complaints carry their
+// outcome and cost (no more chasing them in "Monetary Impact Assessment" / "No MIA Categories yet").
+// The MIA category is needed only when the complaint cost something.
+export const amountOf = (v) => {
+  if (v === null || v === undefined || String(v).trim() === '') return null;
+  const n = Number(String(v).replace(/[$,\s]/g, ''));
+  return Number.isFinite(n) ? n : NaN;
+};
+/** Labels of what is still missing to close a complaint with these values ([] = ready). */
+export function missingToClose(r) {
+  const out = [];
+  if (!r.final_resolution_category) out.push('Final Resolution Category');
+  const mia = amountOf(r.manager_impact_assessment);
+  if (mia === null) out.push('Manager Impact Assessment (the cost in dollars; 0 if none)');
+  else if (Number.isNaN(mia) || mia < 0) out.push('Manager Impact Assessment as a dollar amount');
+  else if (mia > 0 && !r.mia_categories) out.push('MIA Categories (it cost something)');
+  return out;
+}
+export const CLOSE_FIELDS = ['final_resolution_category', 'manager_impact_assessment', 'mia_categories'];

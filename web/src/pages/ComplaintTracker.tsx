@@ -8,7 +8,7 @@ import { fmtDateTime } from '../format';
 import { ago, useInboxMe } from '../inbox/util';
 import { inbox } from '../inbox/api';
 import { useActiveTeams } from '../hooks';
-import { tracker, type ComplaintPatch, type ComplaintRecord, type TrackerField, type TrackerMeta } from '../tracker/api';
+import { tracker, type ComplaintPatch, type ComplaintRecord, type Guidance, type TrackerField, type TrackerMeta } from '../tracker/api';
 
 const useTrackerMeta = () => useQuery({ queryKey: ['tracker', 'meta'], queryFn: tracker.meta, staleTime: 5 * 60_000 });
 const day = (v: unknown) => (v ? String(v).slice(0, 10) : '—');
@@ -343,6 +343,72 @@ function MatchNames() {
   );
 }
 
+// The same rule the server applies when a complaint is closed (src/tracker/fields.js).
+function missingCloseKeys(r: ComplaintRecord): string[] {
+  const out: string[] = [];
+  if (!r.final_resolution_category) out.push('final_resolution_category');
+  const raw = r.manager_impact_assessment;
+  const mia = raw === null || raw === undefined || String(raw).trim() === '' ? null : Number(String(raw).replace(/[$,\s]/g, ''));
+  if (mia === null || !Number.isFinite(mia) || mia < 0) out.push('manager_impact_assessment');
+  else if (mia > 0 && !r.mia_categories) out.push('mia_categories');
+  return out;
+}
+
+const pctOf = (v: number | null | undefined) => (v === null || v === undefined ? '—' : `${Math.round(v * 100)}%`);
+
+// What has kept clients before for this kind of complaint, from the Complaint playbook.
+function WorkedBefore({ id, record }: { id: number; record: ComplaintRecord }) {
+  const g = useQuery({ queryKey: ['tracker', 'guidance', id, record.complaint_type, record.complaint_notes, record.frequency], queryFn: () => tracker.guidance(id), staleTime: 5 * 60_000 });
+  const [more, setMore] = useState(false);
+  if (g.isLoading) return <section className="card ct-worked muted small">Checking what has worked before…</section>;
+  if (g.error || !g.data) return null;
+  const d: Guidance = g.data;
+  if (!d.available) return null;
+  if (!d.category) return <section className="card ct-worked small"><b>What's worked before</b> <span className="muted">· {d.reason}</span></section>;
+  const c = d.cheapest;
+  return (
+    <section className="card ct-worked">
+      <div className="ct-worked-head">
+        <h2>What's worked before</h2>
+        <span className="muted small">
+          {d.label}{d.basis === 'notes' ? ' (read from the notes; set Complaint Type to confirm)' : ` (from Complaint Type)`} · {d.cases} {d.cases === 1 ? 'complaint' : 'complaints'} {d.window ? `${d.window.from} to ${d.window.to}` : ''}
+        </span>
+        <Link className="small" to="/complaints">Open the playbook</Link>
+      </div>
+      {d.escalation && <div className="ct-worked-alert small">{d.escalation}</div>}
+      {c ? (
+        <div className="ct-worked-best">
+          <div><span className="muted small">Cheapest that works</span><b>{c.name}</b></div>
+          <div><span className="muted small">Clients kept</span><b>{pctOf(c.saved)}</b></div>
+          <div><span className="muted small">Average cost</span><b>{money(c.avg_cost)}</b></div>
+          <div><span className="muted small">Confidence</span><b className={`ct-grade ${c.grade.toLowerCase()}`}>{c.grade}</b></div>
+          <div className="muted small ct-worked-why">{c.reason}{d.typical && d.typical !== c.name ? `. We usually do: ${d.typical}` : ''}.</div>
+        </div>
+      ) : (
+        <div className="muted small">No history for this kind of complaint in the playbook yet.</div>
+      )}
+      {d.one_time && d.one_time_stats && d.one_time_stats.n > 0 && (
+        <div className="small ct-worked-note">One-time client: of past one-time clients with this kind of complaint, {pctOf(d.one_time_stats.rebooked_90)} booked again within 90 days ({d.one_time_stats.decided_90} known). The rates above are for recurring clients.</div>
+      )}
+      {!!d.options?.length && (
+        <>
+          <button type="button" className="link small" onClick={() => setMore(!more)}>{more ? 'Hide' : 'Show'} every response we've tried ({d.options.length})</button>
+          {more && (
+            <table className="ct-table ct-worked-table">
+              <thead><tr><th>Response</th><th>Clients kept</th><th>Known outcomes</th><th>Average cost</th><th>Complaints</th></tr></thead>
+              <tbody>
+                {d.options.map((o) => (
+                  <tr key={o.rung} className={c && o.name === c.name ? 'ct-row-best' : undefined}><td>{o.name}</td><td>{pctOf(o.saved)}</td><td>{o.decided}</td><td>{money(o.avg_cost)}</td><td>{o.n}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 function RecordView({ id, meta }: { id: number; meta: TrackerMeta }) {
   const queryClient = useQueryClient();
   const me = useInboxMe();
@@ -358,6 +424,8 @@ function RecordView({ id, meta }: { id: number; meta: TrackerMeta }) {
     },
   });
   const byPanel = useMemo(() => meta.panels.map((p) => ({ ...p, fields: meta.fields.filter((f) => f.panel === p.key) })), [meta]);
+  // After a refused close, the fields it asked for are outlined until they're filled.
+  const closeNeeds = save.error && /close/i.test((save.error as Error).message) && detail.data ? missingCloseKeys(detail.data.record) : [];
   if (detail.isLoading) return <div className="muted">Loading…</div>;
   if (detail.error || !detail.data) return <div className="error">{(detail.error as Error)?.message || 'Complaint not found'}</div>;
   const r = detail.data.record;
@@ -409,12 +477,13 @@ function RecordView({ id, meta }: { id: number; meta: TrackerMeta }) {
         {r.l27_booking_id ? <> · <Link to={`/bookings/${r.l27_booking_id}`}>Booking #{r.l27_booking_id}</Link></> : null}
         {!r.input_into_um_portal && r.original_service_date ? <> · Launch27 rating link: {daysLeft(r.rating_days_left)}</> : null}
       </div>
+      {meta.playbook && <WorkedBefore id={id} record={r} />}
       <div className="ct-panels">
         {byPanel.map((p) => (
           <section key={p.key} className="card ct-panel">
             <h2>{p.label}</h2>
             {p.fields.map((f) => (
-              <label key={f.key}>{f.label}{f.id ? <LinkedField field={f} record={r} meta={meta} onSave={(p) => save.mutate(p)} /> : <FieldInput field={f} value={r[f.key]} onSave={(v) => save.mutate({ [f.key]: v })} />}</label>
+              <label key={f.key} className={closeNeeds.includes(f.key) ? 'ct-needs' : undefined}>{f.label}{r.status !== 'Closed' && meta.close_fields?.includes(f.key) ? <span className="ct-close-tag">{f.key === 'mia_categories' ? 'needed to close, if it cost something' : 'needed to close'}</span> : null}{f.id ? <LinkedField field={f} record={r} meta={meta} onSave={(p) => save.mutate(p)} /> : <FieldInput field={f} value={r[f.key]} onSave={(v) => save.mutate({ [f.key]: v })} />}</label>
             ))}
           </section>
         ))}

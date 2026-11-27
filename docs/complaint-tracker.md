@@ -48,6 +48,24 @@ A name from Kustomer is matched when exactly one login (by name or email) or one
 "Match names" (admins). A name nobody matches, or two people share, shows "(not linked)" until
 someone picks.
 
+**What's worked before.** A card above the panels shows what the Complaint playbook
+(`docs/complaints-engine.md`) says about this kind of complaint: the cheapest response that still
+kept clients, its keep rate, average cost and confidence, what we usually do, every response tried
+(on request), a one-time-client note and, for damage, theft and conduct, that it goes to the Office
+Manager. The kind comes from Complaint Type (`TYPE_TO_PLAYBOOK` in `fields.js`; types with no
+playbook kind, such as "Complaint but Client's Fault", show none); with no Complaint Type yet the
+notes are read with the playbook's own rules, marked "read from the notes". It uses the playbook's
+window (`pilot_months`, to yesterday), built once an hour. `GET /api/tracker/complaints/:id/guidance`.
+
+**Closing needs the outcome and the cost.** Status can only become Closed with Final Resolution
+Category and Manager Impact Assessment (a dollar amount, 0 if it cost nothing), plus MIA
+Categories when the amount is above 0 (`missingToClose` in `fields.js`). The fields are marked
+"needed to close", and a refused close names and outlines what's missing. A bulk close stops at
+the first complaint that isn't ready and changes nothing. Complaints already Closed (from Kustomer,
+with gaps) can be filled in one field at a time, but no change may open a new gap. Loading from
+Kustomer is not checked, so older gaps still show in "Monetary Impact Assessment" and "No MIA
+Categories yet".
+
 **Views** (Kustomer's searches under "Complaint Tracking", with live counts):
 
 | View | Shows |

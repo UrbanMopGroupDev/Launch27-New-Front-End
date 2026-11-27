@@ -122,8 +122,16 @@ describe('Complaints tracker', () => {
       await db.query("UPDATE complaint_records SET snooze_until = now() - interval '1 minute' WHERE id = $1", [id]);
       assert.equal((await t.get(id)).record.state, 'open', 'a snoozed complaint comes back when its time is up');
 
+      // Closing needs the outcome and the cost; the MIA category only when it cost something.
+      await assert.rejects(t.patch(user, id, { status: 'Closed' }), /Final Resolution Category; MIA Categories/, 'it already has an MIA of 60');
+      await t.patch(user, id, { final_resolution_category: 'Reclean', manager_impact_assessment: '$60' });
+      await assert.rejects(t.patch(user, id, { status: 'Closed' }), /MIA Categories/);
+      await t.patch(user, id, { manager_impact_assessment: '0' });
       got = (await t.patch(user, id, { status: 'Closed', state: 'done' })).record;
       assert.deepEqual([got.state, got.status, got.closed_date], ['done', 'Closed', '2026-11-26']);
+      await assert.rejects(t.patch(user, id, { manager_impact_assessment: 'lots' }), /closed complaint needs: Manager Impact Assessment as a dollar amount/);
+      await assert.rejects(t.patch(user, id, { final_resolution_category: null }), /Final Resolution Category/);
+      await t.patch(user, id, { manager_impact_assessment: '44', mia_categories: 'Damages and reimbursements' });
 
       // Assigning someone else tells them.
       const jose = Number((await db.query("SELECT id FROM users WHERE email = 'jose@example.com'")).rows[0].id);
@@ -259,6 +267,7 @@ describe('Complaints tracker', () => {
       assert.deepEqual([r.contact_id, r.l27_customer_id], [null, null]);
 
       // Closing stamps the date and who closed it, once.
+      await t.patch(user, id, { final_resolution_category: 'No Action Required', manager_impact_assessment: '0' });
       r = (await t.patch(user, id, { status: 'Closed' })).record;
       assert.deepEqual([r.closed_date, r.case_closed_by, Number(r.case_closed_by_user_id)], ['2026-11-26', 'Ana Agent', ana]);
       r = (await t.patch({ id: jose, name: 'Jose Manager' }, id, { status: 'For Review' })).record;
@@ -277,6 +286,46 @@ describe('Complaints tracker', () => {
       assert.equal(k.k2.cleaner_id, null, 'two cleaners named Sam Lee: left for a person to pick');
       assert.deepEqual(linked, { users: 2, cleaners: 1 });
       assert.deepEqual(await t.linkNames(teams), { users: 0, cleaners: 0 }, 'running it again changes nothing');
+    } finally {
+      await db.close();
+    }
+  });
+
+  test('what has worked before: the playbook answer for the complaint type, or read from the notes', async () => {
+    const db = await freshDb();
+    try {
+      let built = 0;
+      const book = {
+        taxonomy: [{
+          key: 'quality_missed', n: 120, typical_name: 'Reclean', saved: 0.71, decided: 80, avg_cost: 62,
+          cheapest_that_works: { rung: 'L2', name: '$10 credit', saved: 0.68, avg_cost: 10, n: 31, grade: 'High', reason: '31 cases with a known outcome, 21 saved' },
+          by_rung: [{ rung: 'L2', name: '$10 credit', saved: 0.68, decided: 31, avg_cost: 10, n: 40 }, { rung: 'L3', name: 'Reclean', saved: 0.72, decided: 45, avg_cost: 85, n: 60 }, { rung: 'L5', name: 'Partial refund', saved: null, decided: 0, avg_cost: 0, n: 0 }],
+          one_time: { n: 12, decided_90: 8, rebooked_90: 0.25, decided: 6, rebooked_120: 0.33, ids: [1] },
+        }],
+      };
+      const complaints = { getSettings: async () => ({ pilot_months: 6 }), playbook: async ({ from, to }) => { built++; assert.deepEqual([from, to], ['2026-05-26', '2026-11-25']); return book; } };
+      const t = createTracker({ db, config: { l27Mode: 'mock' }, log: quiet, now: () => NOW, complaints });
+      const typed = Number((await t.create(user, { title: 'x', complaint_type: 'Quality of Cleaning', frequency: 'One Time' })).record.id);
+      const g = await t.guidance(typed);
+      assert.deepEqual([g.category, g.label, g.basis, g.cases, g.typical, g.cheapest.name, g.one_time, g.one_time_stats.rebooked_90], ['quality_missed', 'Quality: missed areas', 'type', 120, 'Reclean', '$10 credit', true, 0.25]);
+      assert.deepEqual(g.options.map((o) => o.name), ['$10 credit', 'Reclean'], 'responses never used are left out');
+      assert.equal(g.escalation, null);
+
+      const fromNotes = Number((await t.create(user, { title: 'Broken vase', complaint_notes: 'The cleaner broke a vase in the hallway.' })).record.id);
+      const n = await t.guidance(fromNotes);
+      assert.deepEqual([n.category, n.basis, n.cases, n.cheapest], ['damage', 'notes', 0, null]);
+      assert.match(n.escalation, /Office Manager/);
+      assert.equal(built, 1, 'the playbook is built once and reused');
+
+      const clientFault = Number((await t.create(user, { title: 'x', complaint_type: "Complaint but Client's Fault" })).record.id);
+      assert.deepEqual([(await t.guidance(clientFault)).category, (await t.guidance(clientFault)).available], [null, true]);
+      assert.equal(await t.guidance(9999), null);
+      const none = createTracker({ db, config: { l27Mode: 'mock' }, log: quiet });
+      assert.equal((await none.guidance(typed)).available, false);
+
+      // Bulk close: one complaint not ready stops the lot and says which.
+      await assert.rejects(t.bulk(user, [typed, fromNotes], { status: 'Closed' }), new RegExp(`Complaint #${typed}: To close this complaint.*Nothing was changed`));
+      assert.equal((await t.get(fromNotes)).record.status, 'For Review');
     } finally {
       await db.close();
     }

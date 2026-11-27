@@ -2428,3 +2428,21 @@ a.rep-factor:hover b { text-decoration: underline; }
 @media (max-width: 720px) {
   .cmp-check-grid { grid-template-columns: 1fr; }
 }
+/* Complaint tracking: what has worked before (playbook), and what closing needs */
+.ct-worked { margin-bottom: 14px; }
+.ct-worked-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.ct-worked-head h2 { margin: 0; font-size: 15px; }
+.ct-worked-head a { margin-left: auto; }
+.ct-worked-best { display: flex; flex-wrap: wrap; gap: 8px 28px; align-items: flex-end; }
+.ct-worked-best > div:not(.ct-worked-why) { display: flex; flex-direction: column; gap: 2px; }
+.ct-worked-best b { font-size: 17px; }
+.ct-worked-why { flex-basis: 100%; }
+.ct-worked-alert { background: var(--warn-soft); color: var(--warn-ink); border-radius: 6px; padding: 6px 10px; margin-bottom: 8px; }
+.ct-worked-note { margin-top: 8px; }
+.ct-worked-table { margin-top: 8px; }
+.ct-row-best td { font-weight: 600; }
+.ct-grade.high { color: var(--ok); }
+.ct-grade.medium { color: var(--warn-ink); }
+.ct-grade.low { color: var(--muted); }
+.ct-close-tag { margin-left: 6px; font-size: 11px; color: var(--muted); font-weight: normal; }
+.ct-needs input, .ct-needs select { outline: 2px solid var(--danger); outline-offset: 1px; }
