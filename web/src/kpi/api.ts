@@ -1,5 +1,5 @@
 // Client for the KPI scorecard (/api/kpi on our own server). Read-only, apart from the
-// dev/QA-only manual Google review entry.
+// dev/QA-only manual Google review entry and connecting Google reviews (sign-in only).
 import { ApiError, describeErrors } from '../api';
 
 export type Kpi = 'ocr' | 'churn' | 'churn_prepaid' | 'churn_payg' | 'fulfilment' | 'complaints' | 'reviews' | 'billing';
@@ -52,7 +52,11 @@ export interface Scorecard {
   outages: Record<string, string> | null;
   refresh: { available: boolean; running: boolean };
   manual_reviews: { can_enter: boolean; entry: ManualReviews | null };
+  google: GoogleStatus;
+  can_connect_google?: boolean;
 }
+/** Live Google reviews (Google Business Profile). `configured` is false outside production or before the client is set. */
+export interface GoogleStatus { configured: boolean; connected?: boolean; email?: string | null; connected_at?: string | null; location?: string | null; total?: number | null; average?: number | null; error?: string | null }
 export interface ManualReviews { new_reviews: number; avg_rating: number; alltime_avg: number; alltime_count: number }
 export interface DrillColumn { key: string; label: string; kind?: 'money' | 'pct' | 'num' }
 export type DrillRow = Record<string, string | number | boolean | null> & { counted?: boolean; outcome?: string };
@@ -82,6 +86,7 @@ export const kpiApi = {
   scorecard: (q: Query) => call<Scorecard>('GET', `/scorecard?${qs(q)}`),
   drill: (q: Query, kpi: string) => call<Drill>('GET', `/drill?${qs(q, { kpi })}`),
   refresh: () => call<{ running: boolean }>('POST', '/refresh'),
+  disconnectGoogle: () => call<{ connected: boolean }>('POST', '/google/disconnect'),
   saveReviews: (brand: string, month: string, entry: ManualReviews) => call<unknown>('PUT', `/reviews/${month}`, { brand, ...entry }),
   clearReviews: (brand: string, month: string) => call<unknown>('DELETE', `/reviews/${month}?brand=${brand}`),
 };
