@@ -200,32 +200,37 @@ export interface CleanerReport2 {
 }
 
 export interface UtilFigures {
-  closed_h: number; available_h: number; assigned_h: number; unassigned_h: number; unassigned_visits: number;
+  closed_h: number; excluded_h?: number; available_h: number; assigned_h: number; commercial_h: number; commercial_visits: number; unassigned_h: number; unassigned_visits: number;
   not_taking_h: number; not_taking_visits: number; travel_h: number; spoken_h: number; left_h: number;
   utilization: number | null; room_bookings: number; typical_booking_h: number;
 }
-export type DataFlag = 'refused' | 'booked_no_hours' | 'booked_not_taking' | 'no_hours' | 'no_home';
+export type DataFlag = 'refused' | 'booked_no_hours' | 'booked_not_taking' | 'over_availability' | 'low_hours' | 'no_hours' | 'no_home';
+export type UtilMode = 'all' | 'residential';
 export interface SentRow { weekday: number | null; start: string | null; end: string | null; dayoff: boolean }
 export interface DataCheck {
   refreshed_at: string | null;
   read_by: 'sync' | 'person' | null;
   counts: Record<DataFlag, number>;
   labels: Record<DataFlag, string>;
-  cleaners: { cleaner_id: number; name: string; status_label: string | null; taking: boolean; area: string; home_location: boolean; weekly_hours: number | null; weekly_rows: number; dated_rows: number; availability_error: string | null; sent: { weekly: SentRow[]; dated: (SentRow & { date: string })[]; dated_total: number }; open_h: number; other_brand_h: number; available_h: number; booked_h: number; visits: number; flags: { kind: DataFlag; label: string }[] }[];
+  cleaners: { cleaner_id: number; name: string; status_label: string | null; taking: boolean; area: string; home_location: boolean; weekly_hours: number | null; weekly_rows: number; dated_rows: number; availability_error: string | null; sent: { weekly: SentRow[]; dated: (SentRow & { date: string })[]; dated_total: number }; open_h: number; other_brand_h: number; available_h: number; booked_h: number; commercial_h: number; visits: number; over_h: number; weekly_window_h: number | null; report_h: number | null; excluded_h: number; excluded_days: number; flags: { kind: DataFlag; label: string }[] }[];
+  low_hours_share: number;
+  partner_bookings: { key: string; booking_id: number | null; date: string; start: number; hours: number; customer: string | null; account: string | null; partner: string | null; location_id: number | null; cleaners: string[] }[];
+  partner_bookings_total: number;
 }
 export interface UtilizationReport {
-  taken_at: string | null; today: string; from: string; to: string; max_to: string; min_from: string; past: boolean; avg_leg_min: number;
+  taken_at: string | null; today: string; from: string; to: string; max_to: string; min_from: string; past: boolean; avg_leg_min: number; mode: UtilMode; split: boolean;
   totals: UtilFigures & { cleaners: number; customers: number; customers_recurring: number };
   areas: (UtilFigures & { area: string; cleaners: number; customers: number; customers_recurring: number })[];
-  cleaners: { cleaner_id: number; name: string; area: string; status_label: string | null; visits: number; open_h: number; other_brand_h: number; available_h: number; assigned_h: number; travel_h: number; travel_per_visit_min: number | null; left_h: number; utilization: number | null; if_left: number | null; area_short: boolean }[];
+  cleaners: { cleaner_id: number; name: string; area: string; status_label: string | null; visits: number; commercial_visits: number; other_locations: boolean; open_h: number; other_brand_h: number; available_h: number; assigned_h: number; commercial_h: number; travel_h: number; travel_per_visit_min: number | null; left_h: number; utilization: number | null; room_bookings: number; if_left: number | null; area_short: boolean }[];
   by_day: (UtilFigures & { date: string; areas: Record<string, UtilFigures> })[];
   trend: { week: string; total: number | null; areas: Record<string, number | null> }[];
   data_check: DataCheck;
   history?: { first_recorded: string | null; recorded_days: number; past_days: number };
   needs_cleaner: { kind: 'unassigned' | 'not_taking'; key: string; booking_id: number | null; projected: boolean; date: string; start: number; hours: number; customer: string | null; area: string; freq: string | null; address: string | null; cleaner: string | null; recommended?: { cleaner_id: number; name: string; score: number; free: boolean; travel: number | null; reasons: { text: string; tone: string }[] }[] }[];
   reconcile: null | {
-    capacity: { existing: number; sundays: number; closed: number; other_brand: number; floor: number; result: number; ties: boolean };
-    booked: { existing: number; sundays: number; other_brand: number; result: number; ties: boolean };
+    mode: UtilMode;
+    capacity: { existing: number; sundays: number; breaks: number; excluded: number; closed: number; other_brand: number; floor: number; added: number; result: number; ties: boolean };
+    booked: { existing: number; sundays: number; other_brand: number; added: number; result: number; ties: boolean };
     unassigned: { existing: number; other_brand: number; sundays: number; outside: number; result: number; ties: boolean };
     hours_from: string; hours_to: string;
   };
@@ -256,7 +261,7 @@ export const reportsApi = {
   addReview: (cleanerId: number, r: { review_date: string; reviewer: string; link?: string | null; bonus_paid?: boolean }) => call<{ id: number }>('POST', `/cleaners/${cleanerId}/reviews`, r),
   updateReview: (id: number, r: { bonus_paid: boolean }) => call<void>('PATCH', `/reviews/${id}`, r),
   deleteReview: (id: number) => call<void>('DELETE', `/reviews/${id}`),
-  utilization: (from: string | null, to: string | null, locations?: number[] | null) => call<UtilizationReport>('GET', `/utilization?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}), ...(locations ? { locations: locations.join(',') } : {}) })}`),
+  utilization: (from: string | null, to: string | null, locations?: number[] | null, mode: UtilMode = 'all') => call<UtilizationReport>('GET', `/utilization?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}), ...(locations ? { locations: locations.join(',') } : {}), ...(mode === 'residential' ? { mode } : {}) })}`),
 };
 
 export const pct = (x: number | null | undefined, digits = 0) => (x == null ? '—' : `${(x * 100).toFixed(digits)}%`);
