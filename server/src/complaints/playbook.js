@@ -9,6 +9,7 @@
 // Every figure carries n; anything resting on fewer than THIN cases is flagged.
 import { categoryLabel, causeLabel, CAUSES, CAUSE_GROUPS, HARD_ROUTES } from './taxonomy.js';
 import { RUNGS, rungIndex, rungName } from './settings.js';
+import { OFFER_KINDS } from './solutions.js';
 
 export const THIN = 10;
 const r2 = (x) => (x == null ? null : Math.round(x * 100) / 100);
@@ -102,7 +103,7 @@ function oneTimeStats(list) {
   };
 }
 
-export function buildPlaybook({ cases, resolutions, costs, outcomes, visits = [], from, to, settings, today }) {
+export function buildPlaybook({ cases, resolutions, costs, outcomes, solutions = [], visits = [], from, to, settings, today, mining = false }) {
   const byCase = (rows) => {
     const m = new Map();
     for (const r of rows) {
@@ -203,6 +204,57 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, visits = []
     return { key: g.key, label: g.label, n: list.length, ids: ids(list), share: share(list.length, rows.length), ...outcomeStats(list) };
   });
 
+  // What we offered and how clients took it (solution mining, solutions.js): per kind of offer,
+  // how often we offered it, how often the client took it or pushed back, how often it was the
+  // final answer, and for those finals how the client sounded at the end and whether they stayed.
+  const S = new Map(solutions.map((x) => [Number(x.case_id), x]));
+  const readRows = rows.filter((c) => S.get(c.id)?.read_by === 'claude');
+  const offersOf = (c) => (Array.isArray(S.get(c.id)?.offers) ? S.get(c.id).offers : []);
+  const offerRows = OFFER_KINDS.map((k) => {
+    const has = (pred) => readRows.filter((c) => offersOf(c).some((o) => o.kind === k.key && pred(o)));
+    const offered = has(() => true);
+    const accepted = has((o) => o.client_response === 'accepted');
+    const pushedBack = has((o) => o.client_response === 'declined' || o.client_response === 'countered');
+    const final = readRows.filter((c) => S.get(c.id).final_kind === k.key);
+    const heard = final.filter((c) => S.get(c.id).client_end && S.get(c.id).client_end !== 'unknown');
+    const happy = heard.filter((c) => S.get(c.id).client_end === 'satisfied');
+    const asked = readRows.filter((c) => S.get(c.id).asked_for === k.key);
+    return {
+      key: k.key,
+      label: k.label,
+      offered: offered.length,
+      offered_ids: ids(offered),
+      accepted: accepted.length,
+      accepted_ids: ids(accepted),
+      pushed_back: pushedBack.length,
+      pushed_back_ids: ids(pushedBack),
+      // Of the times the client answered the offer, how often they took it.
+      accept_rate: share(accepted.length, accepted.length + pushedBack.length),
+      asked_for: asked.length,
+      asked_for_ids: ids(asked),
+      ended_happy: share(happy.length, heard.length),
+      ended_happy_n: happy.length,
+      ended_heard: heard.length,
+      ended_happy_ids: ids(happy),
+      final: outcomeStats(final),
+    };
+  })
+    .filter((r) => r.offered || r.final.n || r.asked_for)
+    .sort((a, b) => b.final.n - a.final.n || b.offered - a.offered);
+  const endingIds = (e) => ids(readRows.filter((c) => S.get(c.id).client_end === e));
+  const solutionView = {
+    enabled: mining,
+    read: readRows.length,
+    read_ids: ids(readRows),
+    no_thread: rows.filter((c) => S.get(c.id)?.read_by === 'none').length,
+    no_thread_ids: ids(rows.filter((c) => S.get(c.id)?.read_by === 'none')),
+    not_yet: rows.filter((c) => !S.has(c.id)).length,
+    offers: offerRows,
+    endings: Object.fromEntries(['satisfied', 'neutral', 'unhappy', 'unknown'].map((e) => [e, endingIds(e)])),
+    said_will_leave_ids: ids(readRows.filter((c) => S.get(c.id).said_will_leave)),
+    pushed_back_first_ids: ids(readRows.filter((c) => ['declined', 'countered'].includes(offersOf(c)[0]?.client_response))),
+  };
+
   // Ladder: cost and retention per rung (hard-routed cases excluded: they're not on the ladder)
   const ladder = RUNGS.map((r) => ({ ...r, ...outcomeStats(ladderRows.filter((c) => c.rung === r.rung)) }));
 
@@ -290,6 +342,7 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, visits = []
     totals: { cases: n, hard_routed: rows.filter((c) => c.hard_route).length, hard_routed_ids: ids(rows.filter((c) => c.hard_route)), by_source: countBy(rows, 'source'), total_cost: r2(rows.reduce((s, c) => s + c.cost, 0)), ...outcomeStats(rows) },
     taxonomy,
     by_cause: byCause,
+    solutions: solutionView,
     cause_groups: causeGroups,
     ladder,
     reclean_vs_refund: recleanVsRefund,
