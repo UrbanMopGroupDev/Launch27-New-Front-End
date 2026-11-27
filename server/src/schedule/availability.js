@@ -100,3 +100,52 @@ export function createAvailabilityHistory({ db }) {
   }
   return { record, list };
 }
+
+/**
+ * The usual weekly hours asked for, checked: one entry per weekday (0 Sunday … 6 Saturday), each a
+ * day off or one or more blocks of hours ({ weekday, dayoff } or { weekday, blocks: [{ start_time,
+ * end_time }] }). Blocks may not overlap. Returns Launch27-style weekly rows, sorted.
+ */
+export function checkWeekly(week) {
+  if (!Array.isArray(week) || week.length !== 7) throw bad('Give the hours for all seven days.');
+  const seen = new Set();
+  const rows = [];
+  for (const d of week) {
+    const wd = Number(d?.weekday);
+    if (!Number.isInteger(wd) || wd < 0 || wd > 6 || seen.has(wd)) throw bad('Each weekday once, 0 (Sunday) to 6 (Saturday).');
+    seen.add(wd);
+    const blocks = Array.isArray(d.blocks) ? d.blocks : [];
+    if (d.dayoff || !blocks.length) {
+      rows.push({ weekday: wd, dayoff: true, start_time: null, end_time: null });
+      continue;
+    }
+    const list = blocks.map((b) => {
+      const a = String(b?.start_time || '');
+      const z = String(b?.end_time || '');
+      if (!TIME.test(a) || !TIME.test(z)) throw bad(`Give the start and end time for ${DAYNAMES[wd]}.`);
+      if (toMin(z) <= toMin(a)) throw bad(`On ${DAYNAMES[wd]} the end must be after the start.`);
+      return { start_time: a, end_time: z };
+    }).sort((x, y) => toMin(x.start_time) - toMin(y.start_time));
+    for (let i = 1; i < list.length; i++) if (toMin(list[i].start_time) < toMin(list[i - 1].end_time)) throw bad(`On ${DAYNAMES[wd]} two blocks overlap.`);
+    for (const b of list) rows.push({ weekday: wd, dayoff: false, ...b });
+  }
+  return rows.sort((x, y) => x.weekday - y.weekday || String(x.start_time).localeCompare(String(y.start_time)));
+}
+const DAYNAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+/**
+ * The Launch27 requests for the two saves not yet recorded from Launch27's own screens. Each is kept
+ * here, in one place, and is refused against the live Launch27 until VERIFIED says it matches a
+ * recording of Launch27's own save (docs/availability.md › Waiting for a recording).
+ */
+export const VERIFIED = { weekly: false, exclude: false };
+export const weeklyRequest = (teamId, rows) => ({
+  method: 'POST',
+  path: `/v1/staff/teams/${Number(teamId)}/availability`,
+  body: rows.map((r) => ({ weekday: r.weekday, date: null, dayoff: !!r.dayoff, start_time: r.dayoff ? null : r.start_time, end_time: r.dayoff ? null : r.end_time })),
+});
+export const excludeRequest = (teamId, excluded) => ({
+  method: 'PUT',
+  path: `/v1/staff/teams/${Number(teamId)}`,
+  body: { options: { excluded_from_spots: !!excluded } },
+});

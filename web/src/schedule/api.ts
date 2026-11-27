@@ -222,10 +222,12 @@ export interface AvailabilityDay {
   booked_h: number;
   visits: DayVisit[];
 }
-export interface AvailabilityMonth { cleaner: { id: number; name: string }; editable: boolean; today: string; weekly: { weekday: number; dayoff: boolean; start_time: string | null; end_time: string | null }[]; days: AvailabilityDay[] }
+export interface WeeklyRow { weekday: number; dayoff: boolean; start_time: string | null; end_time: string | null }
+export interface AvailabilityMonth { cleaner: { id: number; name: string }; editable: boolean; today: string; weekly: WeeklyRow[]; days: AvailabilityDay[]; excluded: boolean; can: { weekly: boolean; exclude: boolean } }
+export type WeekDayInput = { weekday: number; dayoff: true } | { weekday: number; blocks: { start_time: string; end_time: string }[] };
 export type AvailabilityChange = { date: string; dayoff: true } | { date: string; start_time: string; end_time: string } | { date: string; usual: true };
 export interface AffectedVisit { date: string; time: string; end: string; customer: string; booking_id: number | null }
-export interface AvailabilityHistoryRow { id: number; date: string; before: { hours: string | null; kind: string } | null; after: { dayoff?: boolean; start_time?: string; end_time?: string }; outcome: 'saved' | 'failed'; error: string | null; note: string | null; source: string; by_name: string | null; at: string }
+export interface AvailabilityHistoryRow { id: number; date: string; before: { hours?: string | null; kind?: string; excluded?: boolean } | null; after: { dayoff?: boolean; start_time?: string; end_time?: string; weekly?: WeeklyRow[]; excluded?: boolean }; outcome: 'saved' | 'failed'; error: string | null; note: string | null; source: string; by_name: string | null; at: string }
 
 /** Save: { saved } done; { needs_confirm, affected } when visits would be left outside their hours (send again with confirm). */
 export async function saveAvailability(id: number, body: { changes?: AvailabilityChange[]; from?: string; to?: string; confirm?: boolean; note?: string }): Promise<{ saved?: unknown[]; affected: AffectedVisit[]; needs_confirm?: boolean }> {
@@ -250,5 +252,16 @@ export async function assignAsking(visit_keys: string[], cleaner_id: number, rec
 
 // ---------- the whole team, day by day (Contacts › Cleaners) ----------
 export interface TeamDay { date: string; state: 'work' | 'changed' | 'off' | 'none'; hours: string | null; usual: string | null; capacity_h: number; booked_h: number }
-export interface TeamCleaner { id: number; name: string; status: string; status_label: string; assignable: boolean; phone: string | null; color: string; area: string | null; week: { booked_h: number; capacity_h: number; days_off: number }; days: TeamDay[] }
+export interface TeamCleaner { id: number; name: string; status: string; status_label: string; assignable: boolean; excluded: boolean; phone: string | null; color: string; area: string | null; week: { booked_h: number; capacity_h: number; days_off: number }; days: TeamDay[] }
 export interface TeamAvailability { today: string; taken_at: string | null; dates: string[]; cleaners: TeamCleaner[] }
+
+/** Usual weekly hours: { weekly } saved; { needs_confirm, affected } when visits would be left outside (send again with confirm). */
+export async function saveWeekly(id: number, week: WeekDayInput[], confirm = false): Promise<{ affected: AffectedVisit[]; needs_confirm?: boolean }> {
+  try {
+    return await call('POST', `/cleaner/${id}/weekly`, { week, confirm });
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 409 && err.fields?.code === 'visits') return { needs_confirm: true, affected: (err.fields.affected as AffectedVisit[]) || [] };
+    throw err;
+  }
+}
+export const setExcluded = (id: number, excluded: boolean) => call<{ excluded: boolean }>('PUT', `/cleaner/${id}/excluded`, { excluded });
