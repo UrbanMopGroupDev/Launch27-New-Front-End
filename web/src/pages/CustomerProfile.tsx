@@ -1,3 +1,4 @@
+import { CleanerAdjustmentCard } from '../tracker/CleanerAdjustment';
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
@@ -71,7 +72,10 @@ export function CustomerProfilePage() {
       {contact.error ? (
         <div className="error">Couldn't load this customer's profile: {(contact.error as Error).message}</div>
       ) : contact.data ? (
-        <Customer360 contact={contact.data} full actions={actions} />
+        <>
+          <Customer360 contact={contact.data} full actions={actions} />
+          <section className="card no-pad ct-adjust-wrap"><CleanerAdjustmentCard contact={contact.data} /></section>
+        </>
       ) : (
         <div className="muted">Loading…</div>
       )}

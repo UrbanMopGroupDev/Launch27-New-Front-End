@@ -50,7 +50,8 @@ export function createEmailSync({ db, client, mailboxes, identify = async () => 
     const dup = (await db.query('SELECT 1 FROM messages WHERE external_id = $1', [external_id])).rows[0];
     if (dup) return false;
     const sender = parsed.replyTo && !ours.has(parsed.replyTo) ? parsed.replyTo : parsed.from;
-    // Who is this in Launch27? Only for people we haven't seen (network call outside the transaction).
+    // Who is it in Launch27? Only for people we haven't seen (network call outside the
+    // transaction). Someone Launch27 doesn't know becomes a new contact.
     const known = await contactsByIdentity(db, 'email', sender);
     const lookup = known.length ? null : await identify(sender).catch(() => null);
     const res = await db.tx((q) =>

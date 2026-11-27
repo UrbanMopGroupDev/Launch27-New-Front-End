@@ -2,10 +2,13 @@
 // open to everyone with a staff login (Derek's call, Nov 2026: the whole office team works
 // with client names already); starting a run, Kustomer discovery and changing the rules are
 // admins only.
-import { CATEGORY_KEYS, HARD_ROUTES } from './taxonomy.js';
+import { CATEGORY_KEYS, CAUSES, CAUSE_GROUPS, CAUSE_KEYS, HARD_ROUTES } from './taxonomy.js';
 import { APPROVAL_PRESETS, RUNGS } from './settings.js';
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
+const causeOk = (k) => k === 'other' || CAUSE_KEYS.includes(k);
+// The root-cause codebook as people read it (the matching rules stay on the server).
+const CODEBOOK = { groups: CAUSE_GROUPS, causes: CAUSES.map(({ re: _re, ...c }) => c) };
 const isoDay = (ms) => new Date(ms).toISOString().slice(0, 10);
 
 export function registerComplaintRoutes(r, { complaints, needRole, wrap, now = () => Date.now() }) {
@@ -36,7 +39,8 @@ export function registerComplaintRoutes(r, { complaints, needRole, wrap, now = (
   r.get('/complaints/cases', lead, h(async (req, res) => {
     const w = await windowOf(req);
     const category = CATEGORY_KEYS.includes(req.query.category) ? req.query.category : null;
-    res.json(await complaints.listCases({ ...w, category }));
+    const cause = causeOk(req.query.cause) ? req.query.cause : null;
+    res.json(await complaints.listCases({ ...w, category, cause }));
   }));
   r.get('/complaints/cases/:id', lead, h(async (req, res) => {
     const c = await complaints.getCase(Number(req.params.id));
@@ -53,16 +57,20 @@ export function registerComplaintRoutes(r, { complaints, needRole, wrap, now = (
   r.get('/complaints/review', lead, h(async (req, res) => {
     const category = CATEGORY_KEYS.includes(req.query.category) ? req.query.category : null;
     const source = /^[a-z0-9_]{2,30}$/.test(req.query.source || '') ? req.query.source : null;
-    const [queue, stats] = await Promise.all([complaints.reviewQueue({ per: Number(req.query.per) || 20, category, source }), complaints.reviewStats()]);
+    const cause = causeOk(req.query.cause) ? req.query.cause : null;
+    const [queue, stats] = await Promise.all([complaints.reviewQueue({ per: Number(req.query.per) || 20, category, source, cause }), complaints.reviewStats()]);
     res.json({ queue, stats });
   }));
   r.post('/complaints/cases/:id/review', lead, h(async (req, res) => {
-    const { verdict, category, note } = req.body || {};
+    const { verdict, category, cause, contributing, note } = req.body || {};
     if (!['correct', 'wrong_category', 'not_complaint'].includes(verdict)) return res.status(400).json({ error: 'Unknown verdict' });
     if (verdict === 'wrong_category' && !CATEGORY_KEYS.includes(category)) return res.status(400).json({ error: 'Pick the right category' });
-    await complaints.reviewCase(Number(req.params.id), { verdict, category, note }, req.user.id);
+    if (cause != null && !causeOk(cause)) return res.status(400).json({ error: 'Unknown root cause' });
+    if (contributing != null && (!Array.isArray(contributing) || !contributing.every((k) => CAUSE_KEYS.includes(k)))) return res.status(400).json({ error: 'Unknown contributing cause' });
+    await complaints.reviewCase(Number(req.params.id), { verdict, category, cause: cause ?? null, contributing: contributing ?? null, note }, req.user.id);
     res.json({ ok: true, stats: await complaints.reviewStats() });
   }));
+  r.get('/complaints/codebook', lead, (req, res) => res.json(CODEBOOK));
   r.get('/complaints/clients', lead, h(async (req, res) => res.json(await complaints.clients())));
   r.post('/complaints/run', admin, h(async (req, res) => {
     const w = { from: DAY.test(req.body?.from || '') ? req.body.from : null, to: DAY.test(req.body?.to || '') ? req.body.to : null };

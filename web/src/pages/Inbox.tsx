@@ -1,3 +1,4 @@
+import { CleanerAdjustmentCard } from '../tracker/CleanerAdjustment';
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { Link, NavLink, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -53,12 +54,46 @@ export function InboxPage() {
   );
 }
 
+// A conversation without a contact (theirs was deleted, or it came over from Kustomer without a
+// match): save the number or email it came from as a contact. One already on a contact uses that
+// contact, never a second one.
+function NoContact({ detail }: { detail: ConversationDetail }) {
+  const queryClient = useQueryClient();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const their = detail.conversation.their_identity;
+  const save = async () => {
+    if (!their) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const c = await inbox.createContact({ name: '', roles: [], ...(their.includes('@') ? { email: their } : { phone: their }) });
+      await inbox.patch(detail.conversation.id, { contact_id: c.id });
+      await queryClient.invalidateQueries({ queryKey: ['inbox'] });
+    } catch (err) {
+      setError((err as Error).message);
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="pad">
+      <p className="muted small">No contact on this conversation{their ? ` (${displayIdentity(their)})` : ''}: their contact was deleted, or it came from Kustomer without a match.</p>
+      {their && (
+        <button type="button" className="secondary" disabled={busy} onClick={save}>
+          {busy ? 'Saving…' : 'Save as a contact'}
+        </button>
+      )}
+      {error && <div className="error small">{error}</div>}
+    </div>
+  );
+}
+
 function Panel360({ detail, onInsert }: { detail: ConversationDetail; onInsert: (t: string) => void }) {
   const contact = detail.contact;
   const roles = contact?.roles || [];
   const both = roles.includes('cleaner') && roles.includes('customer');
   const [tab, setTab] = useState<'customer' | 'cleaner'>(roles.includes('cleaner') ? 'cleaner' : 'customer');
-  if (!contact) return <div className="muted small pad">Match this conversation to a contact to see their 360.</div>;
+  if (!contact) return <NoContact detail={detail} />;
   const showCleaner = both ? tab === 'cleaner' : roles.includes('cleaner');
   return (
     <>
@@ -73,6 +108,7 @@ function Panel360({ detail, onInsert }: { detail: ConversationDetail; onInsert: 
       ) : (
         <Customer360 contact={contact} conversationId={detail.conversation.id} pinnedBookingId={detail.conversation.l27_booking_id} onInsert={onInsert} />
       )}
+      <CleanerAdjustmentCard contact={contact} conversationId={detail.conversation.id} cleanerName={detail.conversation.cleaner_name} />
     </>
   );
 }
@@ -144,7 +180,6 @@ function WorkList({ view, setView, activeId }: { view: string; setView: (v: stri
   const attention = [
     { key: 'breached', label: 'Late', n: counts.data?.breached, hint: 'Past their reply target' },
     { key: 'mentions', label: 'Mentions', n: counts.data?.mentions, hint: 'Teammates @mentioned you' },
-    { key: 'needs_match', label: 'Who is this?', n: counts.data?.needs_match, hint: 'Not matched to a customer or cleaner yet' },
   ].filter((v) => !!v.n || view === v.key);
   const queueId = view.startsWith('queue:') ? view.slice(6) : '';
   const extraFilters = (status !== 'open' ? 1 : 0) + (channel ? 1 : 0) + (role ? 1 : 0);
@@ -270,7 +305,6 @@ function WorkList({ view, setView, activeId }: { view: string; setView: (v: stri
                     <span className="ws-name">
                       <span className="ws-name-text">{c.contact_name || displayIdentity(c.their_identity)}</span>
                       {c.contact_roles?.filter((r) => r !== 'customer').map((r) => <span key={r} className={`chip role-${r}`}>{ROLE_LABEL[r]}</span>)}
-                      {c.needs_match && <span className="chip warn">Who is this?</span>}
                     </span>
                     <span className="muted small wl-time" title={`${ago(c.last_message_at, now)} ago`}>{rowTime(c.last_message_at, now)}</span>
                   </div>
@@ -292,7 +326,7 @@ function WorkList({ view, setView, activeId }: { view: string; setView: (v: stri
   );
 }
 
-const VIEW_ICON: Record<string, string> = { mine: 'inbox', unassigned: 'user', mentions: 'at', breached: 'alert', needs_match: 'question', all: 'search' };
+const VIEW_ICON: Record<string, string> = { mine: 'inbox', unassigned: 'user', mentions: 'at', breached: 'alert', all: 'search' };
 
 // Spots something worth telling the customer about today's visit, from the cleaner's
 // en route / check-in taps, and drafts the message.

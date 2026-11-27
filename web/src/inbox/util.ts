@@ -54,6 +54,15 @@ export function fillTemplate(body: string, vars: Record<string, string | undefin
   return body.replace(/\{\{\s*(\w+)\s*\}\}/g, (m, key) => vars[key] ?? m);
 }
 
+// What the server accepts (normalize.js): an email address; a North American number with its
+// area code (10 digits, or 11 starting with 1).
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+export const looksLikeEmail = (s: string) => EMAIL.test(s.trim());
+export const looksLikePhone = (s: string) => {
+  const d = s.replace(/\D/g, '');
+  return /^[\d\s()+.-]+$/.test(s.trim()) && (d.length === 10 || (d.length === 11 && d.startsWith('1')));
+};
+
 export function displayIdentity(value?: string | null) {
   const m = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(value || '');
   return m ? `(${m[1]}) ${m[2]}-${m[3]}` : value || '';

@@ -1,6 +1,8 @@
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import { SessionStore, COOKIE_MAX_AGE_MS } from './sessions.js';
+import { createTracker } from './tracker/service.js';
+import { createAdjustments } from './tracker/adjustments.js';
 import { createInboxRouter } from './inbox/api.js';
 import { tokenMatches } from './qa/service.js';
 import { guardConnectors } from './inbox/channels.js';
@@ -18,7 +20,7 @@ const FORWARD_HEADERS = ['accept', 'content-type'];
 
 export function createApp(
   config,
-  { fetchImpl = fetch, sessions = new SessionStore({ secret: config.sessionSecret }), db = null, connectors = {}, log = createLogger({ level: 'warn' }), jobs = null, qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, complaints = null, smsProviders = {}, kustomerMigration = null, kpi = null } = {},
+  { fetchImpl = fetch, sessions = new SessionStore({ secret: config.sessionSecret }), db = null, connectors = {}, log = createLogger({ level: 'warn' }), jobs = null, qa = {}, segments = null, schedule = null, reports = null, writes = null, commercial = null, placement = null, commercialPlan = null, complaints = null, smsProviders = {}, kustomerMigration = null, kpi = null, tracker = null, adjustments = null } = {},
 ) {
   const app = express();
   // Behind Railway's (or any) HTTPS proxy: trust X-Forwarded-* so secure cookies work.
@@ -126,6 +128,12 @@ export function createApp(
 
     const isWrite = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
     const logWrite = (entry) => (isWrite && writes ? writes.record({ email: session.email, source: 'app screens', method: req.method, path: req.url, body: req.body, ...entry }) : Promise.resolve());
+    // A cleaner's availability is changed only through the portal's own routes (availability
+    // calendar, Mark off): they warn about visits and keep a history (docs/availability.md).
+    if (isWrite && /^\/v1\/staff\/teams\/\d+\/availability\/?$/i.test(req.path)) {
+      await logWrite({ outcome: 'blocked', status: 403, error: "availability is changed from the cleaner's page" });
+      return res.status(403).json({ error: "Change a cleaner's availability from their page in the portal.", code: 'use_cleaner_page' });
+    }
     if (isWrite && !config.allowWrites) {
       await logWrite({ outcome: 'blocked', status: 403 });
       return res.status(403).json({ error: config.production ? 'Writes to Launch27 are turned off (set L27_ALLOW_WRITES=true)' : `Writes to the live Launch27 are blocked in ${config.appEnv}` });
@@ -252,7 +260,7 @@ export function createApp(
   // The support workspace (conversations, contacts, routing). Needs a database.
   if (db) {
     const l27 = createL27Client({ baseUrl: config.l27BaseUrl, fetchImpl });
-    app.use('/api', createInboxRouter({ db, sessions, cookieName: COOKIE, config, l27, connectors: guardConnectors(connectors, config.notificationsMode), log, qa, segments, schedule, reports, writes, commercial, placement, commercialPlan, complaints, smsProviders, kustomerMigration, kpi }));
+    app.use('/api', createInboxRouter({ db, sessions, cookieName: COOKIE, config, l27, connectors: guardConnectors(connectors, config.notificationsMode), log, qa, segments, schedule, reports, writes, commercial, placement, commercialPlan, complaints, smsProviders, kustomerMigration, kpi, tracker: tracker || createTracker({ db, config, fetchImpl, log, complaints }), adjustments: adjustments || createAdjustments({ db, config, fetchImpl, log }) }));
   }
 
   // Last-resort error handler: log it (without personal data), answer generically.

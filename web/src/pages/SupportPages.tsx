@@ -1,10 +1,13 @@
+import { CleanerAdjustmentCard } from '../tracker/CleanerAdjustment';
 import { useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { inbox, type Channel, type Contact, type Role } from '../inbox/api';
+import { contactsInConflict, inbox, type Channel, type Contact, type ContactSummary, type Identity, type Role } from '../inbox/api';
 import { Customer360, Story } from '../inbox/Customer360';
 import { Cleaner360 } from '../inbox/Cleaner360';
 import { CleanerProfile } from '../inbox/CleanerProfile';
+import { ApiError } from '../api';
+import { AddContact, contactLabel, deleteContactQuestion } from '../inbox/AddContact';
 import { CHANNEL_ICON, ROLE_LABEL, ago, displayIdentity, useInboxMe, useMeta } from '../inbox/util';
 
 // ---------- Contact profile (full-page 360) ----------
@@ -13,8 +16,17 @@ export function ContactPage() {
   const { id } = useParams();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const location = useLocation();
   const contact = useQuery({ queryKey: ['inbox', 'contact', Number(id)], queryFn: () => inbox.contact(Number(id)) });
   const [error, setError] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const notice = (location.state as { notice?: string } | null)?.notice || null;
+  // A contact merged into another: open that one.
+  const mergedInto = contact.error instanceof ApiError ? (contact.error.fields as { merged_into?: number } | undefined)?.merged_into : undefined;
+  useEffect(() => {
+    if (mergedInto) navigate(`/contacts/${mergedInto}`, { replace: true, state: { notice: 'That contact was merged into this one.' } });
+  }, [mergedInto, navigate]);
   if (contact.isLoading) return <div className="muted">Loading…</div>;
   if (contact.error) return <div className="error">{(contact.error as Error).message}</div>;
   const c = contact.data!;
@@ -32,6 +44,34 @@ export function ContactPage() {
       setError((err as Error).message);
     }
   };
+  // Deleting keeps their conversations (under the number or email) and any STOP on the number.
+  const remove = async () => {
+    if (!window.confirm(deleteContactQuestion(c))) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      await inbox.deleteContact(c.id);
+      queryClient.removeQueries({ queryKey: ['inbox', 'contact', c.id] });
+      queryClient.invalidateQueries({ queryKey: ['inbox'] });
+      navigate('/contacts', { replace: true, state: { notice: `${contactLabel(c)} deleted.` } });
+    } catch (err) {
+      setError((err as Error).message);
+      setDeleting(false);
+    }
+  };
+  const roleBoxes = (
+    <div className="small spaced">
+      Roles:{' '}
+      {(['customer', 'cleaner', 'applicant'] as Role[]).map((r) => (
+        <label key={r} className="check inline"><input type="checkbox" checked={c.roles.includes(r)} onChange={() => toggleRole(r)} /> {ROLE_LABEL[r]}</label>
+      ))}
+    </div>
+  );
+  const deleteButton = (
+    <button type="button" className="link small danger-link" disabled={deleting} onClick={remove}>
+      {deleting ? 'Deleting…' : 'Delete contact'}
+    </button>
+  );
 
   // Someone not in Launch27 (no customer, not a cleaner): this page is where their Story lives.
   const storyHere = !c.l27_customer_id && !c.l27_team_id && !c.roles.includes('cleaner');
@@ -41,6 +81,7 @@ export function ContactPage() {
     return (
       <>
         <div className="muted small cp-crumb"><Link to="/teams">Teams</Link> / {c.name}</div>
+        {notice && <div className="notice small">{notice}</div>}
         {error && <div className="error">{error}</div>}
         <CleanerProfile
           tid={c.l27_team_id}
@@ -49,13 +90,10 @@ export function ContactPage() {
           onEmail={() => start('email')}
           editContact={
             <div className="cp-edit-inner">
+              <DetailsEditor key={`${c.id}:${c.name}:${c.notes}`} contact={c} />
               <IdentityEditor contact={c} />
-              <div className="small spaced">
-                Roles:{' '}
-                {(['customer', 'cleaner', 'applicant'] as Role[]).map((r) => (
-                  <label key={r} className="check inline"><input type="checkbox" checked={c.roles.includes(r)} onChange={() => toggleRole(r)} /> {ROLE_LABEL[r]}</label>
-                ))}
-              </div>
+              {roleBoxes}
+              <div className="actions spaced">{deleteButton}</div>
             </div>
           }
         />
@@ -78,8 +116,11 @@ export function ContactPage() {
           <button onClick={() => start('sms')}>New text</button>
           <button className="secondary" onClick={() => start('email')}>New email</button>
           <DialButton contact={c} />
+          <button type="button" className="secondary" onClick={() => setAdding(true)}>Add contact</button>
         </div>
       </header>
+      {adding && <AddContact onClose={() => setAdding(false)} />}
+      {notice && <div className="notice small">{notice}</div>}
       {error && <div className="error">{error}</div>}
       {c.caller_flag && (
         <div className="notice small">
@@ -90,13 +131,10 @@ export function ContactPage() {
       <div className="grid-2 contact-grid">
         <section className="card">
           <h2>Details</h2>
+          <DetailsEditor key={`${c.id}:${c.name}:${c.notes}`} contact={c} />
+          <h3>Phone numbers and emails</h3>
           <IdentityEditor contact={c} />
-          <div className="small spaced">
-            Roles:{' '}
-            {(['customer', 'cleaner', 'applicant'] as Role[]).map((r) => (
-              <label key={r} className="check inline"><input type="checkbox" checked={c.roles.includes(r)} onChange={() => toggleRole(r)} /> {ROLE_LABEL[r]}</label>
-            ))}
-          </div>
+          {roleBoxes}
           {c.roles.includes('customer') || !c.roles.length ? <LeadFields contact={c} /> : null}
           {!storyHere && (
             <>
@@ -113,9 +151,11 @@ export function ContactPage() {
               </div>
             </>
           )}
+          <div className="actions spaced">{deleteButton}</div>
         </section>
         <section className="card no-pad">
           {c.roles.includes('cleaner') ? <Cleaner360 contact={c} /> : <Customer360 contact={c} hideHistory={storyHere} />}
+          <CleanerAdjustmentCard contact={c} />
         </section>
       </div>
       {/* Not in Launch27 (e.g. a profile the Kustomer import made): their Story is every conversation. */}
@@ -124,41 +164,152 @@ export function ContactPage() {
   );
 }
 
+// Name and notes. Saved with the Save button; the call card treats unsaved changes as work in
+// progress (data-unsaved), so answering a call doesn't navigate away from them.
+function DetailsEditor({ contact }: { contact: Contact }) {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState(contact.name || '');
+  const [notes, setNotes] = useState(contact.notes || '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const dirty = name.trim() !== (contact.name || '').trim() || notes.trim() !== (contact.notes || '').trim();
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await inbox.updateContact(contact.id, { name: name.trim() || null, notes: notes.trim() || null });
+      await queryClient.invalidateQueries({ queryKey: ['inbox'] });
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const reset = () => {
+    setName(contact.name || '');
+    setNotes(contact.notes || '');
+    setError(null);
+  };
+  return (
+    <div className="contact-details" data-unsaved={dirty ? 'true' : undefined}>
+      <label>
+        Name
+        <input className="full" value={name} onChange={(e) => setName(e.target.value)} placeholder="First and last name" />
+      </label>
+      <label>
+        Notes
+        <textarea className="full" rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Address or postal code, what they need, anything the team should know" />
+      </label>
+      {dirty && (
+        <div className="actions">
+          <button type="button" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save details'}</button>
+          <button type="button" className="secondary" disabled={busy} onClick={reset}>Cancel</button>
+        </div>
+      )}
+      {error && <div className="error small">{error}</div>}
+    </div>
+  );
+}
+
+// Emails and phone numbers: add, change, label, remove, and the opt-out from texts. One that is
+// already on another contact can't be added here; the two contacts can be merged instead.
 function IdentityEditor({ contact }: { contact: Contact }) {
   const queryClient = useQueryClient();
   const [kind, setKind] = useState<'phone' | 'email'>('phone');
   const [value, setValue] = useState('');
+  const [label, setLabel] = useState('');
+  const [editing, setEditing] = useState<number | null>(null);
+  const [draft, setDraft] = useState({ value: '', label: '' });
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const refresh = () => queryClient.invalidateQueries({ queryKey: ['inbox'] });
-  const add = async () => {
+  const [conflict, setConflict] = useState<ContactSummary | null>(null);
+  const who = contact.name || 'this contact';
+  const attempt = async (fn: () => Promise<unknown>, after?: () => void) => {
+    setBusy(true);
     setError(null);
+    setConflict(null);
     try {
-      await inbox.addIdentity(contact.id, kind, value);
-      setValue('');
-      refresh();
+      await fn();
+      after?.();
+      await queryClient.invalidateQueries({ queryKey: ['inbox'] });
     } catch (err) {
       setError((err as Error).message);
+      setConflict(contactsInConflict(err).find((x) => x.id !== contact.id) || null);
+    } finally {
+      setBusy(false);
     }
   };
+  const add = () => attempt(() => inbox.addIdentity(contact.id, kind, value.trim(), label.trim() || undefined), () => { setValue(''); setLabel(''); });
+  const edit = (i: Identity) => {
+    setEditing(i.id);
+    setDraft({ value: i.kind === 'phone' ? displayIdentity(i.value) : i.value, label: i.label || '' });
+    setError(null);
+    setConflict(null);
+  };
+  const saveEdit = (i: Identity) => attempt(() => inbox.updateIdentity(i.id, { value: draft.value.trim(), label: draft.label.trim() || null }), () => setEditing(null));
+  const remove = (i: Identity) => {
+    const notes = [
+      `Remove ${displayIdentity(i.value)} from ${who}?`,
+      i.opted_out ? 'It replied STOP, so texts to it stay blocked.' : '',
+      contact.l27_customer_id || contact.l27_team_id ? 'Launch27 is not changed, and the portal will not add it back from Launch27.' : '',
+    ];
+    if (window.confirm(notes.filter(Boolean).join('\n\n'))) attempt(() => inbox.removeIdentity(i.id), () => setEditing(null));
+  };
+  const merge = (other: ContactSummary) => {
+    const them = other.name || `contact #${other.id}`;
+    if (!window.confirm(`Merge ${them} into ${who}?\n\nTheir phone numbers, emails and conversations move here, ${them} is deleted, and ${who} keeps its own details (taking theirs only where it has none).`)) return;
+    attempt(() => inbox.mergeContact(contact.id, other.id), () => {
+      setEditing(null);
+      setValue('');
+      setLabel('');
+    });
+  };
   return (
-    <>
-      {contact.identities.map((i) => (
-        <div key={i.id} className="row-line">
-          <span>{i.kind === 'phone' ? '☎' : '✉'} {displayIdentity(i.value)} {i.label && <span className="muted small">({i.label})</span>}</span>
-          {i.kind === 'phone' && (
-            <label className="check small">
-              <input type="checkbox" checked={i.opted_out} onChange={(e) => inbox.setOptOut(i.id, e.target.checked).then(refresh)} /> Opted out of texts
-            </label>
+    <div className="identity-editor">
+      {contact.identities.map((i) =>
+        editing === i.id ? (
+          <div key={i.id} className="row-line id-edit">
+            <input aria-label={i.kind === 'phone' ? 'Phone number' : 'Email'} value={draft.value} onChange={(e) => setDraft({ ...draft, value: e.target.value })} autoFocus />
+            <input aria-label="Label" value={draft.label} onChange={(e) => setDraft({ ...draft, label: e.target.value })} placeholder="Label (cell, work…)" />
+            <span className="actions">
+              <button type="button" disabled={busy || !draft.value.trim()} onClick={() => saveEdit(i)}>Save</button>
+              <button type="button" className="secondary" disabled={busy} onClick={() => setEditing(null)}>Cancel</button>
+            </span>
+          </div>
+        ) : (
+          <div key={i.id} className="row-line">
+            <span>{i.kind === 'phone' ? '☎' : '✉'} {displayIdentity(i.value)} {i.label && <span className="muted small">({i.label})</span>}</span>
+            <span className="actions">
+              {i.kind === 'phone' && (
+                <label className="check small" title={i.opted_out && i.opted_out_by !== 'agent' ? 'They texted STOP. Only a START text from them turns texts back on.' : undefined}>
+                  <input type="checkbox" checked={i.opted_out} disabled={busy || (i.opted_out && i.opted_out_by !== 'agent')} onChange={(e) => attempt(() => inbox.setOptOut(i.id, e.target.checked))} /> {i.opted_out && i.opted_out_by !== 'agent' ? 'Texted STOP' : 'Opted out of texts'}
+                </label>
+              )}
+              <button type="button" className="link small" disabled={busy} onClick={() => edit(i)}>Edit</button>
+              <button type="button" className="link small danger-link" disabled={busy} onClick={() => remove(i)}>Remove</button>
+            </span>
+          </div>
+        ),
+      )}
+      {!contact.identities.length && <div className="muted small">No phone number or email yet.</div>}
+      <form className="actions spaced" onSubmit={(e) => { e.preventDefault(); if (value.trim()) add(); }}>
+        <select aria-label="Add a" value={kind} onChange={(e) => setKind(e.target.value as 'phone' | 'email')}><option value="phone">Phone</option><option value="email">Email</option></select>
+        <input aria-label={kind === 'phone' ? 'New phone number' : 'New email'} value={value} onChange={(e) => setValue(e.target.value)} placeholder={kind === 'phone' ? '613-555-0100' : 'name@example.com'} />
+        <input aria-label="Label for it" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Label (optional)" />
+        <button type="submit" className="secondary" disabled={busy || !value.trim()}>Add</button>
+      </form>
+      {error && (
+        <div className="error small">
+          {error}
+          {conflict && (
+            <div className="actions">
+              <Link to={`/contacts/${conflict.id}`}>Open {conflict.name || 'that contact'}</Link>
+              <button type="button" className="link small" disabled={busy} onClick={() => merge(conflict)}>Merge {conflict.name || 'them'} into {who}</button>
+            </div>
           )}
         </div>
-      ))}
-      <div className="actions spaced">
-        <select value={kind} onChange={(e) => setKind(e.target.value as 'phone' | 'email')}><option value="phone">Phone</option><option value="email">Email</option></select>
-        <input value={value} onChange={(e) => setValue(e.target.value)} placeholder={kind === 'phone' ? '613-555-0100' : 'name@example.com'} />
-        <button className="secondary" disabled={!value} onClick={add}>Add</button>
-      </div>
-      {error && <div className="error small">{error}</div>}
-    </>
+      )}
+    </div>
   );
 }
 

@@ -9,7 +9,7 @@ const days = (a, b) => Math.round((b - a) / DAY);
 const mean = (xs) => (xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : null);
 
 /** visitsByCustomer: Map(customer_id -> visits sorted by time). at: complaint time (ms). */
-export function journeyAt(list, at, { priorCases = [], cleanerStatsAt = null, dataFrom = null, complainedVisitId = null } = {}) {
+export function journeyAt(list, at, { priorCases = [], cleanerStatsAt = null, dataFrom = null, complainedVisitId = null, cleanerLastWorked = null, dataTo = null } = {}) {
   const before = (list || []).filter((v) => v.at < at);
   const last = before[before.length - 1] || null;
   const first = before[0] || null;
@@ -21,6 +21,8 @@ export function journeyAt(list, at, { priorCases = [], cleanerStatsAt = null, da
   const priceChange = prices.length >= 2 ? (prices[prices.length - 1] - mean(prices.slice(0, -1))) / mean(prices.slice(0, -1)) : null;
   const cleaner = last?.teams?.[0] || null;
   const cs = cleaner && cleanerStatsAt ? cleanerStatsAt(cleaner.id, at) : null;
+  const regular = regularCleaner(last90);
+  const regularLast = regular && cleanerLastWorked ? cleanerLastWorked(regular.id) : null;
   return {
     tenure_days: first ? days(first.at, at) : null,
     frequency: last?.freq || null,
@@ -37,7 +39,28 @@ export function journeyAt(list, at, { priorCases = [], cleanerStatsAt = null, da
     cleaner_visits_before: cs?.visits ?? null,
     cleaner_unhappy_rate_90d: cs?.unhappyRate ?? null,
     data_from: dataFrom,
+    regular_cleaner_name: regular?.name ?? null,
+    regular_cleaner_last_worked: regularLast ? new Date(regularLast).toISOString().slice(0, 10) : null,
+    // Stopped working with us: their last visit with any client was before the complaint and
+    // at least LEFT_AFTER_DAYS before the end of the data (so a week off doesn't count).
+    regular_cleaner_left: regular && regularLast && dataTo ? regularLast < at && dataTo - regularLast >= LEFT_AFTER_DAYS * DAY : null,
   };
+}
+
+export const LEFT_AFTER_DAYS = 21;
+// The client's regular cleaner: the one on most of their visits (at least two) in the window.
+export function regularCleaner(visits) {
+  const n = new Map();
+  for (const v of visits) for (const t of v.teams || []) n.set(t.id, { id: t.id, name: t.name, n: (n.get(t.id)?.n || 0) + 1 });
+  const top = [...n.values()].sort((a, b) => b.n - a.n)[0];
+  return top && top.n >= 2 ? { id: top.id, name: top.name || null } : null;
+}
+
+/** When each cleaner last worked a visit (any client), from all visits up to `untilMs`. */
+export function cleanerLastWorkedIndex(visits, untilMs = Infinity) {
+  const last = new Map();
+  for (const v of visits) if (v.at <= untilMs) for (const t of v.teams || []) if (!(last.get(t.id) >= v.at)) last.set(t.id, v.at);
+  return (id) => last.get(id) ?? null;
 }
 
 /** Per-cleaner experience and unhappy-rating rate before a moment, from all visits. */

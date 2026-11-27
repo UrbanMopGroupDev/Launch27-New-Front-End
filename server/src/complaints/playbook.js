@@ -1,12 +1,13 @@
 // The Phase 1 playbook report, computed from stored cases. Pure.
 //   - taxonomy: how often each category comes up, typical handling, what kept clients, at what cost
+//   - by cause: the same by root cause (why it happened), with the categories each cause produced
 //   - ladder:   per rung (highest rung used on the case), retention and cost
 //   - reclean vs refund within each category (where our default helped, where it was overkill)
 //   - root causes: complaint rate per 100 visits by journey situation, against the overall rate
 //   - budget baseline: monthly complaint cost as a % of Residential revenue
 //   - data gaps and confidence
 // Every figure carries n; anything resting on fewer than THIN cases is flagged.
-import { categoryLabel, HARD_ROUTES } from './taxonomy.js';
+import { categoryLabel, causeLabel, CAUSES, CAUSE_GROUPS, HARD_ROUTES } from './taxonomy.js';
 import { RUNGS, rungIndex, rungName } from './settings.js';
 
 export const THIN = 10;
@@ -142,30 +143,65 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, visits = []
     if (!cats.has(c.category)) cats.set(c.category, []);
     cats.get(c.category).push(c);
   }
+  // One row of the playbook for any group of cases: how many, what we did, what kept clients.
+  const segment = (list) => {
+    const rungCounts = {};
+    for (const c of list) rungCounts[c.rung] = (rungCounts[c.rung] || 0) + 1;
+    const typical = Object.entries(rungCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+    const byRung = Object.entries(rungCounts).map(([rung, n]) => ({ rung, name: rungName(rung), ...outcomeStats(list.filter((c) => c.rung === rung)), n }));
+    return {
+      n: list.length,
+      share: share(list.length, rows.length),
+      total_n: rows.length,
+      hard_routed: list.filter((c) => c.hard_route).length,
+      hard_routed_ids: ids(list.filter((c) => c.hard_route)),
+      typical_rung: typical,
+      typical_name: typical ? rungName(typical) : null,
+      ...outcomeStats(list),
+      by_rung: byRung.sort((a, b) => rungIndex(a.rung) - rungIndex(b.rung)),
+      cheapest_that_works: cheapestThatWorks(byRung, typical),
+    };
+  };
   const taxonomy = [...cats]
+    .map(([key, list]) => ({
+      key,
+      label: categoryLabel(key),
+      ...segment(list),
+      tones: Object.fromEntries(['mild', 'frustrated', 'angry', 'threat_leave', 'threat_review'].map((t) => [t, list.filter((c) => c.tone === t).length])),
+    }))
+    .sort((a, b) => b.n - a.n);
+
+  // Why it happened: the same view by root cause. A case counts once, under its root cause;
+  // contributing causes are counted beside it. "unset" is cases nobody has a cause for yet.
+  const causeOf = (c) => c.cause || 'unset';
+  const contributingOf = (c) => (Array.isArray(c.contributing_causes) ? c.contributing_causes : []);
+  const causes = new Map();
+  for (const c of rows) {
+    if (!causes.has(causeOf(c))) causes.set(causeOf(c), []);
+    causes.get(causeOf(c)).push(c);
+  }
+  const groupOf = (k) => CAUSES.find((x) => x.key === k)?.group || null;
+  const byCause = [...causes]
     .map(([key, list]) => {
-      const rungCounts = {};
-      for (const c of list) rungCounts[c.rung] = (rungCounts[c.rung] || 0) + 1;
-      const typical = Object.entries(rungCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
-      const byRung = Object.entries(rungCounts).map(([rung, n]) => ({ rung, name: rungName(rung), ...outcomeStats(list.filter((c) => c.rung === rung)), n }));
-      const cheapest = cheapestThatWorks(byRung, typical);
+      const alsoIn = rows.filter((c) => contributingOf(c).includes(key));
+      const inCat = new Map();
+      for (const c of list) inCat.set(c.category, [...(inCat.get(c.category) || []), c.id]);
       return {
         key,
-        label: categoryLabel(key),
-        n: list.length,
-        share: share(list.length, rows.length),
-        total_n: rows.length,
-        hard_routed: list.filter((c) => c.hard_route).length,
-        hard_routed_ids: ids(list.filter((c) => c.hard_route)),
-        typical_rung: typical,
-        typical_name: typical ? rungName(typical) : null,
-        tones: Object.fromEntries(['mild', 'frustrated', 'angry', 'threat_leave', 'threat_review'].map((t) => [t, list.filter((c) => c.tone === t).length])),
-        ...outcomeStats(list),
-        by_rung: byRung.sort((a, b) => rungIndex(a.rung) - rungIndex(b.rung)),
-        cheapest_that_works: cheapest,
+        label: key === 'unset' ? 'Not set yet' : causeLabel(key),
+        group: groupOf(key),
+        ...segment(list),
+        contributing_n: alsoIn.length,
+        contributing_ids: ids(alsoIn),
+        set_by: countBy(list.map((c) => ({ by: c.cause_by || 'none' })), 'by'),
+        by_category: [...inCat].map(([k, l]) => ({ key: k, label: categoryLabel(k), n: l.length, ids: l })).sort((a, b) => b.n - a.n),
       };
     })
-    .sort((a, b) => b.n - a.n);
+    .sort((a, b) => (a.key === 'unset') - (b.key === 'unset') || b.n - a.n);
+  const causeGroups = CAUSE_GROUPS.map((g) => {
+    const list = rows.filter((c) => groupOf(c.cause) === g.key);
+    return { key: g.key, label: g.label, n: list.length, ids: ids(list), share: share(list.length, rows.length), ...outcomeStats(list) };
+  });
 
   // Ladder: cost and retention per rung (hard-routed cases excluded: they're not on the ladder)
   const ladder = RUNGS.map((r) => ({ ...r, ...outcomeStats(ladderRows.filter((c) => c.rung === r.rung)) }));
@@ -253,6 +289,8 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, visits = []
     window: { from, to },
     totals: { cases: n, hard_routed: rows.filter((c) => c.hard_route).length, hard_routed_ids: ids(rows.filter((c) => c.hard_route)), by_source: countBy(rows, 'source'), total_cost: r2(rows.reduce((s, c) => s + c.cost, 0)), ...outcomeStats(rows) },
     taxonomy,
+    by_cause: byCause,
+    cause_groups: causeGroups,
     ladder,
     reclean_vs_refund: recleanVsRefund,
     reclean_vs_refund_total: {

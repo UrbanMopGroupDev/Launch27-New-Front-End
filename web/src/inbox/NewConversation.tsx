@@ -7,7 +7,7 @@ import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { inbox, type Channel, type Contact, type Role, type SuggestedContact } from './api';
 import { Avatar } from './Customer360';
-import { ROLE_LABEL, displayIdentity, useMeta } from './util';
+import { ROLE_LABEL, displayIdentity, looksLikeEmail, looksLikePhone, useMeta } from './util';
 import { Icon } from '../components/Icon';
 import { l27 } from '../api';
 import type { Customer, Team } from '../types';
@@ -30,9 +30,6 @@ interface Person {
   prefer?: Ch;
 }
 
-const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const looksLikeEmail = (s: string) => EMAIL.test(s.trim());
-const looksLikePhone = (s: string) => { const d = s.replace(/\D/g, ''); return /^[\d\s()+.-]+$/.test(s.trim()) && (d.length === 10 || (d.length === 11 && d.startsWith('1'))); };
 const KINDS: { label: string; roles: Role[] }[] = [{ label: 'Customer', roles: ['customer'] }, { label: 'Cleaner', roles: ['cleaner'] }, { label: 'Job applicant', roles: ['applicant'] }, { label: 'Someone else', roles: [] }];
 
 // "5 minutes ago", "yesterday", "3 weeks ago": how people say it.
@@ -236,7 +233,7 @@ function NewContact({ start, startName, emailLocked, onBack, onStarted }: { star
   return (
     <form className="nc-form" onSubmit={(e) => e.preventDefault()}>
       <button type="button" className="link small nc-back" onClick={onBack}>← Back to search</button>
-      <label>Name<input ref={first} value={name} placeholder="Who is this?" onChange={(e) => setName(e.target.value)} /></label>
+      <label>Name<input ref={first} value={name} placeholder="First and last name" onChange={(e) => setName(e.target.value)} /></label>
       <div className="nc-two">
         <label>Mobile number<input type="tel" inputMode="tel" value={phone} placeholder="613 555 0100" onChange={(e) => setPhone(e.target.value)} />{!phoneOk && <span className="error small">10 digits, with area code</span>}</label>
         <label>Email<input type="email" inputMode="email" value={email} placeholder="name@example.com" onChange={(e) => setEmail(e.target.value)} />{!emailOk && <span className="error small">That does not look like an email address</span>}</label>

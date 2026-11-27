@@ -179,20 +179,50 @@ describe('inbox service', () => {
     assert.equal(Number(contact.l27_team_id), 4760);
   });
 
-  test('email threads by thread key; a shared address is flagged, not guessed', async () => {
+  test('email threads by thread key; an email is on one contact only, so it is never ambiguous', async () => {
     const a = await ingest({ channel: 'email', from: 'Pat <pat@example.com>', to: UM.billing, subject: 'Charge question', body: 'Why $200?', thread_key: 'gm:abc', at: t0 });
     const b = await ingest({ channel: 'email', from: 'pat@example.com', to: UM.billing, subject: 'Re: Charge question', body: 'Following up', thread_key: 'gm:abc', at: at(30) });
     assert.equal(a.conversationId, b.conversationId);
     assert.equal((await conv(a.conversationId)).routed_by, 'Billing & Financial Operations Queue');
-    // Two contacts share one email.
-    await db.tx(async (q) => {
-      await svc.createContact(q, { name: 'Sam A', identities: [{ kind: 'email', value: 'family@example.com' }] });
-      await svc.createContact(q, { name: 'Sam B', identities: [{ kind: 'email', value: 'family@example.com' }] });
-    });
+    // A second contact can't take an email the first one has.
+    const [samA, samB] = await db.tx(async (q) => [
+      await svc.createContact(q, { name: 'Sam A', identities: [{ kind: 'email', value: 'family@example.com' }] }),
+      await svc.createContact(q, { name: 'Sam B', identities: [{ kind: 'email', value: 'family@example.com' }] }),
+    ]);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM contact_identities WHERE contact_id = $1', [samB.id])).rows[0].n, 0);
+    await assert.rejects(db.tx((q) => svc.addIdentity(q, samB.id, 'email', 'Family@Example.com')), (err) => err instanceof svc.IdentityTaken && Number(err.owner.id) === Number(samA.id));
     const s = await ingest({ channel: 'email', from: 'family@example.com', to: UM.info, subject: 'Hi', body: 'Booking?', at: t0 });
     const sc = await conv(s.conversationId);
-    assert.equal(sc.needs_match, true);
-    assert.equal(sc.contact_id, null);
+    assert.equal(sc.needs_match, false);
+    assert.equal(Number(sc.contact_id), Number(samA.id));
+  });
+
+  test('an unknown sender becomes a new contact; their next message (any channel) finds it', async () => {
+    const before = (await db.query('SELECT count(*)::int AS n FROM contacts')).rows[0].n;
+    const first = await ingest({ channel: 'sms', from: '613-555-0901', to: UM.smsOttawa, body: 'Hi, who do I talk to about a quote?', at: t0 });
+    const c1 = await conv(first.conversationId);
+    assert.ok(c1.contact_id);
+    assert.equal(c1.needs_match, false);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM contacts')).rows[0].n, before + 1);
+    const call = await db.tx((q) => svc.logCall(q, agent, { call_id: 'u-1', direction: 'inbound', from: '(613) 555-0901', to: '613-691-9880', result: 'missed', started_at: t0.toISOString() }));
+    assert.equal(Number((await conv(call.conversationId)).contact_id), Number(c1.contact_id));
+    const out = await db.tx((q) => svc.logCall(q, agent, { call_id: 'u-2', direction: 'outbound', from: '613-691-9880', to: '+1 613 555 0901', result: 'answered', started_at: t0.toISOString() }));
+    assert.equal(Number((await conv(out.conversationId)).contact_id), Number(c1.contact_id));
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM contacts')).rows[0].n, before + 1);
+  });
+
+  test('a new address for a Launch27 customer joins their contact; a deleted contact\'s thread is picked up again', async () => {
+    const jane = await db.tx((q) => svc.createContact(q, { name: 'Jane L27', roles: ['customer'], l27_customer_id: 9077, identities: [{ kind: 'email', value: 'jane.l27@example.com' }] }));
+    const lookup = { name: 'Jane L27', roles: ['customer'], l27_customer_id: 9077, identities: [{ kind: 'email', value: 'jane.l27@example.com' }, { kind: 'phone', value: '613-555-0977' }] };
+    const r = await ingest({ channel: 'sms', from: '613-555-0977', to: UM.smsOttawa, body: 'Texting from my cell', at: t0 }, { lookup });
+    assert.equal(Number((await conv(r.conversationId)).contact_id), Number(jane.id));
+    await db.tx((q) => svc.deleteContact(q, agent, jane.id));
+    assert.equal((await conv(r.conversationId)).contact_id, null);
+    const again = await ingest({ channel: 'sms', from: '613-555-0977', to: UM.smsOttawa, body: 'Anyone there?', at: at(5) });
+    assert.equal(again.conversationId, r.conversationId);
+    const back = await conv(r.conversationId);
+    assert.ok(back.contact_id);
+    assert.notEqual(Number(back.contact_id), Number(jane.id));
   });
 
   test('two agents claiming at once: exactly one wins', async () => {
@@ -472,5 +502,222 @@ describe('/api end to end', () => {
     const res = await api('/api/calls', { call_id: 'sim-1', simulated: true, direction: 'inbound', from: '613-555-0177', to: '613-691-9880', result: 'missed', started_at: new Date().toISOString() });
     assert.equal(res.status, 201);
     assert.ok(res.body.conversationId);
+  });
+
+  test('contacts: adding someone already here reuses them; details on two contacts are refused', async () => {
+    const robin = await api('/api/contacts', { name: 'Robin Lead', roles: [], phone: '613-555-0701', lead_stage: 'New', notes: 'Kanata, 3 bed' });
+    assert.equal(robin.status, 201);
+    assert.equal(robin.body.existing, false);
+    assert.equal(robin.body.lead_stage, 'New');
+    const again = await api('/api/contacts', { name: 'Robin Again', roles: [], phone: '(613) 555-0701', email: 'Robin@Example.com' });
+    assert.equal(again.status, 200);
+    assert.equal(again.body.existing, true);
+    assert.equal(again.body.id, robin.body.id);
+    assert.equal(again.body.name, 'Robin Lead', 'an existing name is kept');
+    assert.deepEqual(again.body.identities.map((i) => i.value).sort(), ['+16135550701', 'robin@example.com']);
+    const other = await api('/api/contacts', { name: 'Other Person', roles: [], email: 'other.person@example.com' });
+    assert.equal(other.status, 201);
+    const both = await api('/api/contacts', { name: 'Mixed', roles: [], phone: '613-555-0701', email: 'other.person@example.com' });
+    assert.equal(both.status, 409);
+    assert.deepEqual(both.body.contacts.map((c) => c.id).sort(), [Number(robin.body.id), Number(other.body.id)].sort());
+    assert.equal((await api('/api/contacts', { name: 'Bad', roles: [], phone: '123' })).status, 400);
+    assert.equal((await api('/api/contacts', { name: 'Bad', roles: [], email: 'not-an-email' })).status, 400);
+    assert.equal((await api('/api/contacts', { name: 'Bad', roles: ['boss'] })).status, 400);
+    // "Who is this?" is gone from the inbox counts.
+    assert.ok(!('needs_match' in (await api('/api/counts')).body));
+  });
+
+  test('contacts: every detail can be edited; an email on another contact is refused, then merged', async () => {
+    const c = (await api('/api/contacts', { name: 'Edit Me', roles: [], phone: '613-555-0711', email: 'edit.me@example.com' })).body;
+    const named = await api(`/api/contacts/${c.id}`, { name: '  Edited Name ', notes: 'Back door', lead_stage: 'New', communication_preference: 'Text' }, 'PATCH');
+    assert.equal(named.status, 200);
+    assert.equal(named.body.name, 'Edited Name');
+    assert.equal(named.body.notes, 'Back door');
+    const phone = c.identities.find((i) => i.kind === 'phone');
+    const email = c.identities.find((i) => i.kind === 'email');
+    const moved = await api(`/api/identities/${phone.id}`, { value: '613-555-0712', label: 'Cell' }, 'PATCH');
+    assert.equal(moved.status, 200);
+    assert.equal(moved.body.value, '+16135550712');
+    assert.equal(moved.body.label, 'Cell');
+    assert.equal((await api(`/api/identities/${phone.id}`, { value: 'nope' }, 'PATCH')).status, 400);
+    const other = (await api('/api/contacts', { name: 'Taken Person', roles: ['applicant'], email: 'taken@example.com' })).body;
+    const clash = await api(`/api/identities/${email.id}`, { value: 'TAKEN@example.com' }, 'PATCH');
+    assert.equal(clash.status, 409);
+    assert.equal(clash.body.contact.id, Number(other.id));
+    assert.match(clash.body.error, /already on Taken Person/);
+    assert.equal((await api(`/api/contacts/${c.id}/identities`, { kind: 'email', value: 'taken@example.com' })).status, 409);
+    const merged = await api(`/api/contacts/${c.id}/merge`, { contact_id: other.id });
+    assert.equal(merged.status, 200);
+    assert.deepEqual(merged.body.roles, ['applicant']);
+    assert.ok(merged.body.identities.some((i) => i.value === 'taken@example.com'));
+    assert.equal((await api(`/api/contacts/${other.id}`)).status, 404);
+    assert.equal((await api(`/api/contacts/${c.id}/merge`, { contact_id: c.id })).status, 400);
+    assert.equal((await api(`/api/identities/${email.id}`, null, 'DELETE')).status, 200);
+    const after = (await api(`/api/contacts/${c.id}`)).body;
+    assert.deepEqual(after.identities.map((i) => i.value).sort(), ['+16135550712', 'taken@example.com']);
+    // The old number is free again for someone else.
+    assert.equal((await api('/api/contacts', { name: 'New Owner', roles: [], phone: '613-555-0711' })).status, 201);
+  });
+
+  test('contacts: an email taken off a Launch27 customer stays off; linking a lead to that customer merges them', async () => {
+    const jane = (await api('/api/contacts/from-l27', { customer_id: 77 })).body;
+    const full = (await api(`/api/contacts/${jane.id}`)).body;
+    const email = full.identities.find((i) => i.value === 'jane@example.com');
+    assert.ok(email, 'Launch27 email on the contact');
+    assert.equal((await api(`/api/identities/${email.id}`, null, 'DELETE')).status, 200);
+    await api('/api/contacts/from-l27', { customer_id: 77 }); // refresh from Launch27
+    assert.ok(!(await api(`/api/contacts/${jane.id}`)).body.identities.some((i) => i.value === 'jane@example.com'));
+    // Linking a lead to a customer who already has a contact: one contact, the customer's.
+    const lead = (await api('/api/contacts', { name: 'Jane as a lead', roles: [], email: 'jane.lead@example.com', lead_stage: 'New' })).body;
+    const linked = await api(`/api/contacts/${lead.id}`, { l27_customer_id: 77, roles: ['customer'], lead_stage: 'Booked' }, 'PATCH');
+    assert.equal(linked.status, 200);
+    assert.equal(linked.body.merged_into, Number(jane.id));
+    assert.equal(linked.body.lead_stage, 'Booked');
+    assert.equal((await api(`/api/contacts/${lead.id}`)).status, 404);
+    assert.ok((await api(`/api/contacts/${jane.id}`)).body.identities.some((i) => i.value === 'jane.lead@example.com'));
+    assert.equal((await api('/api/contacts/from-l27', { customer_id: 77 })).body.id, jane.id);
+  });
+
+  test('contacts: deleting one keeps their conversations and a STOP on their number', async () => {
+    const sim = (await api('/api/simulate/inbound', { channel: 'sms', from: '613-555-0721', to: UM.smsOttawa, body: 'Hi there' })).body;
+    await api('/api/simulate/inbound', { channel: 'sms', from: '613-555-0721', to: UM.smsOttawa, body: 'STOP' });
+    const cid = (await api(`/api/conversations/${sim.conversationId}`)).body.contact.id;
+    const del = await api(`/api/contacts/${cid}`, null, 'DELETE');
+    assert.equal(del.status, 200);
+    assert.equal(del.body.conversations, 1);
+    assert.equal((await api(`/api/contacts/${cid}`)).status, 404);
+    const detail = (await api(`/api/conversations/${sim.conversationId}`)).body;
+    assert.equal(detail.contact, null);
+    assert.ok(detail.messages.some((m) => m.meta?.type === 'contact_deleted'));
+    assert.equal((await api(`/api/conversations/${sim.conversationId}/messages`, { body: 'Hello?' })).status, 409, 'still opted out');
+    const back = await api('/api/contacts', { name: 'Back Again', roles: [], phone: '613-555-0721' });
+    assert.equal(back.status, 201);
+    assert.equal(back.body.identities[0].opted_out, true);
+    // "Save as a contact" on the conversation puts it back on a contact.
+    assert.equal((await api(`/api/conversations/${sim.conversationId}`, { contact_id: 999999 }, 'PATCH')).status, 404);
+    assert.equal((await api(`/api/conversations/${sim.conversationId}`, { contact_id: back.body.id }, 'PATCH')).status, 200);
+    assert.equal((await api(`/api/conversations/${sim.conversationId}`)).body.contact.id, back.body.id);
+    assert.equal((await api('/api/contacts/999999', null, 'DELETE')).status, 404);
+    assert.equal((await api('/api/contacts/abc', null, 'DELETE')).status, 404);
+    const audit = (await api(`/api/audit?object_type=contact&object_id=${cid}`)).body;
+    assert.ok(audit.some((a) => a.action === 'contact.deleted' && a.detail.identities[0].value === '+16135550721'));
+  });
+
+  test('contacts: All lists everyone (Launch27 customers too) and searches names, numbers and emails', async () => {
+    const ids = async (q) => (await api(`/api/contact-list?list=all&q=${encodeURIComponent(q)}`)).body.rows.map((r) => Number(r.id));
+    const back = (await api('/api/contacts', { name: 'Back Again', roles: [], phone: '613-555-0721' })).body;
+    assert.ok((await ids('back again')).includes(Number(back.id)));
+    assert.ok((await ids('555-0721')).includes(Number(back.id)));
+    assert.ok((await ids('6135550721')).includes(Number(back.id)));
+    const jane = (await api('/api/contacts/from-l27', { customer_id: 77 })).body;
+    assert.ok((await ids('jane.lead@')).includes(Number(jane.id)));
+    assert.ok(!(await ids('jane.lead@')).includes(Number(back.id)));
+    const all = (await api('/api/contact-list?list=all')).body;
+    assert.ok(all.rows.some((r) => Number(r.id) === Number(jane.id)));
+    assert.ok(all.counts.all >= all.counts.leads + all.counts.applicants);
+  });
+
+  test('contacts: a STOP is undone only by START; an opt-out ticked by hand can be unticked', async () => {
+    await api('/api/simulate/inbound', { channel: 'sms', from: '613-555-0731', to: UM.smsOttawa, body: 'Hello' });
+    const sim = (await api('/api/simulate/inbound', { channel: 'sms', from: '613-555-0731', to: UM.smsOttawa, body: 'STOP' })).body;
+    const cid = (await api(`/api/conversations/${sim.conversationId}`)).body.contact.id;
+    const stopped = (await api(`/api/contacts/${cid}`)).body.identities[0];
+    assert.equal(stopped.opted_out_by, 'stop');
+    const undo = await api(`/api/identities/${stopped.id}`, { opted_out: false }, 'PATCH');
+    assert.equal(undo.status, 409);
+    assert.match(undo.body.error, /texted STOP/);
+    await api('/api/simulate/inbound', { channel: 'sms', from: '613-555-0731', to: UM.smsOttawa, body: 'START' });
+    const started = (await api(`/api/contacts/${cid}`)).body.identities[0];
+    assert.equal(started.opted_out, false);
+    const byHand = (await api(`/api/identities/${started.id}`, { opted_out: true }, 'PATCH')).body;
+    assert.equal(byHand.opted_out_by, 'agent');
+    assert.equal((await api(`/api/identities/${started.id}`, { opted_out: false }, 'PATCH')).status, 200);
+  });
+
+  test('contacts: a number taken off a Launch27 customer stays off, even when it texts in again', async () => {
+    const jane = (await api('/api/contacts/from-l27', { customer_id: 77 })).body;
+    const phone = (await api(`/api/contacts/${jane.id}`)).body.identities.find((i) => i.value === '+16135550122');
+    assert.ok(phone, 'the Launch27 phone is on her contact');
+    assert.equal((await api(`/api/identities/${phone.id}`, null, 'DELETE')).status, 200);
+    // Launch27 still says the number is Jane's; its new owner texts in.
+    const sim = (await api('/api/simulate/inbound', { channel: 'sms', from: '613-555-0122', to: UM.smsOttawa, body: 'Hi, new number here' })).body;
+    const stranger = (await api(`/api/conversations/${sim.conversationId}`)).body.contact;
+    assert.notEqual(stranger.id, jane.id);
+    assert.equal(stranger.l27_customer_id, null);
+    assert.ok(!(await api(`/api/contacts/${jane.id}`)).body.identities.some((i) => i.value === '+16135550122'));
+    // Linking the stranger to Jane (as the call card would) is refused.
+    const link = await api(`/api/contacts/${stranger.id}`, { l27_customer_id: 77, roles: ['customer'] }, 'PATCH');
+    assert.equal(link.status, 409);
+    assert.match(link.body.error, /taken off/);
+    assert.equal((await api(`/api/contacts/${stranger.id}`, { l27_customer_id: 77, l27_team_id: 4760 }, 'PATCH')).status, 400);
+  });
+
+  test('contacts: a typed number goes onto the contact; deleting a customer contact gives the history back when they are opened again', async () => {
+    const jane = (await api('/api/contacts/from-l27', { customer_id: 77 })).body;
+    const conv = await api('/api/conversations', { contact_id: jane.id, channel: 'sms', to: '613-555-0741', body: 'Hi Jane, it is UrbanMop' });
+    assert.equal(conv.status, 201);
+    assert.ok((await api(`/api/contacts/${jane.id}`)).body.identities.some((i) => i.value === '+16135550741'));
+    const other = (await api('/api/contacts', { name: 'Someone Else', roles: [], phone: '613-555-0742' })).body;
+    const clash = await api('/api/conversations', { contact_id: jane.id, channel: 'sms', to: '613-555-0742' });
+    assert.equal(clash.status, 409);
+    assert.equal(clash.body.contact.id, Number(other.id));
+    assert.equal((await api(`/api/contacts/${jane.id}`, null, 'DELETE')).status, 200);
+    assert.equal((await api(`/api/conversations/${conv.body.id}`)).body.contact, null);
+    const again = (await api('/api/contacts/from-l27', { customer_id: 77 })).body;
+    assert.notEqual(again.id, jane.id);
+    assert.equal((await api(`/api/conversations/${conv.body.id}`)).body.contact.id, again.id);
+  });
+
+  test('contacts: a merged-away contact points to the one it went into', async () => {
+    const a = (await api('/api/contacts', { name: 'Keep Me', roles: [], email: 'keep.me@example.com' })).body;
+    const b = (await api('/api/contacts', { name: 'Merge Me', roles: [], email: 'merge.me@example.com' })).body;
+    const c = (await api('/api/contacts', { name: 'Then Me', roles: [], email: 'then.me@example.com' })).body;
+    await api(`/api/contacts/${b.id}/merge`, { contact_id: c.id });
+    await api(`/api/contacts/${a.id}/merge`, { contact_id: b.id });
+    const gone = await api(`/api/contacts/${c.id}`);
+    assert.equal(gone.status, 404);
+    assert.equal(gone.body.merged_into, Number(a.id));
+    assert.equal((await api('/api/contacts/987654')).body.merged_into, undefined);
+  });
+});
+
+
+describe('contacts: one contact per person', () => {
+  let db;
+  before(async () => {
+    db = await openDb();
+    await seed(db);
+  });
+  after(() => db.close());
+  const t0 = new Date('2026-11-02T10:00:00-05:00');
+  const ingest = (input, opts = {}) => db.tx((q) => svc.ingestInbound(q, input, { now: t0, at: t0, ...opts }));
+  const contactOf = async (convId) => Number((await db.query('SELECT contact_id FROM conversations WHERE id = $1', [convId])).rows[0].contact_id);
+
+  test('a new Launch27 lookup takes over the lead that already has their email', async () => {
+    const lead = await db.tx((q) => svc.createContact(q, { name: 'Lee Lead', lead_stage: 'New', identities: [{ kind: 'email', value: 'lee@example.com' }] }));
+    const lookup = { name: 'Lee Customer', roles: ['customer'], l27_customer_id: 9200, identities: [{ kind: 'email', value: 'lee@example.com' }, { kind: 'phone', value: '613-555-0920' }] };
+    const r = await ingest({ channel: 'sms', from: '613-555-0920', to: UM.smsOttawa, body: 'Booked online, question about Friday', at: t0 }, { lookup });
+    assert.equal(await contactOf(r.conversationId), Number(lead.id));
+    const c = (await db.query('SELECT * FROM contacts WHERE id = $1', [lead.id])).rows[0];
+    assert.equal(Number(c.l27_customer_id), 9200);
+    assert.equal(c.name, 'Lee Lead');
+    assert.deepEqual(c.roles, ['customer']);
+  });
+
+  test('opening a customer brings in a contact with no Launch27 link that has their email, unless an agent took it off them', async () => {
+    const x = await db.tx((q) => svc.createContact(q, { name: 'Rae', roles: ['customer'], l27_customer_id: 9300, identities: [{ kind: 'phone', value: '613-555-0930' }] }));
+    const u = await db.tx((q) => svc.createContact(q, { name: 'Rae at work', identities: [{ kind: 'email', value: 'rae@work.example.com' }] }));
+    const info = { identities: [{ kind: 'email', value: 'Rae@Work.example.com' }, { kind: 'email', value: 'rae@home.example.com' }] };
+    const after = await db.tx((q) => svc.refreshFromL27(q, x, info, {}));
+    assert.equal(Number(after.id), Number(x.id));
+    assert.equal((await db.query('SELECT 1 FROM contacts WHERE id = $1', [u.id])).rows.length, 0);
+    const values = (await db.query('SELECT value FROM contact_identities WHERE contact_id = $1 ORDER BY value', [x.id])).rows.map((r) => r.value);
+    assert.deepEqual(values, ['+16135550930', 'rae@home.example.com', 'rae@work.example.com']);
+    // Taken off by an agent: the refresh leaves it off, and another contact keeps it.
+    const home = (await db.query("SELECT id FROM contact_identities WHERE value = 'rae@home.example.com'")).rows[0];
+    await db.tx((q) => svc.removeIdentity(q, { id: null, email: 'x' }, home.id));
+    const v = await db.tx((q) => svc.createContact(q, { name: 'Not Rae', identities: [{ kind: 'email', value: 'rae@home.example.com' }] }));
+    await db.tx((q) => svc.refreshFromL27(q, x, info, {}));
+    assert.equal(Number((await db.query('SELECT contact_id FROM contact_identities WHERE value = $1', ['rae@home.example.com'])).rows[0].contact_id), Number(v.id));
   });
 });

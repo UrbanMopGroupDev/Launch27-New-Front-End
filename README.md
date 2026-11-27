@@ -1,5 +1,7 @@
 # Launch27 New Front End
 
+The repository lives at [UrbanMopGroupDev/Launch27-New-Front-End](https://github.com/UrbanMopGroupDev/Launch27-New-Front-End) (moved from UrbanMopdev in November 2026). Railway's dev, QA and production services build from it: a push to `develop` deploys dev, `staging` deploys QA and `main` deploys production.
+
 A replacement front end for UrbanMop's Launch27 admin portal, so we can add our own
 features on top of Launch27's data. It works in two steps:
 
@@ -14,7 +16,7 @@ browser ── /auth/*, /l27/* ──> server (Express) ── Bearer token ─�
 ```
 
 The server reuses the auth flow from
-[Check-In-Tracker-L27](https://github.com/UrbanMopdev/Check-In-Tracker-L27):
+[Check-In-Tracker-L27](https://github.com/UrbanMopGroupDev/Check-In-Tracker-L27):
 `POST /latest/login` with `{email, password}` returns `{bearer}`, which is sent as
 `Authorization: Bearer …`. Each user signs in with their own Launch27 account, so
 Launch27 still enforces their permissions, and the token stays on the server (the
@@ -112,7 +114,7 @@ inside a conversation.
 
 | Part | What it does |
 | --- | --- |
-| Inbox (`/inbox`) | Three panes: work list (opens on All; Mine and Unassigned tabs; Late, Mentions and "who is this?" when they have something; a queue picker; sort, time range and more filters; rows grouped by day; **New conversation**; **Select** to mark several done), the conversation (**Everything with them**: texts, calls and emails in one timeline, or this thread only; long messages folded; email files downloaded from Gmail), and the customer or cleaner details, which can be folded away (phones show one pane at a time) |
+| Inbox (`/inbox`) | Three panes: work list (opens on All; Mine and Unassigned tabs; Late and Mentions when they have something; a queue picker; sort, time range and more filters; rows grouped by day; **New conversation**; **Select** to mark several done), the conversation (**Everything with them**: texts, calls and emails in one timeline, or this thread only; long messages folded; email files downloaded from Gmail), and the customer or cleaner details, which can be folded away (phones show one pane at a time) |
 | Customer 360 | Health strip (frequency, lifetime spend, cleans, cancellations, last rating, risk flag), next or pinned booking with live en-route/check-in status and lateness, booking tabs, ratings and cleaners they liked or didn't, card on file, home notes, all conversations |
 | Cleaner 360 | Today's bookings with time tracking, availability, rating and happy %, late check-ins in 30 days, unhappy comments, quick texts (ask for ETA, confirm arrival) |
 | Booking actions | From the pinned booking: edit/reschedule (booking form), cancel, restore, new booking, text the assigned cleaner. Each change is logged on the conversation |
@@ -124,6 +126,7 @@ inside a conversation.
 | Workforce (Support settings) | Kustomer-style agent statuses (Available, Busy, Break, Lunch, Meeting, Training, Wrap-up, Offline: add your own, with time limits and keep-or-return-work), teams that work queues, per-agent and default capacity per channel, per-queue routing mode (least busy / round robin / manual), default reply target, business hours, overflow and priority, plus workspace routing policies (offline returns work, idle auto-offline, assign on reply, reopen to previous owner, required disposition, long-break alerts) |
 | Phone | RingCentral Embeddable widget (loads when `RINGCENTRAL_CLIENT_ID` is set): calls ring in the browser, the caller's profile pops, finished calls are logged; click-to-call from a profile |
 | Search | Ctrl+K: people by name, phone or email; message text; jump to a booking number |
+| Contacts (`/contacts`) | One contact per person: a phone number or email is on one contact only, and a Launch27 customer or cleaner has one contact. **All** (with search by name, number, email or notes), Leads, Job applicants, Vendors and others, Number only, Spam and wrong numbers. **Add contact** (a number or email already on a contact opens that contact instead of making a second one) and **Delete** on the list and on each contact's page. A contact's page edits everything: name, notes, each phone number and email (change, label, remove, opt out of texts; a number that texted STOP stays opted out until it texts START), roles and lead fields. A number or email that is on another contact can't be added twice; the page offers to merge the two instead. Deleting keeps the person's conversations (under their number or email) and a STOP on their number, and a Launch27 customer's or cleaner's conversations go back onto their contact when they are opened again; it is audited with what was deleted. A number or email removed from a Launch27 contact isn't added back from Launch27, and a message from it starts a separate contact (e.g. a number with a new owner) |
 
 **Email is read and sent.** In production new mail in each Gmail mailbox becomes a conversation
 within a minute, matched to the Launch27 customer; agents reply by email in the customer's
@@ -132,7 +135,7 @@ Sending needs the `gmail.send` scope allowed in Google Workspace. Dev and QA run
 channel (recorded, never sent, no mailbox read). Setup and how it works: [docs/email.md](docs/email.md); status in
 Support settings → Channels. **SMS runs on Twilio** (production only; RingCentral is used for calls, not texts): customers and cleaners text the business numbers,
 the texts arrive in the inbox matched to the Launch27 customer or cleaner and routed by the
-routing rules, and agents reply from the inbox. Unknown or shared numbers go to *Who is this?*.
+routing rules, and agents reply from the inbox. A number or address nobody knows becomes a new contact.
 Dev and QA never send texts (sandbox); the Channel simulator (`/inbox-simulator`) runs the same
 matching, threading, routing and SLA code. Setup: [docs/sms.md](docs/sms.md).
 
