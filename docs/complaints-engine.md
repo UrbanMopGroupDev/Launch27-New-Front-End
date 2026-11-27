@@ -154,6 +154,22 @@ out, they go to the Office Manager).
 Agents still decide; Derek can step in on any complaint. Drafted replies come later, once the
 rankings have earned trust (Derek's call, Nov 27).
 
+### Customer success brain, step 3: threats to leave or to post a review
+
+Derek, Nov 27: a refund that loses the client anyway may still have been right if it stopped a
+bad review; the engine has to look at it end to end. First part, from data we already hold:
+
+- **Threat level** per case (`threatOf` in `rank.js`): threatened a public review (the
+  complaint's tone), threatened to leave (tone, or said so in the mined conversation), or none.
+- **Rankings.** A complaint whose notes carry a threat is ranked first on past clients who made
+  the same threat (same threat and complaint, then same threat), before the usual groups. The
+  tracker card says so.
+- **Playbook.** "When clients threaten to leave or post a review": every response's saved /
+  lost and cost under each threat level, next to no threat.
+
+Not yet: Google reviews aren't connected (needs Google Business Profile access), so we can't
+see which threats became reviews; and options aren't weighed by the client's value.
+
 ### Still to come
 
 2. Cost lines per case (actual vs estimated) and the escalation audit.

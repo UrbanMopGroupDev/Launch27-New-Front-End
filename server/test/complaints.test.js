@@ -9,7 +9,7 @@ import { outcomeAt, journeyAt, recleanCost, cleanerLastWorkedIndex, regularClean
 import { normalizeSettings, canApprove, rungForRefund, budgetStatus, DEFAULT_SETTINGS } from '../src/complaints/settings.js';
 import { buildPlaybook } from '../src/complaints/playbook.js';
 import { formatThread, offerToResolution, normalizeSolution } from '../src/complaints/solutions.js';
-import { caseRows, rankResponses } from '../src/complaints/rank.js';
+import { caseRows, rankResponses, threatOf } from '../src/complaints/rank.js';
 import { mapStatus, toCase, discover, createKustomerClient, findListing } from '../src/complaints/sources/kustomer.js';
 import { createComplaints, buildReviewStats } from '../src/complaints/service.js';
 import { createReports } from '../src/reports/service.js';
@@ -1079,5 +1079,52 @@ describe('complaints: ranked responses for a new complaint', () => {
     assert.ok(r.groups.some((g) => g.key === 'category'));
     assert.ok(r.options.every((o, i) => o.rank === i + 1 && o.cases > 0));
     await db.close();
+  });
+});
+
+describe('complaints: threats to leave or to post a review', () => {
+  test('a review threat outranks a threat to leave; saying so in the conversation counts', () => {
+    assert.deepEqual([threatOf('threat_review', true), threatOf('threat_leave'), threatOf('angry', true), threatOf('angry')], ['review', 'leave', 'leave', 'none']);
+    const rows = caseRows({ cases: [{ id: 1, category: 'quality_missed', tone: 'mild' }, { id: 2, category: 'quality_missed', tone: 'threat_review' }], solutions: [{ case_id: 1, read_by: 'claude', final_kind: 'reclean', said_will_leave: true, offers: [] }] });
+    assert.deepEqual(rows.map((r) => r.threat), ['leave', 'review']);
+  });
+
+  test('a threatening client is ranked first on past clients who made the same threat', () => {
+    let id = 0;
+    const mk = (response, n, k, threat) => Array.from({ length: n }, (_, i) => ({ id: ++id, category: 'quality_missed', cause: null, threat, one_time: false, response, from_conversation: true, kept: i < k ? 1 : 0, happy: null, cost: 0, offered: [], opened_at: null }));
+    // No threat: a reclean keeps nearly everyone. Under a review threat it doesn't; a refund does.
+    const rows = [...mk('reclean', 30, 27, 'none'), ...mk('partial_refund', 30, 21, 'none'), ...mk('reclean', 10, 3, 'review'), ...mk('partial_refund', 10, 8, 'review')];
+    const calm = rankResponses(rows, { category: 'quality_missed', threat: 'none' });
+    assert.equal(calm.options[0].response, 'reclean');
+    assert.ok(!calm.groups.some((g) => g.key.startsWith('threat')));
+    const review = rankResponses(rows, { category: 'quality_missed', threat: 'review' });
+    assert.deepEqual([review.options[0].response, review.options[0].group, review.options[0].kept], ['partial_refund', 'threat_category', 0.8]);
+    assert.equal(review.threat, 'review');
+    // Too few past threats of this kind: falls back to everyone, and says which group it used.
+    const leave = rankResponses(rows, { category: 'quality_missed', threat: 'leave' });
+    assert.deepEqual([leave.options[0].response, leave.options[0].group], ['reclean', 'category']);
+  });
+
+  test('the playbook splits what each response did by threat level', () => {
+    const cases = [];
+    const outcomes = [];
+    const resolutions = [];
+    const add = (tone, rung, outcome) => {
+      const id = cases.length + 1;
+      cases.push({ id, source: 'kustomer', opened_at: '2026-06-10T12:00:00Z', category: 'quality_missed', tone, l27_customer_id: 800 + id, classified_by: 'claude' });
+      if (rung) resolutions.push({ case_id: id, rung, action: rung === 'L3' ? 'reclean_full' : 'refund' });
+      outcomes.push({ case_id: id, day: 60, outcome });
+    };
+    add('mild', 'L3', 'saved');
+    add('threat_review', 'L3', 'lost');
+    add('threat_review', 'L5', 'saved');
+    add('angry', null, 'saved');
+    const solutions = [{ case_id: 4, read_by: 'claude', final_kind: 'same_cleaner', said_will_leave: true, offers: [] }];
+    const pb = buildPlaybook({ cases, resolutions, costs: [], outcomes, solutions, visits: [], from: '2026-05-01', to: '2026-10-31', settings: normalizeSettings({}), today: '2026-11-27' });
+    const by = Object.fromEntries(pb.threats.map((t) => [t.key, t]));
+    assert.deepEqual([by.none.n, by.leave.n, by.review.n], [1, 1, 2]);
+    assert.deepEqual(by.review.by_response.map((r) => [r.response, r.saved_n, r.lost_n]).sort(), [['partial_refund', 1, 0], ['reclean', 0, 1]]);
+    assert.equal(by.leave.by_response[0].response, 'same_cleaner', 'the final answer from the conversation');
+    assert.deepEqual(by.review.ids, [2, 3]);
   });
 });

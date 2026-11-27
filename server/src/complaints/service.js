@@ -783,7 +783,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
   let rankCache = null;
   async function rankingRows() {
     if (rankCache && rankCache.at > now() - 3_600_000) return rankCache.rows;
-    const cases = await many(db, `SELECT c.id, c.opened_at, c.category, c.cause, c.l27_booking_id, j.frequency
+    const cases = await many(db, `SELECT c.id, c.opened_at, c.category, c.cause, c.tone, c.l27_booking_id, j.frequency
       FROM complaint_cases c LEFT JOIN complaint_journeys j ON j.case_id = c.id
       WHERE c.merged_into IS NULL AND c.excluded_at IS NULL AND c.hard_route IS NULL`);
     const byId = await visitIndex();
@@ -792,14 +792,14 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       many(db, 'SELECT r.case_id, r.rung, r.action FROM complaint_resolutions r JOIN complaint_cases c ON c.id = r.case_id WHERE c.merged_into IS NULL AND c.excluded_at IS NULL'),
       many(db, 'SELECT k.case_id, k.amount FROM complaint_costs k JOIN complaint_cases c ON c.id = k.case_id WHERE c.merged_into IS NULL AND c.excluded_at IS NULL'),
       many(db, 'SELECT case_id, day, outcome FROM complaint_outcomes'),
-      many(db, 'SELECT case_id, read_by, offers, final_kind, client_end FROM complaint_solutions'),
+      many(db, 'SELECT case_id, read_by, offers, final_kind, client_end, said_will_leave FROM complaint_solutions'),
     ]);
     const rows = caseRows({ cases, resolutions, costs, outcomes, solutions });
     rankCache = { at: now(), rows };
     return rows;
   }
-  async function rankFor({ category = null, cause = null, one_time = false } = {}) {
-    return rankResponses(await rankingRows(), { category, cause, one_time }, { now: now() });
+  async function rankFor({ category = null, cause = null, one_time = false, threat = 'none' } = {}) {
+    return rankResponses(await rankingRows(), { category, cause, one_time, threat }, { now: now() });
   }
 
   async function status() {
