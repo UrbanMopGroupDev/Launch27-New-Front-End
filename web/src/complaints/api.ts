@@ -68,6 +68,25 @@ export interface Playbook {
     by_category: { key: string; label: string; n: number; ids: number[] }[];
   })[];
   cause_groups: (OutcomeStats & { key: string; label: string; share: number | null })[];
+  solutions: {
+    enabled: boolean;
+    read: number; read_ids: number[];
+    no_thread: number; no_thread_ids: number[];
+    not_yet: number;
+    offers: {
+      key: string; label: string;
+      offered: number; offered_ids: number[];
+      accepted: number; accepted_ids: number[];
+      pushed_back: number; pushed_back_ids: number[];
+      accept_rate: number | null;
+      asked_for: number; asked_for_ids: number[];
+      ended_happy: number | null; ended_happy_n: number; ended_heard: number; ended_happy_ids: number[];
+      final: OutcomeStats;
+    }[];
+    endings: Record<'satisfied' | 'neutral' | 'unhappy' | 'unknown', number[]>;
+    said_will_leave_ids: number[];
+    pushed_back_first_ids: number[];
+  };
   ladder: (Rung & OutcomeStats)[];
   reclean_vs_refund: { key: string; label: string; reclean: OutcomeStats; refund: OutcomeStats; neither: OutcomeStats; verdict: string }[];
   reclean_vs_refund_total: { reclean: OutcomeStats; refund: OutcomeStats; neither: OutcomeStats };
@@ -141,7 +160,29 @@ export interface CaseDetail extends CaseRow {
   costs: { kind: string; amount: string; source: string; estimated: boolean }[];
   outcomes: { day: number; outcome: Outcome; still_booking: boolean | null; next_booking_on: string | null; last_booking_on: string | null; repeat_case_id: number | null }[];
   also_seen_in: { id: number; source: string; opened_at: string }[];
+  solution: null | {
+    read_by: 'claude' | 'none';
+    thread_messages: number;
+    asked_for: string | null;
+    offers: { kind: string; amount: number | null; pct: number | null; detail: string; client_response: string }[];
+    final_kind: string | null;
+    final_detail: string | null;
+    client_end: string | null;
+    said_will_leave: boolean | null;
+    said_will_stay: boolean | null;
+    handling: string | null;
+    mined_at: string;
+  };
 }
+// What we offered on a complaint (solution mining), in plain words.
+export const OFFER_LABEL: Record<string, string> = {
+  apology: 'Apology only', credit: 'Credit on a future clean', discount_next: 'Discount on the next clean', reclean: 'Reclean',
+  partial_refund: 'Partial refund', full_refund: 'Full refund', same_cleaner: 'Their regular cleaner back', different_cleaner: 'A different cleaner',
+  extra_time: 'Longer visit / more cleaners', free_add_on: 'Free add-on', damage_reimbursement: 'Damage reimbursement', manager_call: 'Call from a manager',
+  other: 'Something else', nothing_specific: 'Nothing specific',
+};
+export const RESPONSE_LABEL: Record<string, string> = { accepted: 'took it', declined: 'turned it down', countered: 'asked for something else', no_reply: 'no reply', unclear: 'unclear' };
+export const ENDING_LABEL: Record<string, string> = { satisfied: 'Happy', neutral: 'Neutral', unhappy: 'Still unhappy', unknown: 'Never wrote back' };
 
 export interface Settings {
   approval_preset: 'today' | 'target';
@@ -267,4 +308,4 @@ export const RUNG_NAME: Record<string, string> = {
 };
 export const whatWeDid = (rungs: string | null) => (rungs ? [...new Set(rungs.split(', ').map((r) => RUNG_NAME[r] || r))].join(', ') : 'Apology only');
 export const TONE_LABEL: Record<string, string> = { mild: 'Mild', frustrated: 'Frustrated', angry: 'Angry', threat_leave: 'Threatens to leave', threat_review: 'Threatens a review' };
-export const SOURCE_LABEL: Record<string, string> = { kustomer: 'Kustomer', gmail: 'info@ email', slack: 'Slack refund post', launch27_rating: 'Launch27 rating', ops_inbox: 'Ops inbox', manual: 'Manual' };
+export const SOURCE_LABEL: Record<string, string> = { kustomer: 'Kustomer', gmail: 'info@ email', slack: 'Slack refund post', launch27_rating: 'Launch27 rating', ops_inbox: 'Ops inbox', manual: 'Manual', conversation: 'from the conversation' };

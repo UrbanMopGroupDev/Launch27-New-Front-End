@@ -13,7 +13,8 @@ import { indexVisits } from '../reports/compute.js';
 import { frequencyKind } from '../schedule/rules.js';
 import { normalizeEmail, normalizePhone } from '../inbox/normalize.js';
 import { parseGmailMessage } from '../inbox/email/mime.js';
-import { classifyRules, mergeClassification, amountsIn, causeFacts, CAUSE_KEYS } from './taxonomy.js';
+import { classifyRules, mergeClassification, amountsIn, causeFacts, categoryLabel, CAUSE_KEYS } from './taxonomy.js';
+import { formatThread, normalizeSolution, offerToResolution } from './solutions.js';
 import { redact } from './redact.js';
 import { journeyAt, outcomeAt, oneTimeOutcomeAt, cleanerStatsIndex, cleanerLastWorkedIndex, recleanCost, unitEconomics } from './journey.js';
 import { normalizeSettings, rungForRefund } from './settings.js';
@@ -30,6 +31,7 @@ const RECLEAN_RE = /\b(re-?clean|return (clean|visit)|come back|send (someone|a 
 const CREDIT_RE = /\$\s?(\d{1,3})(?:\.\d{2})?\s*(?:off|credit|discount)\b|\bcredit(?:ed)?\s*(?:of\s*)?\$\s?(\d{1,3})/i;
 
 const CLASSIFY_CONCURRENCY = 6;
+const SOLUTIONS_PER_RUN = 300;
 // Run fn over items with at most n in flight.
 async function pool(items, n, fn) {
   let i = 0;
@@ -46,7 +48,7 @@ const suggestBrand = (name) => {
   return null;
 };
 
-export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail = null, classifier = null, l27 = null, syncBearer = null, log = { info() {}, warn() {}, error() {} }, now = () => Date.now() }) {
+export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail = null, classifier = null, solutionReader = null, l27 = null, syncBearer = null, log = { info() {}, warn() {}, error() {} }, now = () => Date.now() }) {
   let running = null;
 
   async function getSettings() {
@@ -164,6 +166,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       else note('warn', 'Slack refund history skipped: SLACK_BOT_TOKEN is not set');
 
       await enrich(refreshFrom && refreshFrom < from ? refreshFrom : from, to, ctx, settings, note);
+      if (solutionReader) await guarded('Solutions', () => mineSolutions({ note }));
       // 'partial': it finished, but a source failed (shown on the page with the reason).
       const status = runLog.some((l) => l.level === 'error') ? 'partial' : 'done';
       await db.query('UPDATE complaint_runs SET finished_at = now(), status = $3, log = $2::jsonb WHERE id = $1', [runRow.id, json(runLog), status]);
@@ -674,6 +677,105 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     return r.rows.length;
   }
 
+  // ---------- what we offered, and how the client took it ----------
+  // Every run reads up to SOLUTIONS_PER_RUN cases' conversations: cases never read first,
+  // newest first, so the daily update works back through the whole history on its own; then
+  // recent cases (45 days) whose thread has grown since it was read.
+  async function mineSolutions({ limit = SOLUTIONS_PER_RUN, note = () => {} } = {}) {
+    if (!solutionReader) return { read: 0, no_thread: 0 };
+    const staffNames = (await many(db, 'SELECT name FROM users WHERE name IS NOT NULL')).map((r) => r.name);
+    const cases = await many(
+      db,
+      `SELECT c.id, c.opened_at, c.customer_name, c.customer_email, c.customer_phone, c.l27_customer_id, c.summary, c.category, s.thread_last_at, (s.case_id IS NOT NULL) AS seen
+         FROM complaint_cases c LEFT JOIN complaint_solutions s ON s.case_id = c.id
+        WHERE c.merged_into IS NULL AND c.excluded_at IS NULL
+          AND (s.case_id IS NULL OR (c.opened_at > $2::timestamptz - interval '45 days' AND s.mined_at < $2::timestamptz - interval '20 hours'))
+        ORDER BY (s.case_id IS NULL) DESC, c.opened_at DESC
+        LIMIT $1`,
+      [limit, new Date(now()).toISOString()],
+    );
+    let read = 0;
+    let noThread = 0;
+    let unchanged = 0;
+    await pool(cases, CLASSIFY_CONCURRENCY, async (c) => {
+      const { msgs, names: contactNames } = await threadFor(c);
+      const lastAt = msgs.length ? msgs[msgs.length - 1].created_at : null;
+      if (c.seen && (!lastAt || (c.thread_last_at && new Date(lastAt) <= new Date(c.thread_last_at)))) {
+        unchanged++;
+        await db.query('UPDATE complaint_solutions SET mined_at = now() WHERE case_id = $1', [c.id]);
+        return;
+      }
+      if (!msgs.length) {
+        noThread++;
+        await db.query(
+          `INSERT INTO complaint_solutions (case_id, read_by, thread_messages, mined_at) VALUES ($1, 'none', 0, now())
+           ON CONFLICT (case_id) DO UPDATE SET mined_at = now()`,
+          [c.id],
+        );
+        return;
+      }
+      // Every name we hold for the client (the case's and their contacts'), and our staff's.
+      const names = [c.customer_name, ...contactNames, ...staffNames];
+      // Each message is redacted on its own, before the CLIENT / US / NOTE labels go on (a client
+      // whose name is "Client" or "Note" must not blank out the labels).
+      const thread = formatThread(msgs.map((m) => ({ ...m, body: redact(m.body, { names }) })));
+      const complaint = redact(`${categoryLabel(c.category)}${c.summary ? `: ${c.summary}` : ''}`, { names });
+      const r = normalizeSolution(await solutionReader(thread, { complaint }));
+      if (!r) return; // Claude unavailable: tried again next run
+      read++;
+      const convIds = [...new Set(msgs.map((m) => Number(m.conversation_id)))];
+      await db.query(
+        `INSERT INTO complaint_solutions (case_id, read_by, thread_messages, thread_last_at, conversation_ids, asked_for, offers, final_kind, final_detail, client_end, said_will_leave, said_will_stay, handling, mined_at)
+         VALUES ($1, 'claude', $2, $3, $4::jsonb, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, now())
+         ON CONFLICT (case_id) DO UPDATE SET read_by = 'claude', thread_messages = EXCLUDED.thread_messages, thread_last_at = EXCLUDED.thread_last_at,
+           conversation_ids = EXCLUDED.conversation_ids, asked_for = EXCLUDED.asked_for, offers = EXCLUDED.offers, final_kind = EXCLUDED.final_kind,
+           final_detail = EXCLUDED.final_detail, client_end = EXCLUDED.client_end, said_will_leave = EXCLUDED.said_will_leave,
+           said_will_stay = EXCLUDED.said_will_stay, handling = EXCLUDED.handling, mined_at = now()`,
+        [c.id, msgs.length, lastAt, json(convIds), r.asked_for, json(r.offers), r.final_kind, r.final_detail, r.client_end, r.said_will_leave, r.said_will_stay, r.handling],
+      );
+      // What the client took, and the final answer, become "what we did" on the case
+      // (alongside refunds from Launch27 and Slack and $0 recleans, which stay the record of money moved).
+      await db.query("DELETE FROM complaint_resolutions WHERE case_id = $1 AND source = 'conversation'", [c.id]);
+      const taken = r.offers.filter((o) => o.client_response === 'accepted' || o.kind === r.final_kind);
+      const seenKinds = new Set();
+      for (const [i, o] of taken.entries()) {
+        const res = offerToResolution(o);
+        if (!res || seenKinds.has(o.kind)) continue;
+        seenKinds.add(o.kind);
+        await db.query(
+          `INSERT INTO complaint_resolutions (case_id, step, rung, action, pct, amount, accepted, source, source_id)
+           VALUES ($1, 4, $2, $3, $4, $5, $6, 'conversation', $7) ON CONFLICT (source, source_id) DO NOTHING`,
+          [c.id, res.rung, res.action, res.pct, res.amount, o.client_response === 'accepted' ? 'yes' : 'unknown', `conversation:case:${c.id}:${i}`],
+        );
+      }
+    });
+    note('info', `Solutions: read the conversations of ${read} case${read === 1 ? '' : 's'}${noThread ? `, ${noThread} with no conversation on file` : ''}${unchanged ? `, ${unchanged} unchanged` : ''}`);
+    return { read, no_thread: noThread, unchanged };
+  }
+
+  // The client's messages, our replies and internal notes from 3 days before the complaint to
+  // 45 days after, across every conversation of the contacts that match them.
+  async function threadFor(c) {
+    const contacts = await many(
+      db,
+      `SELECT k.id, k.name FROM contacts k WHERE k.id IN (
+         SELECT contact_id FROM contact_identities WHERE (kind = 'email' AND value = $1) OR (kind = 'phone' AND value = $2)
+         UNION SELECT id FROM contacts WHERE $3::bigint IS NOT NULL AND l27_customer_id = $3)`,
+      [c.customer_email || '', c.customer_phone || '', c.l27_customer_id || null],
+    );
+    if (!contacts.length) return { msgs: [], names: [] };
+    const msgs = await many(
+      db,
+      `SELECT m.conversation_id, m.kind, m.direction, m.body, m.created_at, v.channel
+         FROM messages m JOIN conversations v ON v.id = m.conversation_id
+        WHERE v.contact_id = ANY($1::bigint[]) AND m.kind IN ('message', 'note') AND coalesce(btrim(m.body), '') <> ''
+          AND m.created_at >= $2::timestamptz - interval '3 days' AND m.created_at <= $2::timestamptz + interval '45 days'
+        ORDER BY m.created_at LIMIT 120`,
+      [contacts.map((x) => Number(x.id)), new Date(c.opened_at).toISOString()],
+    );
+    return { msgs, names: contacts.map((x) => x.name).filter(Boolean) };
+  }
+
   async function status() {
     const last = await one(db, 'SELECT id, started_at, finished_at, status, window_from, window_to, log FROM complaint_runs ORDER BY id DESC LIMIT 1');
     // Which periods have been mined (finished runs), so the page can say what a date range covers.
@@ -743,8 +845,9 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       many(db, 'SELECT * FROM complaint_outcomes WHERE case_id = $1 ORDER BY day', [id]),
       many(db, 'SELECT id, source, opened_at FROM complaint_cases WHERE merged_into = $1', [id]),
     ]);
+    const solution = await one(db, 'SELECT read_by, thread_messages, asked_for, offers, final_kind, final_detail, client_end, said_will_leave, said_will_stay, handling, mined_at FROM complaint_solutions WHERE case_id = $1', [id]);
     const byId = await visitIndex();
-    return { ...c, ...visitInfo(byId.get(Number(c.l27_booking_id)), journey?.frequency), journey, resolutions, costs, outcomes, also_seen_in: dupes };
+    return { ...c, ...visitInfo(byId.get(Number(c.l27_booking_id)), journey?.frequency), journey, resolutions, costs, outcomes, also_seen_in: dupes, solution };
   }
 
   async function setCategory(id, { category, hard_route }, userId) {
@@ -758,13 +861,14 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       FROM complaint_cases c LEFT JOIN complaint_journeys j ON j.case_id = c.id
       WHERE c.merged_into IS NULL AND c.excluded_at IS NULL AND c.opened_at >= $1 AND c.opened_at < $2::date + 1`, [from, to]);
     const ids = cases.map((c) => c.id);
-    const [resolutions, costs, outcomes] = ids.length
+    const [resolutions, costs, outcomes, solutions] = ids.length
       ? await Promise.all([
           many(db, 'SELECT case_id, rung, action, pct, amount, decided_by, approved_by FROM complaint_resolutions WHERE case_id = ANY($1::bigint[])', [ids]),
           many(db, 'SELECT case_id, kind, amount, estimated FROM complaint_costs WHERE case_id = ANY($1::bigint[])', [ids]),
           many(db, 'SELECT case_id, day, outcome FROM complaint_outcomes WHERE case_id = ANY($1::bigint[])', [ids]),
+          many(db, 'SELECT case_id, read_by, asked_for, offers, final_kind, client_end, said_will_leave, said_will_stay FROM complaint_solutions WHERE case_id = ANY($1::bigint[])', [ids]),
         ])
-      : [[], [], []];
+      : [[], [], [], []];
     let visits = [];
     try {
       const ctx = await loadContext(() => {});
@@ -774,7 +878,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     }
     const byId = await visitIndex();
     for (const c of cases) c.one_time = visitInfo(byId.get(Number(c.l27_booking_id)), c.frequency).client_type === 'one_time';
-    return buildPlaybook({ cases, resolutions, costs, outcomes, visits, from, to, settings, today: isoDay(now()) });
+    return buildPlaybook({ cases, resolutions, costs, outcomes, solutions, visits, from, to, settings, today: isoDay(now()), mining: !!solutionReader });
   }
 
   // Clients view: who complains repeatedly, and who looks at risk of leaving right now.
@@ -861,7 +965,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     return buildReviewStats(rows, waiting);
   }
 
-  return { getSettings, saveSettings, kustomerDiscover, start, run, status, markInterrupted, maybeRun, listCases, getCase, setCategory, playbook, clients, sources, reviewQueue, reviewCase, reviewStats };
+  return { mineSolutions, getSettings, saveSettings, kustomerDiscover, start, run, status, markInterrupted, maybeRun, listCases, getCase, setCategory, playbook, clients, sources, reviewQueue, reviewCase, reviewStats };
 }
 
 // Measured accuracy from hand checks: of the cases the engine put in a category, how many a
