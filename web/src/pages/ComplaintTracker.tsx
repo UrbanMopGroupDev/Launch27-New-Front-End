@@ -8,7 +8,7 @@ import { fmtDateTime } from '../format';
 import { ago, useInboxMe } from '../inbox/util';
 import { inbox } from '../inbox/api';
 import { useActiveTeams } from '../hooks';
-import { tracker, type ComplaintPatch, type ComplaintRecord, type Guidance, type TrackerField, type TrackerMeta } from '../tracker/api';
+import { tracker, type ComplaintPatch, type ComplaintRecord, type Guidance, type Ranked, type TrackerField, type TrackerMeta } from '../tracker/api';
 
 const useTrackerMeta = () => useQuery({ queryKey: ['tracker', 'meta'], queryFn: tracker.meta, staleTime: 5 * 60_000 });
 const day = (v: unknown) => (v ? String(v).slice(0, 10) : '—');
@@ -376,6 +376,7 @@ function WorkedBefore({ id, record }: { id: number; record: ComplaintRecord }) {
         <Link className="small" to="/complaints">Open the playbook</Link>
       </div>
       {d.escalation && <div className="ct-worked-alert small">{d.escalation}</div>}
+      {d.ranked && d.ranked.options.length > 0 ? <RankedOptions r={d.ranked} d={d} /> : (<>
       {d.cause_label && (
         <div className="small ct-worked-note">
           Likely why (from the notes): <b>{d.cause_label}</b>.{' '}
@@ -413,7 +414,45 @@ function WorkedBefore({ id, record }: { id: number; record: ComplaintRecord }) {
           )}
         </>
       )}
+      </>)}
     </section>
+  );
+}
+
+// The agent's options, best first: what kept similar clients, how happy they were at the end,
+// how often clients took it when offered, and what it cost, with how sure we are.
+const GROUP_WORD: Record<string, string> = { cause_category: 'same root cause and complaint', cause: 'same root cause', category: 'same kind of complaint', all: 'all complaints' };
+function RankedOptions({ r, d }: { r: Ranked; d: Guidance }) {
+  const used = r.groups.find((g) => g.key === r.options[0].group);
+  return (
+    <>
+      <div className="small ct-worked-note">
+        {d.cause_label ? <>Likely why (from the notes): <b>{d.cause_label}</b>. </> : null}
+        <span className="muted">Ranked by how many similar {d.one_time ? 'one-time clients booked again' : 'clients were still booking 60 days later'}, from {used ? `${used.cases} past complaints (${GROUP_WORD[used.key]})` : 'past complaints'}. Each option is measured on the closest group with enough known outcomes.</span>
+      </div>
+      <div className="table-scroll">
+      <table className="ct-table ct-worked-table ct-ranked">
+        <thead><tr><th>#</th><th>Response</th><th>{d.one_time ? 'Booked again' : 'Clients kept'}</th><th>Happy at the end</th><th>Taken when offered</th><th>Avg cost</th><th>Confidence</th></tr></thead>
+        <tbody>
+          {r.options.map((o) => (
+            <tr key={o.response} className={o.rank === 1 ? 'ct-row-best' : undefined}>
+              <td>{o.rank}</td>
+              <td>
+                {o.label}{o.best_value && <span className="pill ct-value" title="Keeps clients almost as well as the top option, for less">best value</span>}
+                <div className="small muted">{o.cases} {o.cases === 1 ? 'case' : 'cases'} · {GROUP_WORD[o.group]}{o.first_turned_down != null && o.first_turned_down >= 0.5 ? ` · often turned down as a first offer (${pctOf(o.first_turned_down)})` : ''}</div>
+              </td>
+              <td>{o.kept == null ? '—' : <>{pctOf(o.kept)} <span className="small muted">{o.kept_n} of {o.decided}</span></>}</td>
+              <td>{o.happy == null ? '—' : <>{pctOf(o.happy)} <span className="small muted">{o.happy_n} of {o.heard}</span></>}</td>
+              <td>{o.taken_when_offered == null ? '—' : <>{pctOf(o.taken_when_offered)} <span className="small muted">of {o.offered_answered}</span></>}</td>
+              <td>{money(o.avg_cost)}</td>
+              <td><span className={`ct-grade ${o.grade.toLowerCase()}`}>{o.grade}</span></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      </div>
+      {d.one_time && <div className="small muted ct-worked-note">One-time client: ranked on whether similar one-time clients booked again within 120 days.</div>}
+    </>
   );
 }
 

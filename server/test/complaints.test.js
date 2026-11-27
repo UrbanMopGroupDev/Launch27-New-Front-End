@@ -9,6 +9,7 @@ import { outcomeAt, journeyAt, recleanCost, cleanerLastWorkedIndex, regularClean
 import { normalizeSettings, canApprove, rungForRefund, budgetStatus, DEFAULT_SETTINGS } from '../src/complaints/settings.js';
 import { buildPlaybook } from '../src/complaints/playbook.js';
 import { formatThread, offerToResolution, normalizeSolution } from '../src/complaints/solutions.js';
+import { caseRows, rankResponses } from '../src/complaints/rank.js';
 import { mapStatus, toCase, discover, createKustomerClient, findListing } from '../src/complaints/sources/kustomer.js';
 import { createComplaints, buildReviewStats } from '../src/complaints/service.js';
 import { createReports } from '../src/reports/service.js';
@@ -990,6 +991,93 @@ describe('complaints: solution mining (what we offered, and how the client took 
     assert.ok(pb.solutions.offers.find((o) => o.key === 'reclean').final.ids.includes(target.id));
     st = await db.query("SELECT count(*)::int AS n FROM complaint_resolutions WHERE case_id = $1 AND source = 'conversation'", [target.id]);
     assert.equal(st.rows[0].n, 1, 're-reading replaces, never doubles');
+    await db.close();
+  });
+});
+
+describe('complaints: ranked responses for a new complaint', () => {
+  // n cases of a response, k of them kept, in a category/cause, optional cost / happiness / offers.
+  let id = 0;
+  const mk = (response, n, k, { category = 'quality_missed', cause = 'regular_left', cost = 0, happy = null, one_time = false, offered = [] } = {}) =>
+    Array.from({ length: n }, (_, i) => ({ id: ++id, category, cause, one_time, response, from_conversation: true, kept: i < k ? 1 : 0, happy, cost, offered, opened_at: null }));
+
+  test('past cases: the final answer from the conversation, else the ladder; kept from the outcome', () => {
+    const rows = caseRows({
+      cases: [{ id: 1, category: 'quality_missed' }, { id: 2, category: 'quality_missed' }, { id: 3, category: 'punctuality', one_time: true }, { id: 4, category: 'other' }],
+      resolutions: [{ case_id: 1, rung: 'L3' }, { case_id: 2, rung: 'L2' }, { case_id: 2, rung: 'L5' }],
+      costs: [{ case_id: 2, amount: '40' }, { case_id: 2, amount: '10' }],
+      outcomes: [{ case_id: 1, day: 60, outcome: 'saved' }, { case_id: 2, day: 60, outcome: 'partial_save' }, { case_id: 3, day: 120, outcome: 'not_rebooked' }],
+      solutions: [{ case_id: 1, read_by: 'claude', final_kind: 'same_cleaner', client_end: 'satisfied', offers: [{ kind: 'credit', client_response: 'declined' }] }],
+    });
+    assert.deepEqual(rows.map((r) => r.response), ['same_cleaner', 'partial_refund', 'apology', 'apology']);
+    assert.deepEqual(rows.map((r) => r.kept), [1, 0.5, 0, null]);
+    assert.equal(rows[1].cost, 50);
+    assert.equal(rows[0].happy, true);
+    assert.equal(rows[2].one_time, true);
+  });
+
+  test('three lucky cases do not outrank forty solid ones; small samples are graded Low', () => {
+    const rows = [...mk('full_refund', 3, 3), ...mk('reclean', 40, 32), ...mk('credit', 10, 4)];
+    const r = rankResponses(rows, { category: 'quality_missed', cause: 'regular_left' });
+    assert.deepEqual(r.options.map((o) => o.response), ['reclean', 'credit', 'full_refund'], 'proven responses first; 3 of 3 is not proven');
+    assert.equal(r.options[0].group, 'cause_category');
+    assert.deepEqual([r.options[0].kept, r.options[0].decided, r.options[0].grade], [0.8, 40, 'High']);
+    assert.equal(r.options[2].grade, 'Low');
+  });
+
+  test('each response is measured in the closest group with enough outcomes', () => {
+    const rows = [
+      ...mk('reclean', 6, 5),
+      ...mk('partial_refund', 2, 2), // too few with this cause and category…
+      ...mk('partial_refund', 8, 6, { category: 'punctuality' }), // …but enough with this cause
+      ...mk('apology', 20, 6, { cause: 'missed_areas' }),
+    ];
+    const r = rankResponses(rows, { category: 'quality_missed', cause: 'regular_left' });
+    const by = Object.fromEntries(r.options.map((o) => [o.response, o]));
+    assert.equal(by.reclean.group, 'cause_category');
+    assert.deepEqual([by.partial_refund.group, by.partial_refund.decided], ['cause', 10]);
+    assert.equal(by.apology.group, 'category');
+    assert.ok(r.groups.find((g) => g.key === 'all').cases === 36);
+    const noCause = rankResponses(rows, { category: 'quality_missed', cause: null });
+    assert.ok(!noCause.groups.some((g) => g.key.startsWith('cause')), 'no cause: category, then all');
+  });
+
+  test('ties go to the happier ending, then the cheaper; the best-value option is flagged', () => {
+    const rows = [...mk('reclean', 20, 15, { cost: 90, happy: true }), ...mk('credit', 20, 15, { cost: 10, happy: false }), ...mk('partial_refund', 20, 15, { cost: 120, happy: true })];
+    const r = rankResponses(rows, { category: 'quality_missed', cause: 'regular_left' });
+    assert.deepEqual(r.options.map((o) => o.response), ['reclean', 'partial_refund', 'credit']);
+    assert.equal(r.options.find((o) => o.response === 'credit').best_value, true);
+  });
+
+  test('one-time clients are ranked only on one-time clients; first offers that get turned down are noted', () => {
+    const turnedDown = [{ kind: 'credit', response: 'declined' }, { kind: 'reclean', response: 'accepted' }];
+    const rows = [...mk('reclean', 10, 8, { offered: turnedDown }), ...mk('credit', 10, 9, { one_time: true })];
+    const recurring = rankResponses(rows, { category: 'quality_missed', cause: 'regular_left' });
+    assert.deepEqual(recurring.options.map((o) => o.response), ['reclean']);
+    assert.equal(recurring.options[0].taken_when_offered, 1);
+    const oneTime = rankResponses(rows, { category: 'quality_missed', cause: 'regular_left', one_time: true });
+    assert.deepEqual(oneTime.options.map((o) => o.response), ['credit']);
+    const credit = rankResponses([...mk('credit', 6, 3, { offered: turnedDown }), ...mk('reclean', 6, 5, { offered: turnedDown })], { category: 'quality_missed', cause: 'regular_left' });
+    assert.equal(credit.options.find((o) => o.response === 'credit').first_turned_down, 1, 'credit was the first offer and got turned down');
+  });
+
+  test('the service ranks from every stored case', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await schedule.sync();
+    await reports.sync();
+    const to = (await reports.visitsSnapshot()).to;
+    const from = new Date(Date.parse(to) - 182 * 86_400_000).toISOString().slice(0, 10);
+    const complaints = createComplaints({ db, config, reports, fetchImpl, log: quiet });
+    await complaints.run({ from, to });
+    const cases = await complaints.listCases({ from, to });
+    const cat = cases.find((c) => !c.hard_route)?.category;
+    const r = await complaints.rankFor({ category: cat, cause: null, one_time: false });
+    assert.ok(r.groups.some((g) => g.key === 'category'));
+    assert.ok(r.options.every((o, i) => o.rank === i + 1 && o.cases > 0));
     await db.close();
   });
 });

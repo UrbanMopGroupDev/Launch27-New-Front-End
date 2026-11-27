@@ -129,6 +129,31 @@ only after Derek has trusted the rankings for a few weeks (his call: ranked opti
   for, offered, taken or turned down, the final answer, happy at the end, and saved / lost and
   cost for the cases where it was the final answer. Each case shows its conversation summary.
 
+### Customer success brain, step 2: ranked options for agents (`rank.js`)
+
+On every complaint in Complaint tracking, "What's worked before" lists up to five responses,
+best first, from every past complaint (all history, refreshed hourly; escalated cases left
+out, they go to the Office Manager).
+
+- **A past case's response** is the final answer read from its conversation, or the highest
+  ladder step recorded (refund, credit, $0 reclean) when its conversation hasn't been read.
+- **Kept** is still booking 60 days later for recurring clients (partial save counts half);
+  for one-time clients it is booking again within 120 days, and they're ranked only on other
+  one-time clients.
+- **Similar cases** narrow as far as the data allows: same root cause and complaint, then same
+  root cause, then same complaint, then everything. Each response is measured in the closest
+  group where it has at least 5 known outcomes.
+- **Order.** Responses with 5+ known outcomes always come first. Within each, the kept rate
+  pulled toward the group's overall rate by 10 pseudo-cases (three lucky cases can't beat forty
+  solid ones), then happier endings, then lower cost. The cheapest response within 5 points of
+  the top one is flagged "best value".
+- **Shown per option:** clients kept (x of y), happy at the end, taken when offered, average
+  cost, confidence (High 30+, Medium 10+, else Low), and a warning when it is often turned
+  down as a first offer.
+
+Agents still decide; Derek can step in on any complaint. Drafted replies come later, once the
+rankings have earned trust (Derek's call, Nov 27).
+
 ### Still to come
 
 2. Cost lines per case (actual vs estimated) and the escalation audit.
