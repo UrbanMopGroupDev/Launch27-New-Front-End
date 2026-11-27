@@ -927,7 +927,8 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
 
   // Utilization (read-only): of cleaners' open hours from..to, how much is spoken for and how
   // much is left to book. Built from the planner's live copy (8 weeks ahead).
-  async function utilization({ from, to, locations = null } = {}) {
+  async function utilization({ from, to, locations = null, mode = 'all' } = {}) {
+    mode = mode === 'residential' ? 'residential' : 'all';
     if (!schedule?.utilizationSource) throw Object.assign(new Error('The scheduling planner is not running'), { status: 409 });
     let src;
     try {
@@ -943,12 +944,12 @@ export function createReports({ db, config, fetchImpl = fetch, schedule, log = {
     const minFrom = firstRecorded && firstRecorded < liveFrom ? firstRecorded : liveFrom;
     const range = clampRange(src.today, from, to, maxTo, minFrom);
     const start = range.from < src.today ? (range.from < liveFrom ? liveFrom : range.from) : src.today;
-    const live = utilizationFacts({ today: src.today, start, cleaners: src.cleaners, visits: src.visits, holidays: src.holidays, unavailable: src.unavailable, locations });
+    const live = utilizationFacts({ today: src.today, start, cleaners: src.cleaners, visits: src.visits, holidays: src.holidays, unavailable: src.unavailable, excluded: src.excluded || new Map(), locations, mode });
     // Saved days in the chosen dates (before today; today and later are always live).
     const yesterday = addDays(src.today, -1);
     const saved = range.from <= yesterday && schedule.recordedDays ? await schedule.recordedDays(range.from, range.to < yesterday ? range.to : yesterday).catch(() => []) : [];
     const recorded = saved.map((r) => ({
-      ...utilizationFacts({ today: src.today, start: r.day, until: r.day, cleaners: r.cleaners || [], visits: r.visits || [], holidays: r.holidays || [], unavailable: new Map((r.unavailable || []).map((id) => [Number(id), new Set([r.day])])), locations }),
+      ...utilizationFacts({ today: src.today, start: r.day, until: r.day, cleaners: r.cleaners || [], visits: r.visits || [], holidays: r.holidays || [], unavailable: new Map((r.unavailable || []).map((id) => [Number(id), new Set([r.day])])), excluded: new Map((r.excluded || []).map((id) => [Number(id), new Set([r.day])])), locations, mode }),
       recorded_days: [r.day],
     }));
     const facts = withRecordedDays(live, recorded);

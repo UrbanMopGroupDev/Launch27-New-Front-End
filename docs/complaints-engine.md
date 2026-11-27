@@ -71,10 +71,40 @@ checkable. It ships in slices; this section is updated as each one lands.
 - **Labels.** "Hard routed" is shown as "Escalated (damage / theft / safety / legal)";
   "Share" is "% of all complaints".
 
+### Release 3: root causes (why it happened), done ahead of release 2
+
+Derek, Nov 27: most complaints come down to cleaner consistency and communication, and the
+next layer down is what matters (a regular cleaner who left, a change nobody told the client
+about, a French-speaking cleaner who couldn't follow English instructions). He checks cases by
+hand, and the ranked responses per cause that come later are only as good as these labels. So
+the root-cause layer went first.
+
+- **Two layers.** The category stays "what the client complained about". Each case also gets
+  one **root cause** ("why it happened") plus up to two **contributing causes**, from a fixed
+  codebook of 14 in three groups: cleaner consistency, communication, quality
+  (`CAUSES` in `taxonomy.js`; signed off by Derek, Nov 27). Every entry has a definition, two
+  example quotes and a "not this when" line. Cleaner language is not recorded: everyone must
+  speak English (Derek's call), and "language barrier" flags where that slipped.
+- **Who sets it.** Keyword rules (`causeRules`), then Claude with the codebook in its
+  prompt, which must quote the client's words as evidence. When the text names no cause,
+  Launch27 facts fill it in for cleaner-change and quality complaints: the client's regular
+  cleaner had stopped working with us (no visits with anyone for 21+ days), or 3+ cleaners
+  in 90 days (`cause_by = 'facts'`). A person's cause is never overwritten.
+- **Older cases.** Cases read before this release have no cause. Updating their dates again
+  (admins, Run bar) asks Claude once per case for the cause only; category and everything
+  else already decided stay.
+- **Playbook.** "Why it happened" shows each cause like a category: cases, what it showed up
+  as, saved/lost, cost and cheapest that works, with every number opening its cases. The case
+  list, the drill-downs and the CSV carry the root cause.
+- **Check accuracy.** Each check now confirms the category and the root cause (plus optional
+  contributing causes), next to the engine's evidence quote and the Launch27 facts. Root-cause
+  accuracy is measured separately, by cause and by who set it (rules, Claude, facts), with
+  the common mix-ups. The codebook is on the same tab.
+
 ### Still to come
 
 2. Cost lines per case (actual vs estimated) and the escalation audit.
-3. Drivers, secondary tags, billing tag, Category x Driver view, codebook.
+3. (Remaining from the old plan) billing tag.
 4. New Check accuracy: Measure and Fix queues, field-level verdicts, evidence panel, Wilson ranges.
 5. Second reviewer and agreement.
 6. Confidence grades and sign-off.

@@ -789,6 +789,8 @@ export function createMockLaunch27({ password = 'demo', now = () => Date.now(), 
       const rows = [[`${y}-12-25`, 'Christmas Day'], [`${y}-12-26`, 'Boxing Day'], [`${y + 1}-01-01`, "New Year's Day"]].map(([date, description], i) => ({ id: 500 + i, date, start_time: '00:00', end_time: '23:59', description }));
       return [200, page(rows, q)];
     }
+    // Daily spots: no cleaner excluded from booking on any date.
+    if (/^\/v1\/staff\/locations\/\d+\/spots$/.test(path)) return [200, { grid: [], days: [] }];
     if (path === '/v1/staff/locations/count') return [200, { count: locations.length }];
     if (path === '/v1/booking/services' || path === '/v1/staff/services') return [200, catalogServices(q.get('location_id'))];
     if (path === '/v1/booking/frequencies') return [200, snap ? snap.frequencies[q.get('location_id')] || Object.values(snap.frequencies)[0] || [] : FREQUENCIES];

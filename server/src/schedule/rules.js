@@ -234,10 +234,25 @@ export function windowBlocks(w) {
 export const openMinutes = (w) => windowBlocks(w).reduce((m, [a, b]) => m + b - a, 0);
 // The break a visit would run into, if any.
 export const breakHit = (w, start, end) => (w?.breaks || []).find(([a, b]) => start < b && end > a) || null;
+// Every open block of a date, in time order, overlaps joined (a split Friday 8–1 and 2:15–6 is
+// two blocks; the 1–2:15 break is not open).
+export function workingBlocks(rows = [], d, unavailableDates = null) {
+  if (!workingWindow(rows, d, unavailableDates)) return [];
+  const list = dayRows(rows, d).filter((r) => !r.dayoff && hasTimes(r)).map((r) => [toMinutes(r.start_time), toMinutes(r.end_time)]).sort((a, b) => a[0] - b[0]);
+  const out = [];
+  for (const [a, b] of list) {
+    const last = out[out.length - 1];
+    if (last && a <= last[1]) last[1] = Math.max(last[1], b);
+    else out.push([a, b]);
+  }
+  return out;
+}
+// A day's capacity as Scheduling insights counts it (breaks in split days taken out). The
+// Utilization report's "Check the numbers" uses the same, so the two always tie.
+export const capacityMinutes = (w) => (w ? openMinutes(w) : 0);
 // Minutes a cleaner is open on a date: the sum of that day's blocks (a split day counts its gap as closed).
 export function workingMinutes(rows = [], d, unavailableDates = null) {
-  if (!workingWindow(rows, d, unavailableDates)) return 0;
-  return dayRows(rows, d).filter((r) => !r.dayoff && hasTimes(r)).reduce((m, r) => m + toMinutes(r.end_time) - toMinutes(r.start_time), 0);
+  return workingBlocks(rows, d, unavailableDates).reduce((m, [a, b]) => m + b - a, 0);
 }
 export function weeklyHours(rows = []) {
   let min = 0;

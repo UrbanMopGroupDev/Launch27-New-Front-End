@@ -13,9 +13,9 @@ import { indexVisits } from '../reports/compute.js';
 import { frequencyKind } from '../schedule/rules.js';
 import { normalizeEmail, normalizePhone } from '../inbox/normalize.js';
 import { parseGmailMessage } from '../inbox/email/mime.js';
-import { classifyRules, mergeClassification, amountsIn } from './taxonomy.js';
+import { classifyRules, mergeClassification, amountsIn, causeFacts, CAUSE_KEYS } from './taxonomy.js';
 import { redact } from './redact.js';
-import { journeyAt, outcomeAt, oneTimeOutcomeAt, cleanerStatsIndex, recleanCost, unitEconomics } from './journey.js';
+import { journeyAt, outcomeAt, oneTimeOutcomeAt, cleanerStatsIndex, cleanerLastWorkedIndex, recleanCost, unitEconomics } from './journey.js';
 import { normalizeSettings, rungForRefund } from './settings.js';
 import { parseRefundPost } from './slackRefunds.js';
 import { createKustomerClient, discover, listComplaints, toCase as kustomerToCase, customer as kustomerCustomer, conversationsAround } from './sources/kustomer.js';
@@ -109,7 +109,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
         // so this is what keeps them quick and cheap.
         const ids = cases.map((c) => c.source_id);
         const src = cases[0]?.source;
-        const known = new Map(!ids.length ? [] : (await many(db, "SELECT source_id, category, tone, severity, areas_cited, hard_route, summary, classified_by, classifier_confidence FROM complaint_cases WHERE source = $1 AND source_id = ANY($2::text[]) AND classified_by IN ('claude', 'human')", [src, ids])).map((r) => [r.source_id, r]));
+        const known = new Map(!ids.length ? [] : (await many(db, "SELECT source_id, category, tone, severity, areas_cited, hard_route, summary, classified_by, classifier_confidence, cause, contributing_causes, cause_evidence, cause_by FROM complaint_cases WHERE source = $1 AND source_id = ANY($2::text[]) AND classified_by IN ('claude', 'human')", [src, ids])).map((r) => [r.source_id, r]));
         const notComplaints = new Set(!ids.length ? [] : (await many(db, "SELECT source_id FROM complaint_source_items WHERE source = $1 AND source_id = ANY($2::text[]) AND kind = 'not_complaint'", [src, ids])).map((r) => r.source_id));
         const fresh = cases.filter((c) => !notComplaints.has(c.source_id));
         const work = fresh
@@ -120,13 +120,23 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
         // Classify several at a time (Claude calls are the slow part), then save in order.
         await pool(work, CLASSIFY_CONCURRENCY, async (w) => {
           const k = known.get(w.c.source_id);
-          if (k) {
+          const decided = k && { category: k.category, tone: k.tone, severity: k.severity, areas: k.areas_cited || [], hard_route: k.hard_route || w.rules.hard_route, summary: k.summary, classified_by: k.classified_by, confidence: k.classifier_confidence };
+          // Read before root causes existed (no cause pass at all)? Ask Claude once
+          // more for the cause, keeping the category and everything else already decided.
+          const needsCause = k && !k.cause_by && classifier && w.c.text;
+          if (k && !needsCause) {
             reused++;
-            w.c.cls = { category: k.category, tone: k.tone, severity: k.severity, areas: k.areas_cited || [], hard_route: k.hard_route || w.rules.hard_route, summary: k.summary, classified_by: k.classified_by, confidence: k.classifier_confidence };
+            w.c.cls = { ...decided, cause: k.cause ?? w.rules.cause, contributing: k.cause ? k.contributing_causes || [] : w.rules.contributing, cause_evidence: k.cause_evidence, cause_by: k.cause_by ?? w.rules.cause_by };
             return;
           }
           const model = classifier && w.c.text ? await classifier(redact(w.c.text, { names: [w.c.customer_name, ...(w.c.cleaner_names || []), ...staffNames] })) : null;
-          w.c.cls = mergeClassification(w.rules, model);
+          const merged = mergeClassification(w.rules, model);
+          if (k) {
+            reused++;
+            w.c.cls = { ...decided, cause: merged.cause, contributing: merged.contributing, cause_evidence: merged.cause_evidence, cause_by: merged.cause_by };
+            return;
+          }
+          w.c.cls = merged;
           w.skip = w.c.source === 'gmail' && ((model && model.is_complaint === false) || (!model && (w.c.cls.category === 'other' || w.c.cls.tone === 'mild')));
           // Remember emails Claude read and found not to be complaints, so they aren't sent again.
           if (w.skip && model) await db.query("INSERT INTO complaint_source_items (source, source_id, occurred_at, kind) VALUES ($1, $2, $3, 'not_complaint') ON CONFLICT (source, source_id) DO NOTHING", [w.c.source, w.c.source_id, w.c.opened_at]).catch(() => {});
@@ -189,7 +199,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     }
     const bearer = (syncBearer ? await syncBearer().catch(() => null) : null) || userBearer;
     if (!bearer) note('warn', 'No Launch27 login for lookups: clients are matched by name only and Launch27 refund amounts are skipped');
-    return { snap, visits, byCustomer, byName, bearer, cleanerStatsAt: cleanerStatsIndex(visits), econ: unitEconomics(visits, now() - 90 * DAY) };
+    return { snap, visits, byCustomer, byName, bearer, cleanerStatsAt: cleanerStatsIndex(visits), cleanerLastWorked: cleanerLastWorkedIndex(visits, now()), econ: unitEconomics(visits, now() - 90 * DAY) };
   }
 
   const customerByName = (ctx, name) => {
@@ -415,8 +425,8 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       db,
       `INSERT INTO complaint_cases (brand, source, source_id, customer_email, customer_phone, customer_name, l27_customer_id, l27_booking_id, l27_team_ids, service_date,
          opened_at, first_response_at, resolved_at, channel, status, source_status, category, severity, tone, areas_cited, hard_route, summary, handled_by,
-         exchanges, classified_by, classifier_confidence, raw)
-       VALUES ('residential',$1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::jsonb,$20,$21,$22,$23,$24,$25,$26::jsonb)
+         exchanges, classified_by, classifier_confidence, raw, cause, contributing_causes, cause_evidence, cause_by)
+       VALUES ('residential',$1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::jsonb,$20,$21,$22,$23,$24,$25,$26::jsonb,$27,$28::jsonb,$29,$30)
        ON CONFLICT (source, source_id) DO UPDATE SET
          customer_email = EXCLUDED.customer_email, customer_phone = EXCLUDED.customer_phone, customer_name = EXCLUDED.customer_name,
          l27_customer_id = COALESCE(EXCLUDED.l27_customer_id, complaint_cases.l27_customer_id), l27_booking_id = COALESCE(EXCLUDED.l27_booking_id, complaint_cases.l27_booking_id),
@@ -426,13 +436,20 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
          severity = EXCLUDED.severity, tone = EXCLUDED.tone, areas_cited = EXCLUDED.areas_cited,
          hard_route = COALESCE(EXCLUDED.hard_route, complaint_cases.hard_route), summary = COALESCE(EXCLUDED.summary, complaint_cases.summary),
          exchanges = EXCLUDED.exchanges, classified_by = CASE WHEN complaint_cases.classified_by = 'human' THEN 'human' ELSE EXCLUDED.classified_by END,
-         classifier_confidence = EXCLUDED.classifier_confidence, raw = EXCLUDED.raw, updated_at = now()
+         classifier_confidence = EXCLUDED.classifier_confidence, raw = EXCLUDED.raw,
+         -- A cause a person set stays; otherwise a fresh reading replaces it, but never with nothing.
+         cause = CASE WHEN complaint_cases.cause_by = 'human' OR EXCLUDED.cause IS NULL THEN complaint_cases.cause ELSE EXCLUDED.cause END,
+         contributing_causes = CASE WHEN complaint_cases.cause_by = 'human' OR EXCLUDED.cause IS NULL THEN complaint_cases.contributing_causes ELSE EXCLUDED.contributing_causes END,
+         cause_evidence = CASE WHEN complaint_cases.cause_by = 'human' OR EXCLUDED.cause IS NULL THEN complaint_cases.cause_evidence ELSE EXCLUDED.cause_evidence END,
+         cause_by = CASE WHEN complaint_cases.cause_by = 'human' OR EXCLUDED.cause IS NULL THEN complaint_cases.cause_by ELSE EXCLUDED.cause_by END,
+         updated_at = now()
        RETURNING id`,
       [
         c.source, c.source_id, normalizeEmail(c.customer_email) || null, normalizePhone(c.customer_phone) || null, c.customer_name || null, c.l27_customer_id || null, c.l27_booking_id || null,
         json(c.l27_team_ids || []), c.service_date || null, c.opened_at, c.first_response_at || null, c.resolved_at || null, c.channel || null, c.status || 'open', c.source_status || null,
         cls.category || 'other', cls.severity || null, cls.tone || null, json(cls.areas || []), cls.hard_route || null, cls.summary || null, c.handled_by || null,
         c.exchanges ?? null, cls.classified_by || 'rules', cls.confidence ?? null, json({ ...(c.raw || {}), resolution_text: c.resolution_text || null, our_replies_excerpt: (c.our_replies || '').slice(0, 2000) || null }),
+        cls.cause || null, json(cls.contributing || []), cls.cause_evidence || null, cls.cause ? cls.cause_by || 'rules' : null,
       ],
     );
     return Number(row.id);
@@ -532,18 +549,24 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       // Journey and outcomes.
       const prior = allCases.filter((x) => Number(x.l27_customer_id) === Number(c.l27_customer_id) && x.id !== c.id).map((x) => ({ opened_at: new Date(x.opened_at).getTime() }));
       if (list.length) {
-        const j = journeyAt(list, at, { priorCases: prior, cleanerStatsAt: ctx.cleanerStatsAt, dataFrom: ctx.snap.from, complainedVisitId: visit?.id ?? null });
+        const j = journeyAt(list, at, { priorCases: prior, cleanerStatsAt: ctx.cleanerStatsAt, dataFrom: ctx.snap.from, complainedVisitId: visit?.id ?? null, cleanerLastWorked: ctx.cleanerLastWorked, dataTo: todayMs });
         await db.query(
           `INSERT INTO complaint_journeys (case_id, tenure_days, frequency, cleans_total, spend_12m, price_change_pct, distinct_cleaners_90d, cleaner_changed_last_visit, prior_complaints, prior_unhappy_ratings,
-             days_since_last_clean, cleaner_id, cleaner_name, cleaner_visits_before, cleaner_unhappy_rate_90d, data_from, computed_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, now())
+             days_since_last_clean, cleaner_id, cleaner_name, cleaner_visits_before, cleaner_unhappy_rate_90d, data_from, regular_cleaner_name, regular_cleaner_left, regular_cleaner_last_worked, computed_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19, now())
            ON CONFLICT (case_id) DO UPDATE SET tenure_days = EXCLUDED.tenure_days, frequency = EXCLUDED.frequency, cleans_total = EXCLUDED.cleans_total, spend_12m = EXCLUDED.spend_12m,
              price_change_pct = EXCLUDED.price_change_pct, distinct_cleaners_90d = EXCLUDED.distinct_cleaners_90d, cleaner_changed_last_visit = EXCLUDED.cleaner_changed_last_visit,
              prior_complaints = EXCLUDED.prior_complaints, prior_unhappy_ratings = EXCLUDED.prior_unhappy_ratings, days_since_last_clean = EXCLUDED.days_since_last_clean,
              cleaner_id = EXCLUDED.cleaner_id, cleaner_name = EXCLUDED.cleaner_name, cleaner_visits_before = EXCLUDED.cleaner_visits_before,
-             cleaner_unhappy_rate_90d = EXCLUDED.cleaner_unhappy_rate_90d, data_from = EXCLUDED.data_from, computed_at = now()`,
-          [c.id, j.tenure_days, j.frequency, j.cleans_total, j.spend_12m, j.price_change_pct, j.distinct_cleaners_90d, j.cleaner_changed_last_visit, j.prior_complaints, j.prior_unhappy_ratings, j.days_since_last_clean, j.cleaner_id, j.cleaner_name, j.cleaner_visits_before, j.cleaner_unhappy_rate_90d, j.data_from],
+             cleaner_unhappy_rate_90d = EXCLUDED.cleaner_unhappy_rate_90d, data_from = EXCLUDED.data_from,
+             regular_cleaner_name = EXCLUDED.regular_cleaner_name, regular_cleaner_left = EXCLUDED.regular_cleaner_left, regular_cleaner_last_worked = EXCLUDED.regular_cleaner_last_worked, computed_at = now()`,
+          [c.id, j.tenure_days, j.frequency, j.cleans_total, j.spend_12m, j.price_change_pct, j.distinct_cleaners_90d, j.cleaner_changed_last_visit, j.prior_complaints, j.prior_unhappy_ratings, j.days_since_last_clean, j.cleaner_id, j.cleaner_name, j.cleaner_visits_before, j.cleaner_unhappy_rate_90d, j.data_from, j.regular_cleaner_name, j.regular_cleaner_left, j.regular_cleaner_last_worked],
         );
+        // Nothing in the client's words names a cause, but Launch27 does: fill it in from the facts
+        // (marked 'facts', so the checks measure it separately). Only for complaints a cleaner
+        // change can explain, and only the strong signals.
+        const fact = (!c.cause || c.cause === 'other') && c.cause_by !== 'human' && FACT_CATEGORIES.has(c.category) ? causeFacts(j).find((f) => FACT_CAUSES.has(f.cause)) : null;
+        if (fact) await db.query("UPDATE complaint_cases SET cause = $2, cause_by = 'facts', cause_evidence = $3 WHERE id = $1 AND (cause IS NULL OR cause = 'other') AND cause_by IS DISTINCT FROM 'human'", [c.id, fact.cause, fact.text]);
         const repeat = allCases.find((x) => Number(x.l27_customer_id) === Number(c.l27_customer_id) && x.id !== c.id && new Date(x.opened_at) > new Date(c.opened_at) && new Date(x.opened_at) - new Date(c.opened_at) <= 90 * DAY);
         // Recurring clients: still booking at 30/60/90 days. One-time clients: did they book
         // again within 90/120 days. Recleans and free visits don't count as coming back.
@@ -656,17 +679,21 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     return { running: !!running, sources: sources(), last_run: last, mined, auto };
   }
 
-  async function listCases({ from, to, category, limit = 5000 }) {
+  async function listCases({ from, to, category, cause, limit = 5000 }) {
     const params = [from || '2000-01-01', to || '2999-12-31'];
     let where = 'c.merged_into IS NULL AND c.excluded_at IS NULL AND c.opened_at >= $1 AND c.opened_at < $2::date + 1';
     if (category) {
       params.push(category);
       where += ` AND c.category = $${params.length}`;
     }
+    if (cause) {
+      params.push(cause);
+      where += ` AND c.cause = $${params.length}`;
+    }
     params.push(Math.min(5000, Number(limit) || 5000));
     const rows = await many(
       db,
-      `SELECT c.id, c.source, c.source_id, c.opened_at, c.service_date, c.customer_name, c.l27_customer_id, c.l27_booking_id, c.category, c.tone, c.severity, c.hard_route, c.summary, c.status, c.source_status, c.classified_by,
+      `SELECT c.id, c.source, c.source_id, c.opened_at, c.service_date, c.customer_name, c.l27_customer_id, c.l27_booking_id, c.category, c.tone, c.severity, c.hard_route, c.summary, c.status, c.source_status, c.classified_by, c.cause, c.contributing_causes, c.cause_by,
               (SELECT coalesce(sum(amount), 0) FROM complaint_costs k WHERE k.case_id = c.id) AS total_cost,
               (SELECT string_agg(DISTINCT coalesce(r.rung, r.action), ', ') FROM complaint_resolutions r WHERE r.case_id = c.id) AS rungs,
               (SELECT outcome FROM complaint_outcomes o WHERE o.case_id = c.id AND o.day = 60) AS outcome_60,
@@ -720,7 +747,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
 
   async function playbook({ from, to }) {
     const settings = await getSettings();
-    const cases = await many(db, `SELECT j.*, c.id, c.source, c.opened_at, c.category, c.tone, c.severity, c.hard_route, c.first_response_at, c.exchanges, c.handled_by, c.l27_customer_id, c.l27_booking_id, c.classified_by
+    const cases = await many(db, `SELECT j.*, c.id, c.source, c.opened_at, c.category, c.tone, c.severity, c.hard_route, c.first_response_at, c.exchanges, c.handled_by, c.l27_customer_id, c.l27_booking_id, c.classified_by, c.cause, c.contributing_causes, c.cause_by
       FROM complaint_cases c LEFT JOIN complaint_journeys j ON j.case_id = c.id
       WHERE c.merged_into IS NULL AND c.excluded_at IS NULL AND c.opened_at >= $1 AND c.opened_at < $2::date + 1`, [from, to]);
     const ids = cases.map((c) => c.id);
@@ -760,24 +787,28 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
   // A random sample per category of cases nobody has checked yet. Message bodies aren't
   // stored, so the reviewer sees the one-line summary, the subject or title, the source's own
   // status and what we did, plus a link to the original where there is one.
-  async function reviewQueue({ per = 20, category = null, source = null } = {}) {
+  async function reviewQueue({ per = 20, category = null, source = null, cause = null } = {}) {
     const rows = await many(
       db,
       `SELECT * FROM (
          SELECT c.id, c.source, c.source_id, c.l27_booking_id, c.opened_at, c.service_date, c.customer_name, c.category, c.tone, c.severity, c.hard_route, c.summary,
                 c.source_status, c.classified_by, c.classifier_confidence, c.areas_cited, c.raw,
+                c.cause, c.contributing_causes, c.cause_evidence, c.cause_by,
+                j.regular_cleaner_left, j.regular_cleaner_name, j.regular_cleaner_last_worked, j.cleaner_changed_last_visit, j.distinct_cleaners_90d, j.cleaner_visits_before, j.cleaner_name,
                 (SELECT string_agg(DISTINCT coalesce(r.rung, r.action), ', ') FROM complaint_resolutions r WHERE r.case_id = c.id) AS rungs,
                 row_number() OVER (PARTITION BY c.category ORDER BY random()) AS pick
-           FROM complaint_cases c
+           FROM complaint_cases c LEFT JOIN complaint_journeys j ON j.case_id = c.id
           WHERE c.merged_into IS NULL AND c.excluded_at IS NULL AND c.classified_by <> 'human'
             AND NOT EXISTS (SELECT 1 FROM complaint_reviews v WHERE v.case_id = c.id)
-            AND ($2::text IS NULL OR c.category = $2) AND ($3::text IS NULL OR c.source = $3)
+            AND ($2::text IS NULL OR c.category = $2) AND ($3::text IS NULL OR c.source = $3) AND ($4::text IS NULL OR c.cause = $4)
        ) q WHERE pick <= $1 ORDER BY category, pick`,
-      [Math.max(1, Math.min(100, Number(per) || 20)), category, source],
+      [Math.max(1, Math.min(100, Number(per) || 20)), category, source, cause],
     );
     const byId = await visitIndex();
-    return rows.map(({ raw, source_id, l27_booking_id, pick: _pick, ...c }) => ({
+    return rows.map(({ raw, source_id, l27_booking_id, pick: _pick, regular_cleaner_left, regular_cleaner_name, regular_cleaner_last_worked, cleaner_changed_last_visit, distinct_cleaners_90d, cleaner_visits_before, ...c }) => ({
       ...c,
+      // What Launch27 says that points at a cause, shown next to the engine's answer.
+      facts: causeFacts({ regular_cleaner_left, regular_cleaner_name, regular_cleaner_last_worked, cleaner_changed_last_visit, distinct_cleaners_90d, cleaner_visits_before }),
       // The client's own words where we already hold them: the Launch27 rating comment, or the
       // longest text field on the Kustomer complaint. Emails are opened from the link instead.
       text: (c.source === 'launch27_rating' ? byId.get(Number(l27_booking_id))?.rating?.comment : c.source === 'kustomer' ? longestText(raw?.custom) : null) || null,
@@ -788,25 +819,35 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     }));
   }
 
-  async function reviewCase(id, { verdict, category = null, note = null }, userId) {
-    const c = await one(db, 'SELECT id, category, classified_by FROM complaint_cases WHERE id = $1', [id]);
+  async function reviewCase(id, { verdict, category = null, cause = null, contributing = null, note = null }, userId) {
+    const c = await one(db, 'SELECT id, category, classified_by, cause, cause_by FROM complaint_cases WHERE id = $1', [id]);
     if (!c) throw Object.assign(new Error('Not found'), { status: 404 });
     if (verdict === 'wrong_category' && category === c.category) verdict = 'correct';
+    // The root cause is checked alongside the category (not for "not a complaint").
+    const checkCause = verdict !== 'not_complaint' && cause != null;
+    const causeVerdict = checkCause ? (cause === (c.cause || 'other') ? 'correct' : 'wrong') : null;
+    const others = checkCause ? [...new Set((contributing || []).filter((k) => CAUSE_KEYS.includes(k) && k !== cause))].slice(0, 2) : null;
     // Keep what the engine said the first time; a second look only changes the verdict.
     await db.query(
-      `INSERT INTO complaint_reviews (case_id, reviewer_id, verdict, was_category, was_classified_by, now_category, note)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)
-       ON CONFLICT (case_id) DO UPDATE SET reviewer_id = EXCLUDED.reviewer_id, verdict = EXCLUDED.verdict, now_category = EXCLUDED.now_category, note = EXCLUDED.note, reviewed_at = now()`,
-      [id, userId, verdict, c.category, c.classified_by, verdict === 'wrong_category' ? category : null, note ? String(note).slice(0, 500) : null],
+      `INSERT INTO complaint_reviews (case_id, reviewer_id, verdict, was_category, was_classified_by, now_category, note, was_cause, was_cause_by, now_cause, cause_verdict, now_contributing)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)
+       ON CONFLICT (case_id) DO UPDATE SET reviewer_id = EXCLUDED.reviewer_id, verdict = EXCLUDED.verdict, now_category = EXCLUDED.now_category, note = EXCLUDED.note,
+         now_cause = EXCLUDED.now_cause, cause_verdict = EXCLUDED.cause_verdict, now_contributing = EXCLUDED.now_contributing,
+         was_cause = CASE WHEN complaint_reviews.cause_verdict IS NULL THEN EXCLUDED.was_cause ELSE complaint_reviews.was_cause END,
+         was_cause_by = CASE WHEN complaint_reviews.cause_verdict IS NULL THEN EXCLUDED.was_cause_by ELSE complaint_reviews.was_cause_by END,
+         reviewed_at = now()`,
+      [id, userId, verdict, c.category, c.classified_by, verdict === 'wrong_category' ? category : null, note ? String(note).slice(0, 500) : null,
+        c.cause, c.cause_by, checkCause ? cause : null, causeVerdict, others ? json(others) : null],
     );
+    if (checkCause) await db.query("UPDATE complaint_cases SET cause = $2, contributing_causes = $3::jsonb, cause_by = 'human', cause_evidence = CASE WHEN $2 = cause THEN cause_evidence ELSE NULL END WHERE id = $1", [id, cause, json(others)]);
     if (verdict === 'wrong_category') await db.query("UPDATE complaint_cases SET category = $2, classified_by = 'human', excluded_at = NULL, updated_at = now() WHERE id = $1", [id, category]);
     else if (verdict === 'not_complaint') await db.query("UPDATE complaint_cases SET excluded_at = now(), classified_by = 'human', updated_at = now() WHERE id = $1", [id]);
     else await db.query("UPDATE complaint_cases SET classified_by = 'human', excluded_at = NULL, updated_at = now() WHERE id = $1", [id]);
-    await db.query("INSERT INTO audit_log (actor_id, action, object_type, object_id, detail) VALUES ($1, 'complaint.reviewed', 'complaint_case', $2, $3::jsonb)", [userId, String(id), json({ verdict, category })]);
+    await db.query("INSERT INTO audit_log (actor_id, action, object_type, object_id, detail) VALUES ($1, 'complaint.reviewed', 'complaint_case', $2, $3::jsonb)", [userId, String(id), json({ verdict, category, cause: checkCause ? cause : undefined })]);
   }
 
   async function reviewStats() {
-    const rows = await many(db, `SELECT v.verdict, v.was_category, v.was_classified_by, v.now_category, c.source
+    const rows = await many(db, `SELECT v.verdict, v.was_category, v.was_classified_by, v.now_category, c.source, v.was_cause, v.was_cause_by, v.now_cause, v.cause_verdict
       FROM complaint_reviews v JOIN complaint_cases c ON c.id = v.case_id`);
     const waiting = await many(db, `SELECT category, count(*)::int AS n FROM complaint_cases c
       WHERE c.merged_into IS NULL AND c.excluded_at IS NULL AND c.classified_by <> 'human' AND NOT EXISTS (SELECT 1 FROM complaint_reviews v WHERE v.case_id = c.id) GROUP BY category`);
@@ -830,6 +871,8 @@ function longestText(custom) {
 }
 
 export const REVIEW_MIN = 20;
+const FACT_CATEGORIES = new Set(['cleaner_change', 'quality_missed', 'quality_rushed', 'other']);
+const FACT_CAUSES = new Set(['regular_left', 'no_regular']);
 export function buildReviewStats(rows, waiting = []) {
   const tally = (list) => {
     const n = list.length;
@@ -846,8 +889,30 @@ export function buildReviewStats(rows, waiting = []) {
   for (const [k, n] of left) if (!by_category.some((g) => g.key === k)) by_category.push({ key: k, ...tally([]), waiting: n });
   const moves = new Map();
   for (const r of rows) if (r.verdict === 'wrong_category') moves.set(`${r.was_category}>${r.now_category}`, (moves.get(`${r.was_category}>${r.now_category}`) || 0) + 1);
+  // Root causes: only checks that looked at the cause count. Measured by who set it (rules,
+  // Claude, Launch27 facts) as well as by cause, since each can be wrong in its own way.
+  const checkedCause = rows.filter((r) => r.cause_verdict);
+  const causeTally = (list) => {
+    const n = list.length;
+    const correct = list.filter((r) => r.cause_verdict === 'correct').length;
+    return { checked: n, correct, wrong: n - correct, accuracy: n ? correct / n : null, enough: n >= REVIEW_MIN };
+  };
+  const causeGroup = (key) => {
+    const m = new Map();
+    for (const r of checkedCause) m.set(r[key] || 'none', [...(m.get(r[key] || 'none') || []), r]);
+    return [...m].map(([k, list]) => ({ key: k, ...causeTally(list) })).sort((a, b) => b.checked - a.checked);
+  };
+  const causeMoves = new Map();
+  for (const r of checkedCause) if (r.cause_verdict === 'wrong') causeMoves.set(`${r.was_cause || 'none'}>${r.now_cause}`, (causeMoves.get(`${r.was_cause || 'none'}>${r.now_cause}`) || 0) + 1);
+  const cause = {
+    total: causeTally(checkedCause),
+    by_cause: causeGroup('was_cause'),
+    by_setter: causeGroup('was_cause_by'),
+    confusions: [...causeMoves].map(([k, n]) => ({ from: k.split('>')[0], to: k.split('>')[1], n })).sort((a, b) => b.n - a.n).slice(0, 15),
+  };
   return {
     total: tally(rows),
+    cause,
     by_category,
     by_source: group('source'),
     by_classifier: group('was_classified_by'),
