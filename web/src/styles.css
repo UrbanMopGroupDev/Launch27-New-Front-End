@@ -2007,7 +2007,7 @@ a.rep-factor:hover b { text-decoration: underline; }
 .cmp-sources { list-style: none; padding: 0; margin: 10px 0 4px; display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 4px 16px; }
 .cmp-sources .dot.ok { background: var(--ok); }
 .cmp-sources .dot.warn { background: var(--warn); }
-.cmp-filter { display: flex; gap: 12px; align-items: center; padding: 10px 14px; }
+.cmp-filter { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 10px 14px; }
 .cmp-cases tbody tr { cursor: pointer; }
 .cmp-cases tr.selected { background: var(--bg); }
 .cmp-detail h3 { font-size: 13px; margin: 14px 0 6px; }
@@ -2415,3 +2415,16 @@ a.rep-factor:hover b { text-decoration: underline; }
 .ct-linked-search { display: flex; flex-direction: column; gap: 4px; }
 .ct-linked-search .assign-list { display: flex; flex-direction: column; }
 .ct-linked-search .assign-item { text-align: left; justify-content: flex-start; }
+/* Complaint checks: root cause (why it happened) beside the category */
+.cmp-check-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 14px; margin-top: 6px; }
+.cmp-check-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+.cmp-check-grid select { width: 100%; min-width: 0; }
+.cmp-also { display: flex; gap: 6px; }
+.cmp-also select { flex: 1; }
+.cmp-def { margin: 8px 0 0; }
+.cmp-codebook summary { cursor: pointer; }
+.cmp-codebook h3 { margin: 14px 0 6px; font-size: 14px; }
+.cmp-code { display: contents; }
+@media (max-width: 720px) {
+  .cmp-check-grid { grid-template-columns: 1fr; }
+}

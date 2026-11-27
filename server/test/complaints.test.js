@@ -3,9 +3,9 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseRefundPost, reasonKind } from '../src/complaints/slackRefunds.js';
-import { classifyRules, mergeClassification, hardRouteFor } from '../src/complaints/taxonomy.js';
+import { classifyRules, mergeClassification, hardRouteFor, causeRules, causeFacts, CAUSES, CAUSE_GROUPS } from '../src/complaints/taxonomy.js';
 import { redact } from '../src/complaints/redact.js';
-import { outcomeAt, journeyAt, recleanCost } from '../src/complaints/journey.js';
+import { outcomeAt, journeyAt, recleanCost, cleanerLastWorkedIndex, regularCleaner } from '../src/complaints/journey.js';
 import { normalizeSettings, canApprove, rungForRefund, budgetStatus, DEFAULT_SETTINGS } from '../src/complaints/settings.js';
 import { buildPlaybook } from '../src/complaints/playbook.js';
 import { mapStatus, toCase, discover, createKustomerClient, findListing } from '../src/complaints/sources/kustomer.js';
@@ -737,5 +737,137 @@ describe('complaints: every playbook number is traceable', () => {
     assert.ok(pb.ladder.every((r) => !r.ids.includes(b.id)), 'escalated cases are not on the ladder');
     assert.deepEqual(pb.totals.ids.sort(), [a.id, b.id]);
     assert.ok(pb.excluded_labels.too_recent);
+  });
+});
+
+describe('complaints: root causes (why it happened)', () => {
+  test('the codebook rules: the specific "why" wins over the symptom', () => {
+    const r = classifyRules('Since our cleaner left it has not been the same. The bathroom was missed and there was dust everywhere.');
+    assert.equal(r.category, 'quality_missed', 'the category is still what they complained about');
+    assert.equal(r.cause, 'regular_left');
+    assert.ok(r.contributing.includes('missed_areas'));
+    assert.equal(r.cause_by, 'rules');
+    assert.equal(causeRules('A different person showed up and nobody told us.').cause, 'changed_unannounced');
+    assert.equal(causeRules('Every time it is someone new, we never get the same person.').cause, 'no_regular');
+    assert.equal(causeRules('Please stop sending me so many emails.').cause, 'marketing_emails');
+    assert.equal(causeRules('Only one cleaner came, we booked two.').cause, 'team_size');
+    assert.equal(causeRules("She didn't understand my instructions at all.").cause, 'language');
+    assert.equal(causeRules('I asked them not to use bleach on the counters and they did anyway.').cause, 'instructions_ignored');
+    assert.equal(causeRules('Great job, thank you!').cause, null);
+    for (const c of CAUSES) {
+      assert.ok(c.definition && c.not_when && c.examples.length === 2, `${c.key} has a full codebook entry`);
+      assert.ok(CAUSE_GROUPS.some((g) => g.key === c.group), `${c.key} is in a group`);
+    }
+  });
+
+  test("Claude's cause wins; its 'none of these' keeps a cause the rules found, and always counts as read", () => {
+    const rules = classifyRules('The new cleaner missed the kitchen.');
+    const viaClaude = mergeClassification(rules, { category: 'quality_missed', tone: 'mild', severity: 2, areas: [], cause: 'replacement_quality', contributing: ['missed_areas', 'replacement_quality', 'bogus'], cause_evidence: 'not as good as our old cleaner' });
+    assert.equal(viaClaude.cause, 'replacement_quality');
+    assert.deepEqual(viaClaude.contributing, ['missed_areas'], 'no repeats of the cause, no unknown keys');
+    assert.equal(viaClaude.cause_by, 'claude');
+    const otherWithRules = mergeClassification(rules, { category: 'quality_missed', tone: 'mild', severity: 2, areas: [], cause: 'other', contributing: [] });
+    assert.equal(otherWithRules.cause, rules.cause);
+    assert.equal(otherWithRules.cause_by, 'rules');
+    const otherAlone = mergeClassification(classifyRules('Not happy.'), { category: 'other', tone: 'mild', severity: 1, areas: [] });
+    assert.equal(otherAlone.cause, 'other');
+    assert.equal(otherAlone.cause_by, 'claude', 'read once, never re-sent just for a cause');
+  });
+
+  test("Launch27 facts: the regular cleaner who stopped working, and what they point at", () => {
+    const DAY = 86_400_000;
+    const at = Date.parse('2026-06-01T15:00:00Z');
+    const v = (d, id) => ({ id: 3000 + d, at: at + d * DAY, date: '', revenue: 150, freq: 'Weekly', teams: [{ id, name: `Cleaner ${id}` }] });
+    const client = [v(-56, 5), v(-49, 5), v(-42, 5), v(-35, 5), v(-7, 8)];
+    const everyone = [...client, v(-20, 8), v(30, 8)];
+    const j = journeyAt(client, at, { cleanerLastWorked: cleanerLastWorkedIndex(everyone, at + 60 * DAY), dataTo: at + 60 * DAY });
+    assert.equal(j.regular_cleaner_name, 'Cleaner 5');
+    assert.equal(j.regular_cleaner_left, true);
+    assert.equal(j.regular_cleaner_last_worked, new Date(at - 35 * DAY).toISOString().slice(0, 10));
+    const stillHere = journeyAt(client, at, { cleanerLastWorked: cleanerLastWorkedIndex([...everyone, v(10, 5)], at + 60 * DAY), dataTo: at + 60 * DAY });
+    assert.equal(stillHere.regular_cleaner_left, false, 'still working with other clients');
+    const tooSoon = journeyAt(client, at, { cleanerLastWorked: cleanerLastWorkedIndex(everyone, at), dataTo: at - 20 * DAY });
+    assert.equal(tooSoon.regular_cleaner_left, false, 'a short gap at the end of the data is not leaving');
+    assert.equal(regularCleaner([v(-7, 8)]), null, 'one visit is nobody\'s regular');
+    const facts = causeFacts({ ...j, cleaner_changed_last_visit: true, distinct_cleaners_90d: 2, cleaner_visits_before: 4 });
+    assert.deepEqual(facts.map((f) => f.cause), ['regular_left', 'changed_unannounced', 'new_cleaner']);
+    assert.match(facts[0].text, /Cleaner 5/);
+  });
+
+  test('the playbook by cause: one row per cause, contributing counted beside it, categories inside', () => {
+    const cases = [];
+    const outcomes = [];
+    const add = (category, cause, contributing = [], outcome = 'saved') => {
+      const id = cases.length + 1;
+      cases.push({ id, source: 'kustomer', opened_at: '2026-06-10T12:00:00Z', category, cause, contributing_causes: contributing, cause_by: cause ? 'claude' : null, l27_customer_id: 900 + id, classified_by: 'claude' });
+      outcomes.push({ case_id: id, day: 60, outcome });
+    };
+    add('quality_missed', 'regular_left', ['missed_areas'], 'lost');
+    add('cleaner_change', 'regular_left', [], 'lost');
+    add('quality_missed', 'missed_areas');
+    add('communication', 'marketing_emails');
+    add('punctuality', null);
+    const pb = buildPlaybook({ cases, resolutions: [], costs: [], outcomes, visits: [], from: '2026-05-01', to: '2026-10-31', settings: normalizeSettings({}), today: '2026-11-27' });
+    const left = pb.by_cause.find((x) => x.key === 'regular_left');
+    assert.equal(left.n, 2);
+    assert.deepEqual(left.ids, [1, 2]);
+    assert.equal(left.lost_n, 2);
+    assert.deepEqual(left.by_category.map((c) => c.key).sort(), ['cleaner_change', 'quality_missed']);
+    assert.equal(left.group, 'consistency');
+    const missed = pb.by_cause.find((x) => x.key === 'missed_areas');
+    assert.equal(missed.n, 1);
+    assert.deepEqual(missed.contributing_ids, [1]);
+    assert.equal(pb.by_cause.at(-1).key, 'unset', 'cases with no cause yet come last');
+    assert.equal(pb.cause_groups.find((g) => g.key === 'consistency').n, 2);
+    assert.equal(pb.cause_groups.find((g) => g.key === 'communication').n, 1);
+    assert.ok(pb.taxonomy.find((t) => t.key === 'quality_missed').cheapest_that_works, 'the category table is unchanged');
+  });
+
+  test('cause accuracy is measured separately, by cause and by who set it', () => {
+    const rows = [
+      ...Array.from({ length: 3 }, () => ({ verdict: 'correct', was_category: 'quality_missed', was_cause: 'regular_left', was_cause_by: 'claude', now_cause: 'regular_left', cause_verdict: 'correct', source: 'kustomer' })),
+      { verdict: 'correct', was_category: 'quality_missed', was_cause: 'missed_areas', was_cause_by: 'rules', now_cause: 'replacement_quality', cause_verdict: 'wrong', source: 'kustomer' },
+      { verdict: 'correct', was_category: 'quality_missed', source: 'gmail' },
+    ];
+    const s = buildReviewStats(rows);
+    assert.equal(s.cause.total.checked, 4, 'checks that skipped the cause are not counted');
+    assert.equal(s.cause.total.accuracy, 0.75);
+    assert.equal(s.cause.by_cause.find((c) => c.key === 'regular_left').accuracy, 1);
+    assert.equal(s.cause.by_setter.find((c) => c.key === 'rules').wrong, 1);
+    assert.deepEqual(s.cause.confusions, [{ from: 'missed_areas', to: 'replacement_quality', n: 1 }]);
+  });
+
+  test('checking a cause fixes the case, is measured against the engine, and survives a later run', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await schedule.sync();
+    await reports.sync();
+    const to = (await reports.visitsSnapshot()).to;
+    const from = new Date(Date.parse(to) - 182 * 86_400_000).toISOString().slice(0, 10);
+    const complaints = createComplaints({ db, config, reports, fetchImpl, log: quiet });
+    await complaints.run({ from, to });
+    const queue = await complaints.reviewQueue({ per: 5 });
+    assert.ok(queue.length >= 2);
+    assert.ok(queue.every((c) => Array.isArray(c.facts)), 'Launch27 facts come with every case to check');
+    const [a, b] = queue;
+    await complaints.reviewCase(a.id, { verdict: 'correct', cause: a.cause || 'other' }, null);
+    const pick = b.cause === 'language' ? 'team_size' : 'language';
+    await complaints.reviewCase(b.id, { verdict: 'correct', cause: pick, contributing: ['marketing_emails', pick, 'marketing_emails'] }, null);
+    const stats = await complaints.reviewStats();
+    assert.equal(stats.cause.total.checked, 2);
+    assert.equal(stats.cause.total.correct, 1);
+    const fixed = await complaints.getCase(b.id);
+    assert.equal(fixed.cause, pick);
+    assert.equal(fixed.cause_by, 'human');
+    assert.deepEqual(fixed.contributing_causes, ['marketing_emails']);
+    assert.ok((await complaints.listCases({ from, to, cause: pick })).some((c) => c.id === b.id), 'the case list filters by cause');
+    await complaints.run({ from, to });
+    assert.equal((await complaints.getCase(b.id)).cause, pick, "a later run doesn't undo a person's cause");
+    const pb = await complaints.playbook({ from, to });
+    assert.ok(pb.by_cause.find((x) => x.key === pick).ids.includes(b.id));
+    await db.close();
   });
 });
