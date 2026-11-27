@@ -22,6 +22,12 @@ export function createKpi({ db, config, log = { info() {}, warn() {}, error() {}
   // Dev and QA: synthetic. Production: live Launch27 and Kustomer; the rest read "No data" until connected.
   connectors = connectors || (synthetic || !syncBearer ? createKpiConnectors({ synthetic }) : createLiveKpiConnectors({ db, config, fetchImpl, syncBearer, brand: KPI_BRANDS[0], log, now, gmail }));
   const jobs = connectors.map((c) => c.job).filter(Boolean);
+  // Live Google reviews, when configured (src/kpi/google.js): connected from this page.
+  const google = connectors.find((c) => c.key === 'google' && c.connectUrl) || null;
+  const needGoogle = () => {
+    if (!google) throw fail(409, 'Google reviews are not set up here: GBP_CLIENT_ID and GBP_CLIENT_SECRET are needed (production only)');
+    return google;
+  };
   let cache = null;
   let manualVersion = 0;
   let lastAuto = 0;
@@ -134,6 +140,7 @@ export function createKpi({ db, config, log = { info() {}, warn() {}, error() {}
         outage: o,
         outages: synthetic ? KPI_OUTAGES : null,
         refresh: { available: jobs.length > 0, running: autoRefresh(c.ds, bearer) || jobs.some((j) => j.running()) },
+        google: google ? await google.status() : { configured: false },
         manual_reviews: synthetic ? { can_enter: true, entry: c.ds.manualReviews[m.month] || null } : { can_enter: false, entry: null },
       };
     },
@@ -154,6 +161,10 @@ export function createKpi({ db, config, log = { info() {}, warn() {}, error() {}
       for (const j of jobs) j.start({ bearer });
       return { running: true };
     },
+    // Connecting Google Business Profile (read-only reviews).
+    googleConnectUrl: ({ redirectUri, userId }) => needGoogle().connectUrl({ redirectUri, userId }),
+    googleFinishConnect: (args) => needGoogle().finishConnect(args),
+    googleDisconnect: () => needGoogle().disconnect(),
     // Manual Google review entry: development and QA only.
     async saveManualReviews({ brand, month, entry, email }) {
       if (!synthetic) throw fail(403, 'Manual entry is not available in production');

@@ -10,6 +10,7 @@
 import { readFileSync } from 'node:fs';
 import { addDays, localDate } from '../schedule/rules.js';
 import { KPI_RULES, KPI_SOURCES } from './config.js';
+import { createGoogleBusinessKpi } from './google.js';
 import { createSyftKpi } from './syft.js';
 
 const LOCAL = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Toronto', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
@@ -251,13 +252,13 @@ function loadGoogleExport(name) {
 
 const notConnected = (key, note) => ({ key, label: KPI_SOURCES[key].label, mode: 'not_connected', pull: async () => ({ refreshed_at: null, note }) });
 
-/** Production connectors: Launch27 and Kustomer live; QuickBooks, Syft and Google not connected yet. */
+/** Production connectors: Launch27, Kustomer, Syft (Gmail) and Google live; QuickBooks not connected yet. */
 export function createLiveKpiConnectors({ db, config, fetchImpl, syncBearer, brand, log, now, gmail = null }) {
   const syft = gmail && config.kpiSyftMailbox && brand.syftReport ? createSyftKpi({ db, gmail, mailbox: config.kpiSyftMailbox, brand, log, now }) : notConnected('syft', gmail ? 'no mailbox set for the Syft report (KPI_SYFT_MAILBOX)' : 'Gmail is not connected');
   return [
     createLaunch27Kpi({ db, config, fetchImpl, syncBearer, brand, log, now }),
     createKustomerKpi({ db, brand }),
-    createGoogleExportKpi({ brand }),
+    config.gbp ? createGoogleBusinessKpi({ db, gbp: config.gbp, secret: config.sessionSecret, brand, fallback: createGoogleExportKpi({ brand }), fetchImpl, log, now }) : createGoogleExportKpi({ brand }),
     notConnected('qbo', 'QuickBooks is not connected yet'),
     syft,
   ];
