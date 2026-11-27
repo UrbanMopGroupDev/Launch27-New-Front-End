@@ -15,6 +15,7 @@ import { normalizeEmail, normalizePhone } from '../inbox/normalize.js';
 import { parseGmailMessage } from '../inbox/email/mime.js';
 import { classifyRules, mergeClassification, amountsIn, causeFacts, categoryLabel, CAUSE_KEYS } from './taxonomy.js';
 import { formatThread, normalizeSolution, offerToResolution } from './solutions.js';
+import { caseRows, rankResponses } from './rank.js';
 import { redact } from './redact.js';
 import { journeyAt, outcomeAt, oneTimeOutcomeAt, cleanerStatsIndex, cleanerLastWorkedIndex, recleanCost, unitEconomics } from './journey.js';
 import { normalizeSettings, rungForRefund } from './settings.js';
@@ -776,6 +777,31 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     return { msgs, names: contacts.map((x) => x.name).filter(Boolean) };
   }
 
+  // ---------- ranked responses for a new complaint ----------
+  // Every past case (all history, not just a window: more cases, better rankings), loaded at
+  // most once an hour; each ranking is then computed in memory.
+  let rankCache = null;
+  async function rankingRows() {
+    if (rankCache && rankCache.at > now() - 3_600_000) return rankCache.rows;
+    const cases = await many(db, `SELECT c.id, c.opened_at, c.category, c.cause, c.l27_booking_id, j.frequency
+      FROM complaint_cases c LEFT JOIN complaint_journeys j ON j.case_id = c.id
+      WHERE c.merged_into IS NULL AND c.excluded_at IS NULL AND c.hard_route IS NULL`);
+    const byId = await visitIndex();
+    for (const c of cases) c.one_time = visitInfo(byId.get(Number(c.l27_booking_id)), c.frequency).client_type === 'one_time';
+    const [resolutions, costs, outcomes, solutions] = await Promise.all([
+      many(db, 'SELECT r.case_id, r.rung, r.action FROM complaint_resolutions r JOIN complaint_cases c ON c.id = r.case_id WHERE c.merged_into IS NULL AND c.excluded_at IS NULL'),
+      many(db, 'SELECT k.case_id, k.amount FROM complaint_costs k JOIN complaint_cases c ON c.id = k.case_id WHERE c.merged_into IS NULL AND c.excluded_at IS NULL'),
+      many(db, 'SELECT case_id, day, outcome FROM complaint_outcomes'),
+      many(db, 'SELECT case_id, read_by, offers, final_kind, client_end FROM complaint_solutions'),
+    ]);
+    const rows = caseRows({ cases, resolutions, costs, outcomes, solutions });
+    rankCache = { at: now(), rows };
+    return rows;
+  }
+  async function rankFor({ category = null, cause = null, one_time = false } = {}) {
+    return rankResponses(await rankingRows(), { category, cause, one_time }, { now: now() });
+  }
+
   async function status() {
     const last = await one(db, 'SELECT id, started_at, finished_at, status, window_from, window_to, log FROM complaint_runs ORDER BY id DESC LIMIT 1');
     // Which periods have been mined (finished runs), so the page can say what a date range covers.
@@ -965,7 +991,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     return buildReviewStats(rows, waiting);
   }
 
-  return { mineSolutions, getSettings, saveSettings, kustomerDiscover, start, run, status, markInterrupted, maybeRun, listCases, getCase, setCategory, playbook, clients, sources, reviewQueue, reviewCase, reviewStats };
+  return { rankFor, mineSolutions, getSettings, saveSettings, kustomerDiscover, start, run, status, markInterrupted, maybeRun, listCases, getCase, setCategory, playbook, clients, sources, reviewQueue, reviewCase, reviewStats };
 }
 
 // Measured accuracy from hand checks: of the cases the engine put in a category, how many a
