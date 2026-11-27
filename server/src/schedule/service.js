@@ -4,9 +4,9 @@ import { SAMPLE_VERSION } from '../mock/launch27.js';
 import { torontoInstant } from '../reports/raise.js';
 import { clientId, clientLabel, harmonizePartners, noteHints, partnerOf } from '../commercial/partners.js';
 import {
-  FREQ_LABEL, STATUS_LABEL, addDays, areaOf, capacityMinutes, customerPrefs, cycleWeek, cycleWeeks, daysBetween, fitsDay, frequencyKind,
-  isPrepaid, km, nameMatches, localDate, localMinutes, mainCleaner, mondayOf, openGaps, parseCleaner, rankCleaners, seriesDates,
-  weekday, weeklyHours, workingWindow, toMinutes as toMinutesHM, travelMinutes,
+  FREQ_LABEL, STATUS_LABEL, addDays, areaOf, customerPrefs, cycleWeek, cycleWeeks, daysBetween, fitsDay, frequencyKind,
+  isPrepaid, km, localDate, localMinutes, mainCleaner, mondayOf, openGaps, openMinutes, capacityMinutes, breakHit, windowBlocks, resolvePrefs, rulesOut, parseCleaner, rankCleaners, seriesDates,
+  weekday, weeklyHours, workingWindow, travelMinutes,
 } from './rules.js';
 
 const PAST_DAYS = 91;
@@ -37,6 +37,8 @@ const DAYNAME = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const pad = (n) => String(n).padStart(2, '0');
 const dateStr = (v) => (v == null ? null : typeof v === 'string' ? v.slice(0, 10) : `${v.getFullYear()}-${pad(v.getMonth() + 1)}-${pad(v.getDate())}`);
 const nice = (d) => new Date(`${d}T12:00:00Z`).toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+// A day's hours, every block: "8am–1pm, 2:15pm–6pm".
+const hoursText = (w) => windowBlocks(w).map(([a, b]) => `${clock(a)}–${clock(b)}`).join(', ');
 const clock = (min) => {
   const h = Math.floor(min / 60) % 24;
   const m = min % 60;
@@ -116,6 +118,8 @@ export function slimVisit(b) {
     team_hours: Object.fromEntries((b.teams || []).map((t) => [t.id, t.hours || 0])),
     // Customer tags plus cleaner wishes typed in the staff notes ("prefers…", "do not assign…").
     tags: [...(u.tags_info || []).map((t) => t.name).filter(Boolean), ...noteHints(b.staff_notes)],
+    // The note wishes on their own, so profile tags read live can replace the synced ones.
+    note_tags: noteHints(b.staff_notes),
   };
 }
 
@@ -207,6 +211,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       const c = customers.get(v.customer_id);
       (v.date < t ? c.past : c.future).push(v);
       if (v.tags?.length) c.tags = v.tags;
+      if (v.note_tags) c.noteTags = v.note_tags.length || !c.noteTags ? v.note_tags : c.noteTags;
       if (v.phone) c.phone = v.phone;
     }
     for (const c of customers.values()) {
@@ -215,7 +220,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       c.main = mainCleaner(c.past.filter((v) => v.kind !== 'one')) || mainCleaner(c.past) || (recurring ? mainCleaner(c.future) : null);
       c.history = new Map();
       for (const v of c.past) for (const id of v.team_ids) c.history.set(id, (c.history.get(id) || 0) + 1);
-      c.prefs = customerPrefs(c.tags || []);
+      c.prefs = resolvePrefs(customerPrefs(c.tags || []), cleaners);
     }
     return { ...data, byId, future, past, busy, customers };
   }
@@ -282,8 +287,8 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
           continue;
         }
         const w = windowFor(c, v.date);
-        if (!w || v.start < w[0] || v.end > w[1]) {
-          out.push({ ...base, cleaner_id: id, kind: 'outside_hours', key: `outside_hours:${v.key}:${id}`, title: `Outside ${c.name}'s hours: ${v.customer} · ${when}`, detail: { hours: w ? `${clock(w[0])}–${clock(w[1])}` : 'not working that day' } });
+        if (!w || v.start < w[0] || v.end > w[1] || breakHit(w, v.start, v.end)) {
+          out.push({ ...base, cleaner_id: id, kind: 'outside_hours', key: `outside_hours:${v.key}:${id}`, title: `Outside ${c.name}'s hours: ${v.customer} · ${when}`, detail: { hours: w ? hoursText(w) : 'not working that day' } });
         }
         const same = (s.busy.get(`${id}|${v.date}`) || []).filter((o) => o.key !== v.key && o.start < v.end && v.start < o.end);
         if (same.length && same.every((o) => o.key > v.key)) {
@@ -293,7 +298,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       if (cust?.main && v.kind !== 'one' && !v.team_ids.includes(cust.main.id)) {
         // Only when the usual cleaner could take it back: that is the one dispatch can act on.
         const main = s.byId.get(cust.main.id);
-        const allowed = main && !cust.prefs.avoid.some((n) => nameMatches(main.name, n)) && !(cust.prefs.femaleOnly && main.gender !== 'F');
+        const allowed = main && !rulesOut(cust.prefs, main) && !(cust.prefs.femaleOnly && main.gender !== 'F');
         const free = allowed && main?.assignable && fitsDay({ window: windowFor(main, v.date), busy: busyFor(s)(main.id, v.date), start: v.start, duration: v.duration, place: v, transit: main.rules.transit, ignoreKeys: new Set([v.key]) }).ok;
         if (main && free) out.push({ ...base, cleaner_id: cust.main.id, kind: 'different_cleaner', key: `different_cleaner:${v.key}:${v.team_ids.join('-')}`, title: `${main.name} is free to take back ${v.customer} · ${when}`, detail: { main: main.name, booked: v.team_ids.map((id) => s.byId.get(id)?.name || 'Unknown') } });
       }
@@ -337,7 +342,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       if (sig(old) === sig(c) && !statusChanged) continue;
       const affected = next.future.filter((v) => v.team_ids.includes(c.id)).filter((v) => {
         const w = windowFor(c, v.date);
-        return !c.assignable || !w || v.start < w[0] || v.end > w[1];
+        return !c.assignable || !w || v.start < w[0] || v.end > w[1] || !!breakHit(w, v.start, v.end);
       });
       out.push({ kind: 'availability', key: `availability:${c.id}:${sig(c).length}:${c.status}`, due: affected[0]?.date || t, cleaner_id: c.id, title: statusChanged ? `${c.name} is now ${STATUS_LABEL[c.status].toLowerCase()}: ${affected.length} upcoming visit${affected.length === 1 ? '' : 's'} affected` : `${c.name}'s hours changed: ${affected.length} upcoming visit${affected.length === 1 ? '' : 's'} no longer fit`, detail: { affected: affected.slice(0, 20).map((v) => v.key) } });
     }
@@ -837,9 +842,59 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     return { taken_at: s.taken_at, clients, always, three_plus: three, visit_share: visits ? withMain / visits : null, upcoming_count: upcoming.length, upcoming: upcoming.slice(0, 100), without_main: noMain };
   }
 
+  // What the client wants as of right now. The synced copy can be an hour behind Launch27, and a
+  // client with no bookings in the window has none at all, so with a login the profile tags are
+  // read live; wishes typed in booking notes still come from the sync. source: 'profile' (live),
+  // 'synced' (Launch27 could not be reached) or null (nothing known about this client).
+  async function clientWishes(s, customerId, bearer) {
+    const id = Number(customerId);
+    if (!id) return null;
+    const cu = s.customers.get(id) || null;
+    // Partner clients (one per address) carry the tags of the Launch27 account that books them.
+    const accountId = id > 0 ? id : [...(cu?.future || []), ...(cu?.past || [])].find((v) => v.account_id != null)?.account_id;
+    let live = null;
+    if (bearer && accountId) {
+      try {
+        const res = await fetchImpl(`${config.l27BaseUrl}/v1/staff/customers/${accountId}`, { headers: { authorization: `Bearer ${bearer}`, accept: 'application/json' }, signal: AbortSignal.timeout(8_000) });
+        if (res.ok) live = ((await res.json())?.tags_info || []).map((t) => t?.name).filter(Boolean);
+        else log.warn('schedule: could not read client tags live', { customer: accountId, status: res.status });
+      } catch (err) {
+        log.warn('schedule: could not read client tags live', { customer: accountId, error: err.message });
+      }
+    }
+    if (!live) return cu ? { prefs: cu.prefs, source: 'synced' } : null;
+    // Snapshots from before note wishes were kept apart: keep everything synced, to be safe.
+    return { prefs: resolvePrefs(customerPrefs([...live, ...(cu ? cu.noteTags ?? cu.tags ?? [] : [])]), s.cleaners), source: 'profile' };
+  }
+  // Why this cleaner must not be sent to a client with these wishes (null = fine).
+  const blockedWhy = (prefs, c) => (rulesOut(prefs, c) ? 'Client asked never to have them' : prefs?.femaleOnly && c.gender !== 'F' ? 'Client wants a female cleaner only' : null);
+  // For screens that pick a cleaner by hand (the booking form): the wishes, and who they rule in or out.
+  async function clientWishesOut(customerId, bearer) {
+    const s = await need();
+    const w = await clientWishes(s, customerId, bearer);
+    if (!w) return { prefs: null, source: null, blocked: [], asked_for: [] };
+    return {
+      prefs: prefsOut(w.prefs),
+      source: w.source,
+      blocked: s.cleaners.map((c) => ({ id: c.id, name: c.name, reason: blockedWhy(w.prefs, c) })).filter((x) => x.reason),
+      asked_for: [...w.prefs.preferIds],
+    };
+  }
+
   // What a client wants, in plain terms, for the cards.
   const titleCase = (x) => String(x || '').replace(/\b\w/g, (c) => c.toUpperCase());
   const PREF_TAG = /prefer|do\s*not\s*assign|female|\bmale\b|consistent|same cleaner/i;
+  const prefsOut = (p) => ({
+    female_only: p.femaleOnly,
+    prefers_female: p.prefersFemale && !p.femaleOnly,
+    prefers_male: p.prefersMale,
+    consistent: p.consistent,
+    prefers: p.prefers.map(titleCase),
+    avoid: p.avoid.map(titleCase),
+    // Names on tags that point at no cleaner, or at several (then nobody is boosted).
+    unmatched: (p.unmatched || []).map(titleCase),
+    ambiguous: (p.ambiguous || []).map((a) => ({ name: titleCase(a.name), cleaners: a.cleaners })),
+  });
   function clientOut(s, customerId) {
     const cu = customerId != null ? s.customers.get(customerId) : null;
     if (!cu) return null;
@@ -850,14 +905,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       phone: cu.phone || null,
       recurring: cu.recurring,
       main: main ? { id: main.id, name: main.name, visits: cu.main.visits, of: cu.main.of, available: main.assignable } : null,
-      prefs: {
-        female_only: cu.prefs.femaleOnly,
-        prefers_female: cu.prefs.prefersFemale && !cu.prefs.femaleOnly,
-        prefers_male: cu.prefs.prefersMale,
-        consistent: cu.prefs.consistent,
-        prefers: cu.prefs.prefers.map(titleCase),
-        avoid: cu.prefs.avoid.map(titleCase),
-      },
+      prefs: prefsOut(cu.prefs),
       notes: (cu.tags || []).filter((t) => !PREF_TAG.test(t)).slice(0, 6),
     };
   }
@@ -883,7 +931,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       const c = r.cleaner_id != null ? s.byId.get(Number(r.cleaner_id)) : null;
       const day = v?.date || dateStr(r.due);
       const w = c && day ? windowFor(c, day) : null;
-      const cleaner = c ? { id: c.id, location_ids: c.location_ids || [], name: c.name, status: STATUS_LABEL[c.status], hours: w ? `${clock(w[0])}–${clock(w[1])}` : null, working: !!w } : null;
+      const cleaner = c ? { id: c.id, location_ids: c.location_ids || [], name: c.name, status: STATUS_LABEL[c.status], hours: w ? hoursText(w) : null, working: !!w } : null;
       const detail = { ...(r.detail || {}) };
       if (r.kind === 'availability' && Array.isArray(detail.affected)) detail.affected_visits = detail.affected.map((k) => s.visits.find((x) => x.key === k)).filter(Boolean).map((x) => visitOut(s, x));
       if (r.kind === 'moved' && detail.from) detail.from_label = `${nice(detail.from.date)} at ${clock(detail.from.start)}`;
@@ -914,10 +962,13 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
   // reschedules). With 'same' and nothing free, any_count says how many slots other cleaners have.
   // locations: only cleaners working in these Launch27 locations (one brand); null = all.
   // held: slots reserved but not booked yet [{ cleaner_id, date, start, end }]; they count as busy.
-  async function findSlots({ customer_id, lat, lng, duration = 180, kind = 'one', from, days = 14, weekdays = null, earliest = 0, latest = 24 * 60, limit = 12, cleaner = 'any', booking_id = null, locations = null, held = [] } = {}) {
+  async function findSlots({ customer_id, lat, lng, duration = 180, kind = 'one', from, days = 14, weekdays = null, earliest = 0, latest = 24 * 60, limit = 12, cleaner = 'any', booking_id = null, locations = null, held = [] } = {}, bearer = null, wishes = undefined) {
     const s = await need();
     const ctx = ctxFor(s);
     const cu = customer_id ? s.customers.get(Number(customer_id)) : null;
+    // Read once per search; the "any cleaner" count below reuses it.
+    if (wishes === undefined) wishes = customer_id ? await clientWishes(s, customer_id, bearer) : null;
+    const prefs = wishes?.prefs;
     let place = { lat: lat == null ? null : Number(lat), lng: lng == null ? null : Number(lng) };
     if (place.lat == null && cu) {
       const any = [...cu.future, ...cu.past].find((v) => v.lat != null);
@@ -959,13 +1010,13 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
         }
         if (picked == null) continue;
         const dates = seriesDates(k, d, horizon);
-        const job = { dates, start: picked, duration: dur, place, kind: k, prefs: cu?.prefs, mainCleanerId: cu?.main?.id, history: cu?.history, firstDate: d };
+        const job = { dates, start: picked, duration: dur, place, kind: k, prefs, mainCleanerId: cu?.main?.id, history: cu?.history, firstDate: d };
         const [rank] = rankCleaners(job, [c], rankCtx, { limit: 1, ignoreKeys: ignore });
         if (!rank || rank.fits < dates.length) continue; // recurring: must be free every time
-        found.push({ date: d, day: DAYNAME[weekday(d)], start: picked, time: clock(picked), end: clock(picked + dur), cycle: cycleWeek(d), weeks: cycleWeeks(k, d), repeats: dates.length, cleaner: { id: c.id, name: c.name, color: c.color, is_new: c.isNew }, score: rank.score - i * 0.004, reasons: rank.reasons, travel: rank.travel });
+        found.push({ date: d, day: DAYNAME[weekday(d)], start: picked, time: clock(picked), end: clock(picked + dur), cycle: cycleWeek(d), weeks: cycleWeeks(k, d), repeats: dates.length, cleaner: { id: c.id, name: c.name, color: c.color, is_new: c.isNew }, preferred: rank.preferred, score: rank.score - i * 0.004, reasons: rank.reasons, travel: rank.travel });
       }
     }
-    found.sort((a, b) => b.score - a.score);
+    found.sort((a, b) => Number(b.preferred) - Number(a.preferred) || b.score - a.score);
     const seen = new Set();
     const slots = [];
     for (const f of found) {
@@ -977,7 +1028,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     }
     let anyCount = null;
     if (sameApplies && !slots.length) {
-      const other = await findSlots({ customer_id, lat, lng, duration, kind, from, days, weekdays, earliest, latest, limit, cleaner: 'any', booking_id, locations, held });
+      const other = await findSlots({ customer_id, lat, lng, duration, kind, from, days, weekdays, earliest, latest, limit, cleaner: 'any', booking_id, locations, held }, bearer, wishes);
       anyCount = other.slots.length;
     }
     return {
@@ -986,9 +1037,13 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       frequency: FREQ_LABEL[k],
       duration: dur,
       customer: cu ? { id: cu.id, name: cu.name, main: main?.name || null } : null,
+      // Who the client's tags ask for (ranked ahead of the usual cleaner).
+      asked_for: prefs ? s.cleaners.filter((c) => prefs.preferIds.has(c.id)).map((c) => c.name) : [],
       cleaner: sameApplies ? 'same' : 'any',
       no_usual: wantSame && !main,
       any_count: anyCount,
+      // The wishes this search applied, so the planner can show them next to the results.
+      wishes: wishes ? { prefs: prefsOut(wishes.prefs), source: wishes.source } : null,
       slots,
     };
   }
@@ -1018,7 +1073,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
 
   // Assign a cleaner in Launch27 (signed-in user's login). Projected visits of a series can't
   // be assigned one by one in Launch27; they are reported back.
-  async function assign({ visit_keys = [], cleaner_id, recommended = false }, bearer, email = null) {
+  async function assign({ visit_keys = [], cleaner_id, recommended = false, override = false }, bearer, email = null) {
     const s = await need();
     const logWrite = (entry) => (writes ? writes.record({ email, source: 'planner assign', method: 'POST', path: '/v1/staff/bookings/assign/teams', ...entry }) : Promise.resolve());
     if (!config.allowWrites) {
@@ -1029,6 +1084,16 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     if (!c) throw Object.assign(new Error('Unknown cleaner'), { status: 404 });
     if (!c.assignable) throw Object.assign(new Error(`${c.name} is ${STATUS_LABEL[c.status].toLowerCase()} and can't take bookings`), { status: 400 });
     const visits = visit_keys.map((k) => s.visits.find((v) => v.key === String(k))).filter(Boolean);
+    // Never hand a client the cleaner their tags rule out, whichever screen the pick came from,
+    // unless the office says to assign anyway (override; the caller asks first).
+    for (const cid of override ? [] : new Set(visits.map((v) => v.customer_id).filter((x) => x != null))) {
+      const why = blockedWhy((await clientWishes(s, cid, bearer))?.prefs, c);
+      if (!why) continue;
+      const who = s.customers.get(cid)?.name || 'This client';
+      const msg = why.startsWith('Client asked') ? `${who} asked never to have ${c.name} ("do not assign" tag). Pick another cleaner, or remove the tag in Launch27 if that has changed.` : `${who} wants a female cleaner only, so ${c.name} can't take this.`;
+      await logWrite({ outcome: 'blocked', status: 409, body: { visit_keys, cleaner_id }, error: msg });
+      throw Object.assign(new Error(msg), { status: 409, code: 'client_wishes' });
+    }
     const real = visits.filter((v) => v.id);
     const projected = visits.filter((v) => !v.id);
     for (const v of real) {
@@ -1088,7 +1153,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       const d = addDays(weekStart, (wd + 6) % 7);
       const w = windowFor(c, d);
       const booked = (s.busy.get(`${c.id}|${d}`) || []).reduce((m, v) => m + v.duration, 0);
-      return { date: d, day: DAYNAME[wd], past: d < t, working: !!w, unavailable: !!unavailable.get(c.id)?.has(d), capacity_h: w ? Math.round((w[1] - w[0]) / 6) / 10 : 0, booked_h: Math.round(booked / 6) / 10 };
+      return { date: d, day: DAYNAME[wd], past: d < t, working: !!w, unavailable: !!unavailable.get(c.id)?.has(d), capacity_h: w ? Math.round(openMinutes(w) / 6) / 10 : 0, booked_h: Math.round(booked / 6) / 10 };
     });
     // Today: their day in order, with drive estimates between visits and any problems.
     const w0 = windowFor(c, t);
@@ -1099,18 +1164,20 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       if (!w0) issues.push('Not a working day for them');
       else if (v.end > w0[1]) issues.push(`Ends after their ${clock(w0[1])} finish`);
       else if (v.start < w0[0]) issues.push(`Starts before their ${clock(w0[0])} start`);
+      else if (breakHit(w0, v.start, v.end)) issues.push(`Runs into their ${breakHit(w0, v.start, v.end).map(clock).join('–')} break`);
       if (prev && prev.end + (drive || 0) > v.start) issues.push('Tight: not enough time to get there');
       prev = v;
       const cu = s.customers.get(v.customer_id);
       return { ...visitOut(s, v), end: clock(v.end), services: v.services, drive_before: drive, issues, note: cu?.prefs.consistent ? 'wants the same cleaner every time' : null };
     });
     // Clients who asked never to have them; usual hours as plain text.
-    const avoidedBy = [...s.customers.values()].filter((cu) => cu.prefs.avoid.some((n) => nameMatches(c.name, n))).length;
+    const avoidedBy = [...s.customers.values()].filter((cu) => rulesOut(cu.prefs, c)).length;
     const rows = c.availability || [];
     const groups = [];
     for (const wd of [1, 2, 3, 4, 5, 6, 0]) {
-      const r = rows.find((x) => !x.date && Number(x.weekday) === wd);
-      const label = r && !r.dayoff && r.start_time && r.end_time ? `${clock(toMinutesHM(r.start_time))} – ${clock(toMinutesHM(r.end_time))}` : 'Off';
+      // Every block of a split day (8am – 1pm, 2:15pm – 6pm), not just the first.
+      const usual = workingWindow(rows.filter((x) => !x.date), addDays(weekStart, (wd + 6) % 7));
+      const label = usual ? windowBlocks(usual).map(([a, b]) => `${clock(a)} – ${clock(b)}`).join(', ') : 'Off';
       const g = groups.at(-1);
       if (g && g.label === label) g.days.push(DAYNAME[wd]);
       else groups.push({ label, days: [DAYNAME[wd]] });
@@ -1246,6 +1313,6 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     return out;
   }
 
-  return { utilizationSource, recommendFor, recordedDays, firstRecordedDay, reset, dataChanged, cleanerProfile, cleanerForBooking, sync, start, soon, maybeRun, status, overview, plan, gapOptions, unassigned, continuity, changes, resolveChange, findSlots, checkSlot, assign, markUnavailable, cleaners, isRunning: () => !!running, _load: load, _window: windowFor };
+  return { utilizationSource, recommendFor, recordedDays, firstRecordedDay, reset, dataChanged, cleanerProfile, cleanerForBooking, clientWishes: clientWishesOut, sync, start, soon, maybeRun, status, overview, plan, gapOptions, unassigned, continuity, changes, resolveChange, findSlots, checkSlot, assign, markUnavailable, cleaners, isRunning: () => !!running, _load: load, _window: windowFor };
 }
 
