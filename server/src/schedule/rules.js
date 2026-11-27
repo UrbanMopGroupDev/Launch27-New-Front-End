@@ -89,6 +89,8 @@ export function parseCleaner(t) {
     gender: codes.includes('F') || has(/^female$/) ? 'F' : codes.includes('M') || has(/^male$/) ? 'M' : null,
     hoursType: codes.includes('FT') ? 'FT' : codes.includes('PT') ? 'PT' : null,
     color: t.bg_color || '#94A3B8',
+    // Launch27's "Exclude from Schedule": not offered in booking spots.
+    excluded: !!t.options?.excluded_from_spots,
     phone: t.phone || null,
     lat: Number.isFinite(Number(t.latitude)) && t.latitude !== null ? Number(t.latitude) : null,
     lng: Number.isFinite(Number(t.longitude)) && t.longitude !== null ? Number(t.longitude) : null,

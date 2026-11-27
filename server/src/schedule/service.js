@@ -1,6 +1,7 @@
 // Scheduling planner: sync from Launch27 (read-only), detect changes, answer the screens.
 // Writes (assigning a cleaner) go to Launch27 with the signed-in user's own login.
 import { SAMPLE_VERSION } from '../mock/launch27.js';
+import { VERIFIED, excludeRequest, weeklyRequest } from './availability.js';
 import { torontoInstant } from '../reports/raise.js';
 import { clientId, clientLabel, harmonizePartners, noteHints, partnerOf } from '../commercial/partners.js';
 import {
@@ -657,7 +658,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     if (!s) throw Object.assign(new Error('The schedule has not been loaded yet. It loads automatically within a few minutes, or click "Refresh now".'), { status: 409 });
     return s;
   }
-  const cleanerOut = (c) => ({ id: c.id, location_ids: c.location_ids || [], lat: c.lat, lng: c.lng, name: c.name, status: c.status, status_label: STATUS_LABEL[c.status], assignable: c.assignable, is_new: c.isNew, gender: c.gender, hours_type: c.hoursType, color: c.color, area: c.area, phone: c.phone, weekly_hours: c.weekly_hours, tags: c.tags, rules: c.rules, stars: c.stars ?? null, ratings_count: c.ratings_count ?? null, created_at: c.created_at ?? null, share: c.share ?? null });
+  const cleanerOut = (c) => ({ id: c.id, location_ids: c.location_ids || [], lat: c.lat, lng: c.lng, name: c.name, status: c.status, status_label: STATUS_LABEL[c.status], assignable: c.assignable, excluded: !!c.excluded, is_new: c.isNew, gender: c.gender, hours_type: c.hoursType, color: c.color, area: c.area, phone: c.phone, weekly_hours: c.weekly_hours, tags: c.tags, rules: c.rules, stars: c.stars ?? null, ratings_count: c.ratings_count ?? null, created_at: c.created_at ?? null, share: c.share ?? null });
 
   async function status() {
     const last = await latestRun();
@@ -1171,7 +1172,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       });
       const week = out.slice(0, 7);
       return {
-        id: c.id, name: c.name, status: c.status, status_label: STATUS_LABEL[c.status], assignable: c.assignable, phone: c.phone || null, color: c.color, area: c.area || null,
+        id: c.id, name: c.name, status: c.status, status_label: STATUS_LABEL[c.status], assignable: c.assignable, excluded: !!c.excluded, phone: c.phone || null, color: c.color, area: c.area || null,
         week: { booked_h: Math.round(week.reduce((m, x) => m + x.booked_h, 0) * 10) / 10, capacity_h: Math.round(week.reduce((m, x) => m + x.capacity_h, 0) * 10) / 10, days_off: week.filter((x) => x.state === 'off').length },
         days: out,
       };
@@ -1193,16 +1194,18 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
 
   /** Launch27's rows for one cleaner, read now: the weekly hours and the one-off changes from..to. */
   async function readAvailability(cleanerId, from, to, bearer) {
-    const [weekly, dated] = await Promise.all([get(bearer, availPath(cleanerId)), get(bearer, availPath(cleanerId), { from, to })]);
+    // Time-off notes ("Doctor's appointment") are shown, not required: a refused read leaves them out.
+    const [weekly, dated, notes] = await Promise.all([get(bearer, availPath(cleanerId)), get(bearer, availPath(cleanerId), { from, to }), get(bearer, `${availPath(cleanerId)}/notes`, { from, to }).catch(() => [])]);
     const list = (x) => (Array.isArray(x) ? x : []);
     return {
+      notes: list(notes).filter((n) => n?.start_date && n?.end_date).map((n) => ({ id: n.id ?? null, start_date: String(n.start_date).slice(0, 10), end_date: String(n.end_date).slice(0, 10), note: String(n.note || '') })),
       weekly: list(weekly).filter((r) => !r.date).map((r) => ({ weekday: Number(r.weekday), dayoff: !!r.dayoff, start_time: hm(r.start_time), end_time: hm(r.end_time) })),
       dated: list(dated).filter((r) => r.date && String(r.date).slice(0, 10) >= from && String(r.date).slice(0, 10) <= to).map(datedRow),
     };
   }
 
   /** One cleaner's days from..to: their hours, how they came about, and their visits (from the planner's copy). */
-  async function availabilityDays(cleanerId, from, to, { weekly, dated }) {
+  async function availabilityDays(cleanerId, from, to, { weekly, dated, notes = [] }) {
     const s = await need();
     const c = s.byId.get(Number(cleanerId));
     const off = unavailable.get(Number(cleanerId)) || new Set();
@@ -1223,6 +1226,7 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
         kind: change && !same ? (w ? 'changed' : 'day_off') : usualW || w ? 'usual' : 'off',
         change,
         portal_off: off.has(d),
+        notes: notes.filter((n) => n.start_date <= d && n.end_date >= d).map((n) => n.note).filter(Boolean),
         booked_h: Math.round(visits.reduce((m, v) => m + v.duration / Math.max(v.cleaners.length, 1), 0) / 6) / 10,
         visits,
       });
@@ -1267,6 +1271,77 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
       await db.tx((q) => recordChanges(q, problems(s))).catch(() => {});
     }
     return saved;
+  }
+
+  /**
+   * One write to Launch27 for the availability screens: refused while writes are off, and against
+   * the live Launch27 while the request isn't yet checked against a recording of Launch27's own
+   * save (kind: 'weekly' or 'exclude'). Logged like every write.
+   */
+  async function l27Write({ method, path, body }, bearer, email, source, kind = null) {
+    const logWrite = (entry) => (writes ? writes.record({ email, source, method, path, ...entry }) : Promise.resolve());
+    if (!config.allowWrites) {
+      await logWrite({ outcome: 'blocked', status: 403, body });
+      throw Object.assign(new Error('Writes to Launch27 are turned off here'), { status: 403 });
+    }
+    if (kind && !VERIFIED[kind] && config.l27Mode !== 'mock') {
+      await logWrite({ outcome: 'blocked', status: 409, body, error: 'request not yet checked against a recording of Launch27' });
+      throw Object.assign(new Error("This save isn't switched on for the live Launch27 yet: it waits for a recording of Launch27's own save. Change it in Launch27 for now."), { status: 409, code: 'needs_recording' });
+    }
+    let res;
+    try {
+      res = await fetchImpl(`${config.l27BaseUrl}${path}`, { method, headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
+    } catch (err) {
+      await logWrite({ outcome: 'failed', body, error: err.message });
+      throw Object.assign(new Error(`Launch27 didn't answer: ${err.message}`), { status: 502 });
+    }
+    const answer = await res.json().catch(() => null);
+    await logWrite({ outcome: res.ok ? 'done' : 'refused', status: res.status, body, error: res.ok ? null : `Launch27 answered ${res.status}${answer?.error ? `: ${answer.error}` : ''}` });
+    if (!res.ok) throw Object.assign(new Error(`Launch27 refused the change (${res.status})${answer?.error ? `: ${answer.error}` : ''}`), { status: 502 });
+    return answer;
+  }
+
+  /** Visits from today on (planner's copy) that new weekly hours would leave outside the cleaner's hours. */
+  async function weeklyAffected(cleanerId, weeklyRows) {
+    const s = await need();
+    const c = s.byId.get(Number(cleanerId));
+    if (!c) return [];
+    const rows = [...weeklyRows.map((r) => ({ ...r, date: null })), ...(c.availability || []).filter((r) => r.date)];
+    const out = [];
+    for (let d = s.today; d <= addDays(s.today, AHEAD_DAYS); d = addDays(d, 1)) {
+      const w = workingWindow(rows, d, unavailable.get(c.id));
+      for (const v of s.busy.get(`${c.id}|${d}`) || []) {
+        if (!w || !fits(w, v.start, v.end)) out.push({ date: d, time: clock(v.start), end: clock(v.end), customer: v.customer, booking_id: v.id ?? null });
+      }
+    }
+    return out.sort((a, b) => a.date.localeCompare(b.date) || a.time.localeCompare(b.time));
+  }
+
+  /** Save the usual weekly hours in Launch27 (Default Availability); the planner's copy takes them at once. */
+  async function saveWeekly(cleanerId, weeklyRows, bearer, email = null) {
+    await l27Write(weeklyRequest(cleanerId, weeklyRows), bearer, email, 'cleaner weekly hours', 'weekly');
+    const s = await load();
+    const c = s?.byId.get(Number(cleanerId));
+    if (c) {
+      c.availability = [...weeklyRows.map((r) => ({ id: null, date: null, ...r })), ...(c.availability || []).filter((r) => r.date)];
+      c.weekly_hours = weeklyHours(c.availability);
+      await db.tx((q) => recordChanges(q, problems(s))).catch(() => {});
+    }
+    return weeklyRows;
+  }
+
+  /** Exclude a cleaner from the schedule (Launch27's booking spots), or put them back. */
+  async function setExcluded(cleanerId, excluded, bearer, email = null) {
+    await l27Write(excludeRequest(cleanerId, excluded), bearer, email, 'exclude from schedule', 'exclude');
+    const s = await load();
+    const c = s?.byId.get(Number(cleanerId));
+    if (c) c.excluded = !!excluded;
+    return { excluded: !!excluded };
+  }
+
+  /** Whether a cleaner is excluded from the schedule, as last read from Launch27. */
+  async function isExcluded(cleanerId) {
+    return !!(await need()).byId.get(Number(cleanerId))?.excluded;
   }
 
   // Everything the cleaner profile needs from the planner's stored schedule.
@@ -1453,6 +1528,6 @@ export function createSchedule({ db, config, fetchImpl = fetch, log = { info() {
     return out;
   }
 
-  return { utilizationSource, teamAvailability, cleanerBrief, readAvailability, availabilityDays, saveAvailability, recommendFor, recordedDays, firstRecordedDay, reset, dataChanged, cleanerProfile, cleanerForBooking, clientWishes: clientWishesOut, sync, start, soon, maybeRun, status, overview, plan, gapOptions, unassigned, continuity, changes, resolveChange, findSlots, checkSlot, assign, markUnavailable, cleaners, isRunning: () => !!running, _load: load, _window: windowFor };
+  return { utilizationSource, teamAvailability, cleanerBrief, readAvailability, weeklyAffected, saveWeekly, setExcluded, isExcluded, availabilityDays, saveAvailability, recommendFor, recordedDays, firstRecordedDay, reset, dataChanged, cleanerProfile, cleanerForBooking, clientWishes: clientWishesOut, sync, start, soon, maybeRun, status, overview, plan, gapOptions, unassigned, continuity, changes, resolveChange, findSlots, checkSlot, assign, markUnavailable, cleaners, isRunning: () => !!running, _load: load, _window: windowFor };
 }
 

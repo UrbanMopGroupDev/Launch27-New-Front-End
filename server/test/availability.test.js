@@ -2,7 +2,7 @@
 // sent, the visits a change leaves outside the cleaner's hours, and the save through the planner.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { checkChanges, dateRange, toRows, visitsAffected, createAvailabilityHistory } from '../src/schedule/availability.js';
+import { checkChanges, checkWeekly, dateRange, toRows, visitsAffected, createAvailabilityHistory, weeklyRequest } from '../src/schedule/availability.js';
 import { createSchedule } from '../src/schedule/service.js';
 import { createWriteLog } from '../src/writes.js';
 import { createMockLaunch27 } from '../src/mock/launch27.js';
@@ -52,6 +52,7 @@ function world() {
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'content-type': 'application/json' } });
     if (u.pathname === '/latest/login') return json({ bearer: 'b' });
     if (u.pathname === '/v1/staff/teams') return json(Number(u.searchParams.get('offset')) ? [] : teams);
+    if (u.pathname === '/v1/staff/teams/1/availability/notes') return json([{ id: 5, start_date: '2026-11-03', end_date: '2026-11-04', note: 'Test appointment' }]);
     if (u.pathname === '/v1/staff/teams/1/availability') {
       if (init.method === 'POST') {
         const body = JSON.parse(init.body);
@@ -77,6 +78,20 @@ function world() {
   return { dated, posts, fetchImpl };
 }
 
+describe('availability: usual weekly hours', () => {
+  const week = (over = {}) => [0, 1, 2, 3, 4, 5, 6].map((wd) => over[wd] || (wd === 0 || wd === 6 ? { weekday: wd, dayoff: true } : { weekday: wd, blocks: [{ start_time: '08:00', end_time: '17:00' }] }));
+  test('checkWeekly: seven days, day off or blocks, no overlaps', () => {
+    const rows = checkWeekly(week({ 2: { weekday: 2, blocks: [{ start_time: '13:00', end_time: '17:00' }, { start_time: '08:00', end_time: '12:00' }] } }));
+    assert.equal(rows.filter((r) => r.weekday === 2).length, 2);
+    assert.equal(rows.find((r) => r.weekday === 2).start_time, '08:00');
+    assert.equal(rows.find((r) => r.weekday === 0).dayoff, true);
+    assert.throws(() => checkWeekly(week().slice(0, 6)), /seven/);
+    assert.throws(() => checkWeekly(week({ 3: { weekday: 3, blocks: [{ start_time: '08:00', end_time: '12:00' }, { start_time: '11:00', end_time: '15:00' }] } })), /overlap/);
+    assert.throws(() => checkWeekly(week({ 3: { weekday: 3, blocks: [{ start_time: '12:00', end_time: '08:00' }] } })), /after the start/);
+    assert.deepEqual(weeklyRequest(7, [{ weekday: 1, dayoff: false, start_time: '08:00', end_time: '17:00' }]).body, [{ weekday: 1, date: null, dayoff: false, start_time: '08:00', end_time: '17:00' }]);
+  });
+});
+
 describe('availability: read and save through the planner', () => {
   test('a day off is sent to Launch27, logged, and the planner sees it at once', async () => {
     const w = world();
@@ -92,6 +107,7 @@ describe('availability: read and save through the planner', () => {
     assert.equal(before[0].kind, 'usual');
     assert.equal(before[0].visits.length, 1);
     assert.equal(before[0].visits[0].outside, false);
+    assert.deepEqual(before[0].notes, ['Test appointment']);
 
     await s.saveAvailability(1, [{ date: '2026-11-03', dayoff: true }], 'b', 'ops@example.com', 'mark a day off');
     assert.deepEqual(w.posts, [[{ date: '2026-11-03', dayoff: true }]]);
@@ -130,6 +146,37 @@ describe('availability: read and save through the planner', () => {
     assert.equal(rows.length, 1);
     assert.equal(rows[0].date, '2026-11-03');
     assert.equal(rows[0].source, 'mark_off');
+  });
+
+  test('weekly hours and exclude: saved against the test Launch27, refused against the live one until recorded', async () => {
+    const w = world();
+    const extra = [];
+    const fetchImpl = async (url, init = {}) => {
+      if ((init.method === 'POST' && !url.includes('/login')) || init.method === 'PUT') extra.push({ path: new URL(url).pathname, method: init.method, body: JSON.parse(init.body) });
+      if (init.method === 'PUT') return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+      return w.fetchImpl(url, init);
+    };
+    const db = await openDb();
+    const base = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const writes = createWriteLog({ db });
+    const s = createSchedule({ db, config: base, fetchImpl, log: quiet, now: () => NOW, writes });
+    await s.sync();
+    // Tuesdays off from now on: her Nov 3 visit would be outside.
+    const rows = checkWeekly([0, 1, 2, 3, 4, 5, 6].map((wd) => (wd === 0 || wd === 6 || wd === 2 ? { weekday: wd, dayoff: true } : { weekday: wd, blocks: [{ start_time: '08:00', end_time: '17:00' }] })));
+    assert.deepEqual((await s.weeklyAffected(1, rows)).map((v) => v.date), ['2026-11-03']);
+    await s.saveWeekly(1, rows, 'b', 'ops@example.com');
+    assert.equal(extra[0].path, '/v1/staff/teams/1/availability');
+    assert.equal(extra[0].body.length, 7);
+    assert.equal((await s.plan(1)).weeks[0].cells.find((x) => x.date === '2026-11-03')?.off ?? true, true);
+    await s.setExcluded(1, true, 'b');
+    assert.deepEqual(extra[1], { path: '/v1/staff/teams/1', method: 'PUT', body: { options: { excluded_from_spots: true } } });
+    assert.equal(await s.isExcluded(1), true);
+
+    const live = createSchedule({ db, config: { ...base, l27Mode: 'live' }, fetchImpl, log: quiet, now: () => NOW, writes });
+    const sent = extra.length;
+    await assert.rejects(() => live.saveWeekly(1, rows, 'b'), (e) => e.status === 409 && e.code === 'needs_recording');
+    await assert.rejects(() => live.setExcluded(1, true, 'b'), (e) => e.code === 'needs_recording');
+    assert.equal(extra.length, sent);
   });
 
   test('with Launch27 writes off nothing is sent, and the attempt is logged as blocked', async () => {
