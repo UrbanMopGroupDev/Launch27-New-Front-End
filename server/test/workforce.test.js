@@ -29,8 +29,8 @@ describe('workforce: statuses, teams, capacity, routing modes', () => {
     ana = await mk('ana@example.com', 'Ana');
     ben = await mk('ben@example.com', 'Ben');
     boss = await mk('boss@example.com', 'Boss', 'supervisor');
-    // Ana and Ben work Operations through the Customer care team, not direct membership.
-    const team = (await db.query("SELECT id FROM teams WHERE name = 'Customer care'")).rows[0].id;
+    // Ana and Ben work Operations through the daytime Operations team, not direct membership.
+    const team = (await db.query("SELECT id FROM teams WHERE name = '(8AM-6PM)Operations Team'")).rows[0].id;
     for (const u of [ana, ben]) await db.query('INSERT INTO team_members (team_id, user_id) VALUES ($1,$2)', [team, u.id]);
   });
   after(() => db.close());

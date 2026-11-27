@@ -503,7 +503,7 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       // Texts start from a number the SMS connector can really send from (the Twilio numbers).
       const smsNumbers = sendableIdentities(connectors, 'sms');
       const ours = from || (channel === 'email' ? (!sendable || sendable.includes(UM.info) ? UM.info : sendable[0]) : smsNumbers?.length && !smsNumbers.includes(UM.smsOttawa) ? smsNumbers[0] : UM.smsOttawa);
-      const queue = await one(q, 'SELECT id FROM queues WHERE slug = $1', [(contact.roles || []).includes('applicant') ? 'hiring' : 'operations']);
+      const queue = await one(q, 'SELECT id FROM queues WHERE slug = $1', [(contact.roles || []).includes('applicant') ? 'hr' : 'operations']);
       const conv = await one(q, "INSERT INTO conversations (contact_id, channel, our_identity, their_identity, subject, queue_id, owner_id, l27_booking_id, routed_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'Started by agent') RETURNING *", [contact.id, channel, channel === 'email' ? normalizeEmail(ours) : normalizePhone(ours), target, subject || null, queue?.id, req.user.id, l27_booking_id || null]);
       if (body) await svc.reply(q, req.user, conv.id, { body, channel, to: target, subject, from: conv.our_identity }, { connectors });
       return conv;
@@ -1258,7 +1258,7 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       try {
         await fn(req, res);
       } catch (err) {
-        if (err.status) return res.status(err.status).json({ error: err.message });
+        if (err.status) return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
         throw err;
       }
     });
@@ -1298,10 +1298,11 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       await schedule.resolveChange(Number(req.params.id), req.body?.resolution, req.user.id);
       res.status(204).end();
     }));
-    r.post('/schedule/find-slots', sched(async (req, res) => res.json(await schedule.findSlots(req.body || {}))));
+    r.post('/schedule/find-slots', sched(async (req, res) => res.json(await schedule.findSlots(req.body || {}, req.bearer))));
+    r.get('/schedule/client/:id/wishes', sched(async (req, res) => res.json(await schedule.clientWishes(Number(req.params.id), req.bearer))));
     r.post('/schedule/assign', sched(async (req, res) => {
       const out = await schedule.assign(req.body || {}, req.bearer, req.user.email);
-      await svc.audit(db, req.user.id, 'schedule.assign', 'cleaner', req.body?.cleaner_id, { visits: (req.body?.visit_keys || []).length });
+      await svc.audit(db, req.user.id, 'schedule.assign', 'cleaner', req.body?.cleaner_id, { visits: (req.body?.visit_keys || []).length, ...(req.body?.override ? { override: 'client wishes' } : {}) });
       res.json(out);
     }));
     r.put('/schedule/unavailable', sched(async (req, res) => {
