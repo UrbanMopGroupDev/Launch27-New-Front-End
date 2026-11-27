@@ -317,6 +317,18 @@ describe('Complaints tracker', () => {
       assert.match(n.escalation, /Office Manager/);
       assert.equal(built, 1, 'the playbook is built once and reused');
 
+      // A likely root cause in the notes: its own history when it has enough known outcomes.
+      book.by_cause = [
+        { key: 'regular_left', n: 30, decided: 14, saved: 0.4, typical_name: 'Partial refund', cheapest_that_works: { rung: 'L5', name: 'Partial refund', saved: 0.5, avg_cost: 70, grade: 'Medium', reason: '14 known' }, by_rung: [] },
+        { key: 'language', n: 4, decided: 3, saved: 0.3, cheapest_that_works: null, by_rung: [] },
+      ];
+      const left = Number((await t.create(user, { title: 'x', complaint_type: 'Quality of Cleaning', complaint_notes: 'Since our cleaner left the bathrooms are never done.' })).record.id);
+      const lg = await t.guidance(left);
+      assert.deepEqual([lg.category, lg.cause, lg.based_on, lg.cheapest.name, lg.cases], ['quality_missed', 'regular_left', 'cause', 'Partial refund', 30]);
+      const thin = Number((await t.create(user, { title: 'x', complaint_type: 'Quality of Cleaning', complaint_notes: "She didn't understand my instructions." })).record.id);
+      const tg = await t.guidance(thin);
+      assert.deepEqual([tg.cause, tg.based_on, tg.cheapest.name], ['language', 'category', '$10 credit'], 'too few outcomes for the cause: the category answers');
+
       const clientFault = Number((await t.create(user, { title: 'x', complaint_type: "Complaint but Client's Fault" })).record.id);
       assert.deepEqual([(await t.guidance(clientFault)).category, (await t.guidance(clientFault)).available], [null, true]);
       assert.equal(await t.guidance(9999), null);
