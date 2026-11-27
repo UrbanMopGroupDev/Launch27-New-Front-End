@@ -5,7 +5,7 @@
 // (src/complaints, complaint_cases) is separate and is not read or changed here.
 import { createKustomerClient, discover } from '../complaints/sources/kustomer.js';
 import { audit } from '../inbox/service.js';
-import { FIELDS, FIELD_KEYS, LIST_COLUMNS, PANELS, STATUSES, VIEWS, cleanValue } from './fields.js';
+import { FIELDS, FIELD_KEYS, LIST_COLUMNS, PANELS, STATUSES, USER_LINKS, VIEWS, cleanValue } from './fields.js';
 
 const one = async (q, sql, p) => (await q.query(sql, p)).rows[0] || null;
 const many = async (q, sql, p) => (await q.query(sql, p)).rows;
@@ -22,7 +22,7 @@ export function torontoDay(value) {
 // Every column the API returns, with dates as YYYY-MM-DD text and numbers as numbers.
 const FIELD_SQL = FIELDS.map((f) => (f.type === 'date' ? `r.${f.key}::text AS ${f.key}` : f.type === 'number' ? `r.${f.key}::float8 AS ${f.key}` : `r.${f.key}`)).join(', ');
 const BASE_SQL = `r.id, r.source, r.source_id, r.title, r.state, r.snooze_until, r.conversation_id, r.contact_id, r.l27_customer_id, r.l27_booking_id,
-  r.assigned_user_id, r.created_by, r.created_at, r.updated_at, ${FIELD_SQL},
+  r.cleaner_id, ${USER_LINKS.map((l) => `r.${l.id}`).join(', ')}, r.assigned_user_id, r.created_by, r.created_at, r.updated_at, ${FIELD_SQL},
   COALESCE(u.name, u.email) AS assigned_user,
   (SELECT count(*)::int FROM complaint_record_comments cm WHERE cm.record_id = r.id) AS comment_count`;
 
@@ -81,6 +81,32 @@ export function fromKustomer(kobject) {
 
 // Kustomer escapes punctuation in comment text ("bi\-weekly"); show it as typed.
 const unescapeComment = (s) => String(s || '').replace(/\\([\\`*_{}[\]()#+\-.!>~|])/g, '$1');
+
+// A Launch27 cleaner's name as the office writes it: the title without its leading codes
+// ("(OTT) Maria Gonzalez" -> "Maria Gonzalez"), as the conversation's Cleaner picker shows it.
+export const cleanerTitle = (t) => {
+  const title = String(t?.title || '').trim();
+  const stripped = title.replace(/^\s*(on\s*hold\s*)?(\s*\([^)]*\))*\s*/i, '').trim();
+  return stripped || title || [t?.first_name, t?.last_name].filter(Boolean).join(' ').trim() || null;
+};
+const nameKey = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+/** Launch27 cleaners -> Map(name key -> { id, name }), only names that belong to one cleaner. */
+export function cleanerIndex(teams) {
+  const seen = new Map();
+  for (const t of teams || []) {
+    const id = Number(t?.id);
+    if (!Number.isInteger(id) || id <= 0) continue;
+    const name = cleanerTitle(t);
+    const keys = new Set([nameKey(name), nameKey([t.first_name, t.last_name].filter(Boolean).join(' '))].filter(Boolean));
+    for (const k of keys) {
+      const prev = seen.get(k);
+      seen.set(k, prev && prev.id !== id ? { ambiguous: true } : { id, name });
+    }
+  }
+  for (const [k, v] of seen) if (v.ambiguous) seen.delete(k);
+  return seen;
+}
 
 export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}, warn() {}, error() {} }, now = () => Date.now() }) {
   const ratingDays = Number(config.ratingLinkDays) > 0 ? Number(config.ratingLinkDays) : 5;
@@ -182,17 +208,21 @@ export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}
       if (existing) return { ...(await get(Number(existing.id))), existing: true };
     }
     const values = fieldValues(body);
+    if (body.cleaner_id != null && values.cleaner_name) values.cleaner_id = idOrNull(body.cleaner_id, 'Cleaner');
     let contactId = body.contact_id == null ? null : idOrNull(body.contact_id, 'Contact');
     let l27Customer = body.l27_customer_id == null ? null : idOrNull(body.l27_customer_id, 'Customer');
     let l27Booking = body.l27_booking_id == null ? null : idOrNull(body.l27_booking_id, 'Booking');
     if (convId) {
-      const conv = await one(db, 'SELECT c.id, c.contact_id, c.l27_booking_id, c.cleaner_name, co.name AS contact_name, co.l27_customer_id FROM conversations c LEFT JOIN contacts co ON co.id = c.contact_id WHERE c.id = $1', [convId]);
+      const conv = await one(db, 'SELECT c.id, c.contact_id, c.l27_booking_id, c.cleaner_id, c.cleaner_name, co.name AS contact_name, co.l27_customer_id FROM conversations c LEFT JOIN contacts co ON co.id = c.contact_id WHERE c.id = $1', [convId]);
       if (!conv) throw fail(404, 'Conversation not found');
       contactId ??= conv.contact_id ? Number(conv.contact_id) : null;
       l27Customer ??= conv.l27_customer_id ? Number(conv.l27_customer_id) : null;
       l27Booking ??= conv.l27_booking_id ? Number(conv.l27_booking_id) : null;
       values.customer_name ??= conv.contact_name || null;
-      values.cleaner_name ??= conv.cleaner_name || null;
+      if (values.cleaner_name === undefined && conv.cleaner_name) {
+        values.cleaner_name = conv.cleaner_name;
+        if (conv.cleaner_id) values.cleaner_id = Number(conv.cleaner_id);
+      }
     } else if (contactId) {
       const co = await one(db, 'SELECT name, l27_customer_id FROM contacts WHERE id = $1', [contactId]);
       if (!co) throw fail(404, 'Contact not found');
@@ -201,7 +231,10 @@ export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}
     }
     values.status ??= 'For Review';
     values.complaint_created_on ??= today();
-    values.case_opened_by ??= user.name || user.email;
+    if (values.case_opened_by === undefined) {
+      values.case_opened_by = user.name || user.email;
+      values.case_opened_by_user_id = Number(user.id);
+    }
     const title = String(body.title || '').trim().slice(0, 500) || `Complaint for ${values.customer_name || 'a client'}`;
     const cols = ['title', 'conversation_id', 'contact_id', 'l27_customer_id', 'l27_booking_id', 'created_by', ...Object.keys(values)];
     const params = [title, convId, contactId, l27Customer, l27Booking, user.id, ...Object.values(values)];
@@ -226,6 +259,15 @@ export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}
         set.snooze_until = new Date(until).toISOString();
       } else set.snooze_until = null;
     }
+    // A name typed over a linked one is no longer that record.
+    for (const f of FIELDS) if (f.id && body[f.key] !== undefined && body[f.id] === undefined) set[f.id] = null;
+    if (body.cleaner_id !== undefined) {
+      set.cleaner_id = idOrNull(body.cleaner_id, 'Cleaner');
+      if (set.cleaner_id && !set.cleaner_name) throw fail(400, 'Cleaner: name missing');
+      if (!set.cleaner_id && body.cleaner_name === undefined) set.cleaner_name = null;
+    }
+    for (const l of USER_LINKS) if (body[l.id] !== undefined) set[l.id] = idOrNull(body[l.id], l.key);
+    if (body.contact_id !== undefined) set.contact_id = idOrNull(body.contact_id, 'Customer');
     if (body.assigned_user_id !== undefined) set.assigned_user_id = body.assigned_user_id === 'me' ? Number(user.id) : idOrNull(body.assigned_user_id, 'Assigned user');
     if (body.conversation_id !== undefined) set.conversation_id = idOrNull(body.conversation_id, 'Conversation');
     if (body.l27_booking_id !== undefined) set.l27_booking_id = idOrNull(body.l27_booking_id, 'Booking');
@@ -233,11 +275,31 @@ export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}
   }
 
   async function applyPatch(q, user, id, set) {
-    const before = await one(q, 'SELECT id, status, closed_date, assigned_user_id FROM complaint_records WHERE id = $1', [id]);
+    const before = await one(q, 'SELECT id, status, closed_date, case_closed_by, assigned_user_id FROM complaint_records WHERE id = $1', [id]);
     if (!before) throw fail(404, 'Complaint not found');
     const values = { ...set };
-    // Kustomer stamps the closed date when the status becomes Closed.
-    if (values.status === 'Closed' && before.status !== 'Closed' && !before.closed_date && values.closed_date === undefined) values.closed_date = today();
+    // A staff login picked for a name field: the name shown is that login's.
+    for (const l of USER_LINKS) {
+      if (!values[l.id]) continue;
+      const u = await one(q, 'SELECT id, name, email FROM users WHERE id = $1', [values[l.id]]);
+      if (!u) throw fail(400, 'That person has no login here');
+      values[l.key] = u.name || u.email;
+    }
+    // A contact picked as the customer: their name and Launch27 customer come with them.
+    if (values.contact_id) {
+      const co = await one(q, 'SELECT name, l27_customer_id FROM contacts WHERE id = $1', [values.contact_id]);
+      if (!co) throw fail(400, 'Customer: contact not found');
+      values.customer_name = co.name || null;
+      values.l27_customer_id = co.l27_customer_id || null;
+    } else if (values.contact_id === null) values.l27_customer_id = null;
+    // Kustomer stamps the closed date when the status becomes Closed; who closed it is stamped too.
+    if (values.status === 'Closed' && before.status !== 'Closed') {
+      if (!before.closed_date && values.closed_date === undefined) values.closed_date = today();
+      if (!before.case_closed_by && values.case_closed_by === undefined) {
+        values.case_closed_by = user.name || user.email;
+        values.case_closed_by_user_id = Number(user.id);
+      }
+    }
     const keys = Object.keys(values);
     if (!keys.length) return;
     await q.query(`UPDATE complaint_records SET ${keys.map((k, i) => `${k} = $${i + 2}`).join(', ')}, edited_at = now(), updated_at = now() WHERE id = $1`, [id, ...keys.map((k) => values[k])]);
@@ -325,11 +387,43 @@ export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}
     return positiveFor(convId);
   }
 
+  // ---------- names -> records ----------
+  // Links names that match exactly one record: staff names to logins, cleaner names to
+  // Launch27 cleaners (when `teams` is given), and the cleaner set on the conversation.
+  // Only fills ids that are empty; a name nobody matches stays as it was typed.
+  async function linkNames(teams = null) {
+    const out = { users: 0, cleaners: 0 };
+    for (const l of USER_LINKS) {
+      const match = `lower(btrim(u.name)) = lower(btrim(r.${l.key})) OR lower(u.email) = lower(btrim(r.${l.key}))`;
+      const res = await db.query(
+        `UPDATE complaint_records r SET ${l.id} = (SELECT u.id FROM users u WHERE ${match})
+          WHERE r.${l.id} IS NULL AND r.${l.key} IS NOT NULL AND (SELECT count(*) FROM users u WHERE ${match}) = 1`,
+      );
+      out.users += res.rowCount || 0;
+    }
+    const conv = await db.query(
+      `UPDATE complaint_records r SET cleaner_id = c.cleaner_id FROM conversations c
+        WHERE c.id = r.conversation_id AND r.cleaner_id IS NULL AND c.cleaner_id IS NOT NULL AND lower(btrim(c.cleaner_name)) = lower(btrim(r.cleaner_name))`,
+    );
+    out.cleaners += conv.rowCount || 0;
+    if (teams) {
+      const index = cleanerIndex(teams);
+      const open = await many(db, 'SELECT id, cleaner_name FROM complaint_records WHERE cleaner_id IS NULL AND cleaner_name IS NOT NULL');
+      for (const r of open) {
+        const hit = index.get(nameKey(r.cleaner_name));
+        if (!hit) continue;
+        await db.query('UPDATE complaint_records SET cleaner_id = $2, cleaner_name = $3 WHERE id = $1 AND cleaner_id IS NULL', [r.id, hit.id, hit.name]);
+        out.cleaners++;
+      }
+    }
+    return out;
+  }
+
   // ---------- Kustomer load (read-only) ----------
   // Complaints created in the last `days` days, plus every complaint whose status isn't Closed
   // yet, so nothing still being worked is left behind. A complaint someone has since changed
   // here is never overwritten by a later load.
-  async function runLoad({ days }) {
+  async function runLoad({ days, teams = null }) {
     const client = createKustomerClient({ apiKey: config.kustomerApiKey, fetchImpl });
     const found = await discover(client, { klass: config.kustomerComplaintKlass });
     if (!found.complaint_klass || !found.listing) throw new Error(`Kustomer: couldn't list the complaint records. ${(found.attempts || []).map((a) => `${a.label}: ${a.error || 'ok'}`).join(' | ')}`);
@@ -380,15 +474,20 @@ export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}
         }
       }
     }
+    const cleanerList = teams ? await teams().catch((err) => {
+      log.warn('complaint tracker: Launch27 cleaners not read, cleaner names left unlinked', { error: err.message });
+      return null;
+    }) : null;
+    stats.linked = await linkNames(cleanerList);
     return stats;
   }
 
-  function startLoad(user, { days = 30 } = {}) {
+  function startLoad(user, { days = 30, teams = null } = {}) {
     if (!config.kustomerApiKey) throw fail(409, 'Kustomer is only connected in production (KUSTOMER_API_KEY)');
     if (load.running) throw fail(409, 'A load from Kustomer is already running');
     const d = Math.min(365, Math.max(1, Number(days) || 30));
     load = { running: true, started_at: new Date(now()).toISOString(), finished_at: null, result: null, error: null, days: d };
-    load.promise = runLoad({ days: d })
+    load.promise = runLoad({ days: d, teams })
       .then(async (result) => {
         load = { ...load, running: false, finished_at: new Date(now()).toISOString(), result };
         log.info('complaint tracker: loaded from Kustomer', result);
@@ -434,5 +533,5 @@ export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}
     return samples.length;
   }
 
-  return { meta, counts, list, get, create, patch, bulk, comment, forConversation, forContact, positiveList, positiveFor, positiveSet, startLoad, loadStatus, loadDone, ensureSample, FIELD_KEYS };
+  return { meta, counts, list, get, create, patch, bulk, comment, forConversation, forContact, positiveList, positiveFor, positiveSet, linkNames, startLoad, loadStatus, loadDone, ensureSample, FIELD_KEYS };
 }

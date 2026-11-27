@@ -6,7 +6,7 @@ import { openDb } from '../src/db/index.js';
 import { createApp } from '../src/app.js';
 import { createMockLaunch27 } from '../src/mock/launch27.js';
 import { loadConfig } from '../src/config.js';
-import { createTracker, fromKustomer, torontoDay } from '../src/tracker/service.js';
+import { cleanerIndex, cleanerTitle, createTracker, fromKustomer, torontoDay } from '../src/tracker/service.js';
 import { FIELDS, VIEWS, cleanValue } from '../src/tracker/fields.js';
 import { ADJUSTMENT_CATEGORIES, cleanAdjustment, createAdjustments, sheetCells, sheetSerial } from '../src/tracker/adjustments.js';
 import { parseAdjustmentRows } from '../src/reports/adjustments.js';
@@ -198,7 +198,7 @@ describe('Complaints tracker', () => {
       await t.loadDone();
       const status = t.loadStatus();
       assert.equal(status.error, null);
-      assert.deepEqual(status.result, { seen: 3, loaded: 2, kept_as_edited: 0, comments: 1, linked_conversation: 1, linked_contact: 1 });
+      assert.deepEqual(status.result, { seen: 3, loaded: 2, kept_as_edited: 0, comments: 1, linked_conversation: 1, linked_contact: 1, linked: { users: 0, cleaners: 0 } });
       assert.ok(k.calls.every((c) => c.startsWith('GET ')), 'Kustomer is only ever read');
 
       const rows = (await db.query("SELECT id, source_id, state, status, conversation_id, contact_id, l27_customer_id, created_at FROM complaint_records WHERE source = 'kustomer' ORDER BY source_id")).rows;
@@ -214,7 +214,7 @@ describe('Complaints tracker', () => {
       objects[1].attributes.custom.statusStr = 'For Review';
       t.startLoad(user);
       await t.loadDone();
-      assert.deepEqual(t.loadStatus().result, { seen: 3, loaded: 1, kept_as_edited: 1, comments: 0, linked_conversation: 0, linked_contact: 0 });
+      assert.deepEqual(t.loadStatus().result, { seen: 3, loaded: 1, kept_as_edited: 1, comments: 0, linked_conversation: 0, linked_contact: 0, linked: { users: 0, cleaners: 0 } });
       assert.equal((await t.get(Number(closed.id))).record.final_resolution_category, 'Reclean');
       assert.equal((await t.get(Number(rows[0].id))).record.status, 'For Review');
       assert.equal((await db.query('SELECT count(*)::int AS n FROM complaint_records')).rows[0].n, 2, 'no duplicates');
@@ -224,6 +224,72 @@ describe('Complaints tracker', () => {
     } finally {
       await db.close();
     }
+  });
+
+  test('names are linked to records: logins, Launch27 cleaners and contacts; who opened and closed is filled in', async () => {
+    const db = await freshDb();
+    try {
+      const t = createTracker({ db, config: { l27Mode: 'mock' }, log: quiet, now: () => NOW });
+      const jose = (await db.query("SELECT id FROM users WHERE email = 'jose@example.com'")).rows[0].id;
+      const ana = Number(user.id);
+
+      // Opened by: the login that made it.
+      const made = (await t.create(user, { title: 'Missed areas' })).record;
+      const id = Number(made.id);
+      assert.deepEqual([made.case_opened_by, Number(made.case_opened_by_user_id)], ['Ana Agent', ana]);
+
+      // A staff login picked for a name field: the stored name is the login's.
+      let r = (await t.patch(user, id, { cs_agent_user_id: Number(jose), manager_approval_user_id: Number(jose) })).record;
+      assert.deepEqual([r.cs_agent, Number(r.cs_agent_user_id), r.manager_approval], ['Jose Manager', Number(jose), 'Jose Manager']);
+      await assert.rejects(t.patch(user, id, { cs_agent_user_id: 999 }), /no login/);
+
+      // A cleaner picked by id comes with its name (the route puts in Launch27's).
+      r = (await t.patch(user, id, { cleaner_id: 77, cleaner_name: 'Maria Gonzalez' })).record;
+      assert.deepEqual([Number(r.cleaner_id), r.cleaner_name], [77, 'Maria Gonzalez']);
+      await assert.rejects(t.patch(user, id, { cleaner_id: 77 }), /name missing/);
+      // Typing a different name over it unlinks it.
+      r = (await t.patch(user, id, { cleaner_name: 'Someone New' })).record;
+      assert.deepEqual([r.cleaner_id, r.cleaner_name], [null, 'Someone New']);
+
+      // A contact picked as the customer brings their name and Launch27 customer.
+      const contact = (await db.query("INSERT INTO contacts (name, roles, l27_customer_id) VALUES ('Lynn Curry', '[\"customer\"]', 4412) RETURNING id")).rows[0];
+      r = (await t.patch(user, id, { contact_id: Number(contact.id) })).record;
+      assert.deepEqual([r.customer_name, Number(r.contact_id), Number(r.l27_customer_id)], ['Lynn Curry', Number(contact.id), 4412]);
+      r = (await t.patch(user, id, { contact_id: null })).record;
+      assert.deepEqual([r.contact_id, r.l27_customer_id], [null, null]);
+
+      // Closing stamps the date and who closed it, once.
+      r = (await t.patch(user, id, { status: 'Closed' })).record;
+      assert.deepEqual([r.closed_date, r.case_closed_by, Number(r.case_closed_by_user_id)], ['2026-11-26', 'Ana Agent', ana]);
+      r = (await t.patch({ id: jose, name: 'Jose Manager' }, id, { status: 'For Review' })).record;
+      r = (await t.patch({ id: jose, name: 'Jose Manager' }, id, { status: 'Closed' })).record;
+      assert.equal(r.case_closed_by, 'Ana Agent', 'reclosing keeps who closed it first');
+
+      // Names from Kustomer: matched when exactly one login or cleaner has that name.
+      await db.query("INSERT INTO complaint_records (source, source_id, title, case_opened_by, cs_agent, cleaner_name) VALUES ('kustomer', 'k1', 'Loaded', ' jose manager ', 'Nobody Here', '  maria   gonzalez'), ('kustomer', 'k2', 'Loaded 2', 'ana@example.com', NULL, 'Sam Lee')");
+      const teams = [{ id: 77, title: '(OTT) Maria Gonzalez' }, { id: 81, title: 'Sam Lee' }, { id: 82, title: '(BRK) Sam Lee' }];
+      const linked = await t.linkNames(teams);
+      const k = Object.fromEntries((await db.query("SELECT source_id, case_opened_by_user_id, cs_agent_user_id, cleaner_id, cleaner_name FROM complaint_records WHERE source = 'kustomer'")).rows.map((x) => [x.source_id, x]));
+      assert.equal(Number(k.k1.case_opened_by_user_id), Number(jose));
+      assert.equal(Number(k.k2.case_opened_by_user_id), ana, 'an email matches its login');
+      assert.equal(k.k1.cs_agent_user_id, null, 'a name nobody has stays as typed');
+      assert.deepEqual([Number(k.k1.cleaner_id), k.k1.cleaner_name], [77, 'Maria Gonzalez']);
+      assert.equal(k.k2.cleaner_id, null, 'two cleaners named Sam Lee: left for a person to pick');
+      assert.deepEqual(linked, { users: 2, cleaners: 1 });
+      assert.deepEqual(await t.linkNames(teams), { users: 0, cleaners: 0 }, 'running it again changes nothing');
+    } finally {
+      await db.close();
+    }
+  });
+
+  test("Launch27 cleaner names: the title without its codes; a name two cleaners share isn't used", () => {
+    assert.equal(cleanerTitle({ title: '(OTT) (PT) Maria Gonzalez' }), 'Maria Gonzalez');
+    assert.equal(cleanerTitle({ title: 'On Hold (OTT) Jo Park' }), 'Jo Park');
+    assert.equal(cleanerTitle({ title: '', first_name: 'Ali', last_name: 'Khan' }), 'Ali Khan');
+    const idx = cleanerIndex([{ id: 1, title: 'A B', first_name: 'Alpha', last_name: 'Beta' }, { id: 2, title: '(X) A B' }, { id: 3, title: 'Cee Dee' }]);
+    assert.equal(idx.get('a b'), undefined);
+    assert.deepEqual(idx.get('alpha beta'), { id: 1, name: 'A B' });
+    assert.deepEqual(idx.get('cee dee'), { id: 3, name: 'Cee Dee' });
   });
 
   test('dev and QA start with a few invented complaints, once', async () => {
@@ -357,6 +423,14 @@ describe('Tracker and adjustments over the API', () => {
       // The mention reaches the bell, pointing at the complaint.
       const bell = (await call(admin, '/api/notifications')).body;
       assert.equal(Number(bell.find((n) => n.kind === 'mention').complaint_record_id), Number(id));
+
+      // A cleaner picked by id: the name is Launch27's, whatever the browser sends.
+      const team = (await (await fetch(`${base}/l27/v1/staff/teams?limit=5`, { headers: { cookie: agent } })).json())[0];
+      const picked = await call(agent, `/api/tracker/complaints/${id}`, 'PATCH', { cleaner_id: team.id, cleaner_name: 'Wrong Name' });
+      assert.deepEqual([Number(picked.body.record.cleaner_id), picked.body.record.cleaner_name], [Number(team.id), cleanerTitle(team)]);
+      assert.equal((await call(agent, `/api/tracker/complaints/${id}`, 'PATCH', { cleaner_id: 987654 })).status, 400);
+      assert.equal((await call(agent, '/api/tracker/link-names', 'POST', {})).status, 403);
+      assert.equal((await call(admin, '/api/tracker/link-names', 'POST', {})).status, 200);
 
       assert.equal((await call(agent, '/api/tracker/kustomer/load', 'POST', {})).status, 403);
       assert.equal((await call(admin, '/api/tracker/kustomer/load', 'POST', {})).status, 409, 'no Kustomer outside production');

@@ -32,6 +32,22 @@ internal comments thread. Typing `@name` in a comment notifies that person (the 
 complaint). Each field saves when you leave it. It links to its inbox conversation, its contact,
 and the Launch27 customer and booking.
 
+**Names are linked to records** (migration `0040_complaint_links.sql`), so reports can count by
+cleaner and by person:
+
+| Field | Linked to | Id column |
+| --- | --- | --- |
+| Cleaner Name | Launch27 cleaner (picked from the active cleaners; the name stored is Launch27's) | `cleaner_id` |
+| Customer Name | Contact, and through it the Launch27 customer (search by name, email or phone) | `contact_id`, `l27_customer_id` |
+| Case Opened By, CS Agent, Case Closed By, Manager Approval | Staff login | `<field>_user_id` |
+
+The name stays beside each id. Case Opened By is the login that makes the complaint; when the
+status becomes Closed, Case Closed By and Closed Date fill in (once; reclosing keeps the first).
+A name from Kustomer is matched when exactly one login (by name or email) or one Launch27 cleaner
+(title without its codes, or first and last name) has it: after every load from Kustomer, and with
+"Match names" (admins). A name nobody matches, or two people share, shows "(not linked)" until
+someone picks.
+
 **Views** (Kustomer's searches under "Complaint Tracking", with live counts):
 
 | View | Shows |

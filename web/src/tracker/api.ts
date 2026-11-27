@@ -1,8 +1,9 @@
 // Client for the complaints tracker (/api/tracker) and the Cleaner Adjustment form (/api/adjustments).
 import { ApiError, describeErrors } from '../api';
 
-export type FieldType = 'text' | 'long' | 'date' | 'number' | 'select';
-export interface TrackerField { key: string; label: string; type: FieldType; options?: string[]; panel: string }
+// cleaner, customer and user are names linked to a record; `id` is the column holding its id.
+export type FieldType = 'text' | 'long' | 'date' | 'number' | 'select' | 'cleaner' | 'customer' | 'user';
+export interface TrackerField { key: string; label: string; type: FieldType; options?: string[]; panel: string; id?: string }
 export interface TrackerMeta {
   fields: TrackerField[];
   panels: { key: string; label: string }[];
@@ -54,7 +55,7 @@ export interface PositiveFeedback {
   contact_name: string | null;
   owner: string | null;
 }
-export interface LoadStatus { connected: boolean; running: boolean; started_at: string | null; finished_at: string | null; error: string | null; result: null | { seen: number; loaded: number; kept_as_edited: number; comments: number; linked_conversation: number; linked_contact: number } }
+export interface LoadStatus { connected: boolean; running: boolean; started_at: string | null; finished_at: string | null; error: string | null; result: null | { seen: number; loaded: number; kept_as_edited: number; comments: number; linked_conversation: number; linked_contact: number; linked?: { users: number; cleaners: number } } }
 export interface ConversationComplaints { complaints: Pick<ComplaintRecord, 'id' | 'title' | 'state'>[]; positive: { conversation_id: number; flagged_at: string; done_at: string | null } | null }
 
 export interface AdjustmentMeta { categories: string[]; net_impacts: string[]; reason_max: number; sheet_url: string | null; mode: 'live' | 'sandbox' | 'not_set_up' }
@@ -92,6 +93,7 @@ export const tracker = {
   setPositive: (conversationId: number, action: 'flag' | 'done' | 'clear') => call<{ positive: ConversationComplaints['positive'] }>('POST', `/tracker/positive-feedback/${conversationId}`, { action }),
   loadStatus: () => call<LoadStatus>('GET', '/tracker/kustomer/load'),
   startLoad: () => call<LoadStatus>('POST', '/tracker/kustomer/load', {}),
+  linkNames: () => call<{ users: number; cleaners: number }>('POST', '/tracker/link-names', {}),
 };
 
 export const adjustments = {

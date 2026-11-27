@@ -1536,7 +1536,7 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
 
   if (complaints) registerComplaintRoutes(r, { complaints, needRole, wrap });
   if (kustomerMigration) registerKustomerRoutes(r, { migration: kustomerMigration, needRole, wrap });
-  if (tracker || adjustments) registerTrackerRoutes(r, { tracker, adjustments, needRole, wrap });
+  if (tracker || adjustments) registerTrackerRoutes(r, { tracker, adjustments, needRole, wrap, l27 });
 
   // ---------- KPI scorecard (read-only; docs/kpi.md) ----------
   if (kpi) {

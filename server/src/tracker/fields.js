@@ -40,23 +40,25 @@ export const PANELS = [
   { key: 'category', label: 'Complaint Category' },
 ];
 
-// type: text | long | date | number | select
+// type: text | long | date | number | select, or a name linked to a record:
+//   cleaner (Launch27 cleaner, id in cleaner_id), customer (contact, id in contact_id),
+//   user (a staff login, id in <key>_user_id). The name is kept too, as shown and as Kustomer had it.
 export const FIELDS = [
   { key: 'status', label: 'Status', type: 'select', options: STATUSES, panel: 'info', k: 'statusStr' },
   { key: 'complaint_created_on', label: 'Complaint Created On', type: 'date', panel: 'info', k: 'complaintCreatedOnAt' },
   { key: 'original_service_date', label: 'Original Service Date', type: 'date', panel: 'info', k: 'originalServiceDateAt' },
-  { key: 'cleaner_name', label: 'Cleaner Name', type: 'text', panel: 'info', k: 'cleanerNameStr' },
+  { key: 'cleaner_name', label: 'Cleaner Name', type: 'cleaner', id: 'cleaner_id', panel: 'info', k: 'cleanerNameStr' },
   { key: 'type_of_service', label: 'Type of Service', type: 'select', options: ['Regular Cleaning', 'Deep Cleaning', 'Move In/Out', 'Hourly Cleaning', 'Homemaking', 'Prepaid Package', 'Airbnb Cleaning', 'Commercial Cleaning', 'Carpet Cleaning'], panel: 'info', k: 'typeOfServiceStr' },
   { key: 'frequency', label: 'Frequency', type: 'select', options: ['One Time', 'Weekly', 'Bi-weekly', 'Monthly'], panel: 'info', k: 'frequencyStr' },
   { key: 'complaint_notes', label: 'Complaint Notes', type: 'long', panel: 'info', k: 'complaintNotesTxt' },
   { key: 'cleaner_feedback', label: 'Cleaner Feedback', type: 'long', panel: 'info', k: 'cleanerFeedbackTxt' },
   { key: 'received_photos', label: 'Received Photos', type: 'select', options: YES_NO, panel: 'info', k: 'receivedPhotosStr' },
-  { key: 'customer_name', label: 'Customer Name', type: 'text', panel: 'info', k: 'customerNameStr' },
+  { key: 'customer_name', label: 'Customer Name', type: 'customer', id: 'contact_id', panel: 'info', k: 'customerNameStr' },
   { key: 'ltv_of_client', label: 'LTV of Client', type: 'number', panel: 'info', k: 'ltvOfClientStr' },
   { key: 'due_date', label: 'Due Date', type: 'date', panel: 'info', k: 'dueDateAt' },
   { key: 'location', label: 'Location', type: 'text', panel: 'info', k: 'locationStr' },
-  { key: 'case_opened_by', label: 'Case Opened By', type: 'text', panel: 'info', k: 'osNameStr' },
-  { key: 'cs_agent', label: 'CS Agent', type: 'text', panel: 'info', k: 'csAgentStr' },
+  { key: 'case_opened_by', label: 'Case Opened By', type: 'user', id: 'case_opened_by_user_id', panel: 'info', k: 'osNameStr' },
+  { key: 'cs_agent', label: 'CS Agent', type: 'user', id: 'cs_agent_user_id', panel: 'info', k: 'csAgentStr' },
 
   { key: 'proposed_solution', label: 'Proposed Solution', type: 'long', panel: 'resolution', k: 'proposedSolutionTxt' },
   { key: 'reclean_scheduling_required', label: 'Reclean Scheduling Required', type: 'select', options: ['Yes', 'Done'], panel: 'resolution', k: 'recleanSchedulingRequiredStr' },
@@ -64,10 +66,10 @@ export const FIELDS = [
   { key: 'final_resolution_details', label: 'Final Resolution Details', type: 'long', panel: 'resolution', k: 'finalResolutionDetailsTxt' },
   { key: 'is_client_fully_satisfied', label: 'Is the client fully satisfied?', type: 'select', options: ['Yes', 'No', 'Maybe, client is unresponsive'], panel: 'resolution', k: 'isTheClientFullySatisfiedStr' },
   { key: 'input_into_um_portal', label: 'Input into UM Portal?', type: 'select', options: YES_NO, panel: 'resolution', k: 'inputIntoUmPortalStr' },
-  { key: 'case_closed_by', label: 'Case Closed By', type: 'text', panel: 'resolution', k: 'caseClosedByYourNameStr' },
+  { key: 'case_closed_by', label: 'Case Closed By', type: 'user', id: 'case_closed_by_user_id', panel: 'resolution', k: 'caseClosedByYourNameStr' },
   { key: 'closed_date', label: 'Closed Date', type: 'date', panel: 'resolution', k: 'closedDateAt' },
 
-  { key: 'manager_approval', label: 'Manager Approval', type: 'text', panel: 'approval', k: 'managerApprovalStr' },
+  { key: 'manager_approval', label: 'Manager Approval', type: 'user', id: 'manager_approval_user_id', panel: 'approval', k: 'managerApprovalStr' },
   { key: 'manager_impact_assessment', label: 'Manager Impact Assessment', type: 'text', panel: 'approval', k: 'managerImpactAssessmentStr' },
   { key: 'at_risk_mia_amount', label: 'At Risk MIA Amt (Not Applied Yet)', type: 'number', panel: 'approval', k: 'atRiskMiaAmtNotAppliedYetNum' },
   { key: 'mia_categories', label: 'MIA Categories', type: 'select', options: ['Expenses related to recleans or poor-quality cleanings', 'Damages and reimbursements', 'Lack of Knowledge Process', 'Losses caused by internal team errors or mistakes', 'Lack of equipment and supplies'], panel: 'approval', k: 'miaCategoriesStr' },
@@ -82,6 +84,8 @@ export const FIELDS = [
 ];
 
 export const FIELD_KEYS = FIELDS.map((f) => f.key);
+// Staff names linked to a login: { key, id }.
+export const USER_LINKS = FIELDS.filter((f) => f.type === 'user').map((f) => ({ key: f.key, id: f.id }));
 const empty = (col) => `COALESCE(r.${col}, '') = ''`;
 const statusIs = (s) => `lower(r.status) = '${s.toLowerCase()}'`;
 

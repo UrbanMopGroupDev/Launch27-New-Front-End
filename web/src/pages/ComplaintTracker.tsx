@@ -6,6 +6,8 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { fmtDateTime } from '../format';
 import { ago, useInboxMe } from '../inbox/util';
+import { inbox } from '../inbox/api';
+import { useActiveTeams } from '../hooks';
 import { tracker, type ComplaintPatch, type ComplaintRecord, type TrackerField, type TrackerMeta } from '../tracker/api';
 
 const useTrackerMeta = () => useQuery({ queryKey: ['tracker', 'meta'], queryFn: tracker.meta, staleTime: 5 * 60_000 });
@@ -33,6 +35,7 @@ export function ComplaintTrackerPage() {
           </Link>
         ))}
         <KustomerLoad meta={meta.data} />
+        <MatchNames />
       </aside>
       <main className="ct-main">
         {id ? (
@@ -65,7 +68,7 @@ function KustomerLoad({ meta }: { meta: TrackerMeta }) {
       <div className="muted">Last 30 days, plus every complaint still open. Read-only on Kustomer.</div>
       {start.error && <div className="error">{(start.error as Error).message}</div>}
       {s?.error && <div className="error">{s.error}</div>}
-      {s?.result && !s.running && <div className="muted">Loaded {s.result.loaded} of {s.result.seen} ({s.result.kept_as_edited} left as edited here, {s.result.comments} comments) {ago(s.finished_at)} ago.</div>}
+      {s?.result && !s.running && <div className="muted">Loaded {s.result.loaded} of {s.result.seen} ({s.result.kept_as_edited} left as edited here, {s.result.comments} comments{s.result.linked ? `; matched ${s.result.linked.cleaners} cleaner and ${s.result.linked.users} staff names` : ''}) {ago(s.finished_at)} ago.</div>}
     </div>
   );
 }
@@ -262,6 +265,84 @@ function FieldInput({ field, value, onSave }: { field: TrackerField; value: stri
   return <input type={field.type === 'date' ? 'date' : 'text'} inputMode={field.type === 'number' ? 'decimal' : undefined} value={text} onChange={(e) => setText(e.target.value)} onBlur={commit} onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()} />;
 }
 
+// Launch27 cleaner names as the office writes them (the conversation's Cleaner picker does the same).
+const stripCodes = (t: string) => t.replace(/^\s*(on\s*hold\s*)?(\s*\([^)]*\))*\s*/i, '').trim() || t;
+
+// A name that is a record: a Launch27 cleaner, a staff login, or a contact. A name typed in
+// Kustomer that nobody matched yet still shows, marked "not linked", until someone picks.
+function LinkedField({ field, record, meta, onSave }: { field: TrackerField; record: ComplaintRecord; meta: TrackerMeta; onSave: (p: ComplaintPatch) => void }) {
+  const name = record[field.key] ? String(record[field.key]) : '';
+  const linkedId = record[field.id!] ? Number(record[field.id!]) : null;
+  if (field.type === 'customer') return <CustomerPicker name={name} contactId={linkedId} onSave={onSave} />;
+  if (field.type === 'cleaner') return <CleanerPicker name={name} cleanerId={linkedId} onSave={onSave} />;
+  const users = meta.users.map((u) => ({ id: u.id, name: u.name || u.email }));
+  if (linkedId && !users.some((u) => u.id === linkedId)) users.unshift({ id: linkedId, name: name || `#${linkedId}` });
+  return (
+    <select value={linkedId ?? (name ? 'typed' : '')} onChange={(e) => e.target.value !== 'typed' && onSave(e.target.value ? { [field.id!]: Number(e.target.value) } : { [field.id!]: null, [field.key]: null })}>
+      <option value="">—</option>
+      {!linkedId && name && <option value="typed">{name} (not linked)</option>}
+      {users.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+    </select>
+  );
+}
+
+function CleanerPicker({ name, cleanerId, onSave }: { name: string; cleanerId: number | null; onSave: (p: ComplaintPatch) => void }) {
+  const teams = useActiveTeams();
+  const list = useMemo(() => (teams.data || []).map((t) => ({ id: t.id, name: stripCodes(t.title) })).sort((a, b) => a.name.localeCompare(b.name)), [teams.data]);
+  if (cleanerId && !list.some((t) => t.id === cleanerId)) list.unshift({ id: cleanerId, name: name || `#${cleanerId}` });
+  return (
+    <select value={cleanerId ?? (name ? 'typed' : '')} disabled={teams.isLoading} onChange={(e) => e.target.value !== 'typed' && onSave({ cleaner_id: e.target.value ? Number(e.target.value) : null })}>
+      <option value="">{teams.isLoading ? 'Loading cleaners…' : '—'}</option>
+      {!cleanerId && name && <option value="typed">{name} (not linked)</option>}
+      {list.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+    </select>
+  );
+}
+
+function CustomerPicker({ name, contactId, onSave }: { name: string; contactId: number | null; onSave: (p: ComplaintPatch) => void }) {
+  const [q, setQ] = useState('');
+  const [open, setOpen] = useState(false);
+  const found = useQuery({ queryKey: ['tracker', 'contact-search', q], queryFn: () => inbox.findContacts(q), enabled: open && q.trim().length >= 2 });
+  if (!open) {
+    return (
+      <span className="ct-linked">
+        {contactId ? <Link to={`/contacts/${contactId}`}>{name || 'Contact'}</Link> : name ? <span>{name} <span className="muted">(not linked)</span></span> : <span className="muted">—</span>}
+        {' '}<button type="button" className="link small" onClick={() => { setQ(contactId ? '' : name); setOpen(true); }}>{contactId ? 'Change' : 'Link'}</button>
+      </span>
+    );
+  }
+  return (
+    <span className="ct-linked-search">
+      <input autoFocus placeholder="Search name, email or phone" value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === 'Escape' && setOpen(false)} />
+      <span className="assign-list">
+        {(found.data || []).slice(0, 8).map((c) => (
+          <button type="button" key={c.id} className="assign-item" onClick={() => { onSave({ contact_id: c.id }); setOpen(false); }}>
+            {c.name || 'Unnamed'}{c.l27_customer_id ? <span className="muted small"> · Launch27 customer</span> : null}
+          </button>
+        ))}
+        {q.trim().length >= 2 && found.data && !found.data.length && <span className="muted small">No contact matches.</span>}
+      </span>
+      <button type="button" className="link small" onClick={() => setOpen(false)}>Cancel</button>
+    </span>
+  );
+}
+
+// Admins: match names typed in Kustomer to logins and Launch27 cleaners (also runs after each load).
+function MatchNames() {
+  const me = useInboxMe();
+  const queryClient = useQueryClient();
+  const run = useMutation({ mutationFn: tracker.linkNames, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['tracker'], predicate: (q) => q.queryKey[1] !== 'meta' }) });
+  if (me.data?.role !== 'admin') return null;
+  return (
+    <div className="ct-load small">
+      <button className="secondary small-btn" disabled={run.isPending} onClick={() => run.mutate()}>{run.isPending ? 'Matching names…' : 'Match names'}</button>
+      <div className="muted">Links cleaner and staff names to Launch27 cleaners and logins. Names that match nobody, or more than one, stay as typed.</div>
+      {run.error && <div className="error">{(run.error as Error).message}</div>}
+      {run.data && <div className="muted">Matched {run.data.cleaners} cleaner and {run.data.users} staff names.</div>}
+    </div>
+  );
+}
+
 function RecordView({ id, meta }: { id: number; meta: TrackerMeta }) {
   const queryClient = useQueryClient();
   const me = useInboxMe();
@@ -333,7 +414,7 @@ function RecordView({ id, meta }: { id: number; meta: TrackerMeta }) {
           <section key={p.key} className="card ct-panel">
             <h2>{p.label}</h2>
             {p.fields.map((f) => (
-              <label key={f.key}>{f.label}<FieldInput field={f} value={r[f.key]} onSave={(v) => save.mutate({ [f.key]: v })} /></label>
+              <label key={f.key}>{f.label}{f.id ? <LinkedField field={f} record={r} meta={meta} onSave={(p) => save.mutate(p)} /> : <FieldInput field={f} value={r[f.key]} onSave={(v) => save.mutate({ [f.key]: v })} />}</label>
             ))}
           </section>
         ))}

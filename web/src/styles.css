@@ -2410,3 +2410,8 @@ a.rep-factor:hover b { text-decoration: underline; }
   .ct { grid-template-columns: 1fr; }
   .ct-views { position: static; }
 }
+/* Complaint tracking: names linked to records (customer search) */
+.ct-linked { display: block; padding: 6px 0; }
+.ct-linked-search { display: flex; flex-direction: column; gap: 4px; }
+.ct-linked-search .assign-list { display: flex; flex-direction: column; }
+.ct-linked-search .assign-item { text-align: left; justify-content: flex-start; }
