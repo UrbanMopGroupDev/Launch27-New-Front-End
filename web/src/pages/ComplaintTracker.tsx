@@ -421,12 +421,13 @@ function WorkedBefore({ id, record }: { id: number; record: ComplaintRecord }) {
 
 // The agent's options, best first: what kept similar clients, how happy they were at the end,
 // how often clients took it when offered, and what it cost, with how sure we are.
-const GROUP_WORD: Record<string, string> = { cause_category: 'same root cause and complaint', cause: 'same root cause', category: 'same kind of complaint', all: 'all complaints' };
+const GROUP_WORD: Record<string, string> = { threat_category: 'same threat and kind of complaint', threat: 'same threat', cause_category: 'same root cause and complaint', cause: 'same root cause', category: 'same kind of complaint', all: 'all complaints' };
 function RankedOptions({ r, d }: { r: Ranked; d: Guidance }) {
   const used = r.groups.find((g) => g.key === r.options[0].group);
   return (
     <>
       <div className="small ct-worked-note">
+        {d.threat && d.threat !== 'none' ? <div className="ct-worked-alert">{d.threat === 'review' ? 'The client is threatening a public review' : 'The client is threatening to leave'} (from the notes). Options are ranked first on past clients who did the same.</div> : null}
         {d.cause_label ? <>Likely why (from the notes): <b>{d.cause_label}</b>. </> : null}
         <span className="muted">Ranked by how many similar {d.one_time ? 'one-time clients booked again' : 'clients were still booking 60 days later'}, from {used ? `${used.cases} past complaints (${GROUP_WORD[used.key]})` : 'past complaints'}. Each option is measured on the closest group with enough known outcomes.</span>
       </div>
