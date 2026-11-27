@@ -6,9 +6,10 @@ Gmail, and it has no "edit data" controls.
 
 **Status.** Development and QA run on synthetic data. Production reads Launch27 (churn,
 fulfilment, visit counts), the Kustomer complaints the Complaint playbook already collects, and
-the monthly Syft management report from Gmail (OCR). QuickBooks and the Google Business Profile
-API are not connected yet: OCR shows the Syft report's stated figure with no cross-check, and
-Google reviews come from a dated export, not a live feed.
+the monthly Syft management report from Gmail (OCR), and Google reviews live from the Google
+Business Profile API once an admin connects it (below). QuickBooks is not connected yet: OCR shows
+the Syft report's stated figure with no cross-check. Until Google is connected, reviews come from
+a dated export.
 
 ## Where the code is
 
@@ -18,10 +19,10 @@ Google reviews come from a dated export, not a live feed.
 | Every formula and exclusion rule | `server/src/kpi/calc.js` (pure; tests in `server/test/kpi.test.js`) |
 | One read-only connector per source | `server/src/kpi/connectors.js` |
 | Synthetic data for dev and QA | `server/src/kpi/synthetic.js` |
-| Live connectors (production) | `server/src/kpi/live.js`, `server/src/kpi/syft.js` |
+| Live connectors (production) | `server/src/kpi/live.js`, `server/src/kpi/syft.js`, `server/src/kpi/google.js` |
 | Service and API (`/api/kpi/*`) | `server/src/kpi/service.js`, routes at the end of `server/src/inbox/api.js` |
 | Page | `web/src/pages/KpiScorecard.tsx`, `web/src/kpi/api.ts` |
-| Tables | `server/migrations/0029_kpi.sql` (`kpi_refresh_log`, `kpi_manual_reviews`), `server/migrations/0030_kpi_snapshots.sql` (`kpi_snapshots`) |
+| Tables | `server/migrations/0029_kpi.sql` (`kpi_refresh_log`, `kpi_manual_reviews`), `server/migrations/0030_kpi_snapshots.sql` (`kpi_snapshots`), `server/migrations/0045_kpi_google_auth.sql` (`kpi_google_auth`) |
 
 ## Definitions
 
@@ -94,12 +95,27 @@ Production:
 - Every refresh writes one row per source per day to `kpi_refresh_log` (updated in place).
 - Only bookings at the Ottawa location count for UrbanMop Residential (`locations` in `KPI_BRANDS`).
 
-- **Google reviews**: not live. They come from a one-off Google Takeout export kept in
-  `server/src/kpi/data/google-reviews-urbanmop.json` (dates and star ratings only, no names or
-  comments). The tile says so, and months after the export's last review read "No data". To refresh
-  it before the Business Profile API is connected, replace that file from a newer export.
+- **Google reviews, live** (`server/src/kpi/google.js`): read once a day from the Google Business
+  Profile API (and by Refresh now) into `kpi_snapshots` (source `google`): each review's id, date
+  and star rating only, no names or comments. Read-only: the only calls after sign-in are GETs.
+  - **Set up (once).** Google approves one Google Cloud project per business for the API. In that
+    project: turn on the My Business Account Management API, My Business
+    Business Information API and Google My Business API; create an OAuth client (Web application)
+    with the redirect URI `https://<production host>/api/kpi/google/callback`; set
+    `GBP_CLIENT_ID` and `GBP_CLIENT_SECRET` in Railway (production) and deploy. A client from any
+    other project gets a quota of 0, and the page says so.
+  - **Connect.** An admin who can see the scorecard opens Sources and data freshness › Google
+    reviews › **Connect Google** and signs in with the account that manages the listing
+    (info@urbanmop.ca). The refresh token is kept sealed in `kpi_google_auth` (migration 0045, key
+    from `SESSION_SECRET`); `GBP_REFRESH_TOKEN` works instead. Disconnect forgets it.
+  - **Which listing.** The one whose name or city matches the brand's `googleLocation` (Ottawa).
+    If more than one could match, the refresh fails listing them: set `GBP_LOCATION`
+    (`accounts/<id>/locations/<id>`).
+  - **Until connected,** and until the first refresh, the tile reads the dated Google Takeout export
+    in `server/src/kpi/data/google-reviews-urbanmop.json`, labelled "not live"; months after its
+    last review read "No data".
 
-Not built yet: QuickBooks and Google connectors, the email alert when a refresh fails or
+Not built yet: the QuickBooks connector, the email alert when a refresh fails or
 a source is stale, and per-brand roles for office managers.
 
 ## Who sees it
@@ -111,8 +127,8 @@ Dev and QA: everyone who can sign in. Production: only the logins in `KPI_EMAILS
 
 - **Preview a source outage** (Sources card): shows how tiles behave when a source is stale
   or not connected.
-- **Enter Google reviews by hand**: a manual monthly entry while the Google Business Profile
-  API is not connected. The service refuses it in production.
+- **Enter Google reviews by hand**: a manual monthly entry for testing the tile. The service
+  refuses it in production.
 
 ## Adding a brand
 

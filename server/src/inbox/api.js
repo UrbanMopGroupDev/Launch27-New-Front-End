@@ -1661,9 +1661,47 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       }
     });
     const q = (req) => ({ brand: req.query.brand ? String(req.query.brand) : null, month: req.query.month ? String(req.query.month) : null, mode: String(req.query.mode || 'month'), outage: req.query.outage ? String(req.query.outage) : null, from: req.query.from ? String(req.query.from) : null, to: req.query.to ? String(req.query.to) : null });
-    r.get('/kpi/scorecard', k((req) => kpi.scorecard(q(req))));
+    r.get('/kpi/scorecard', k(async (req) => ({ ...(await kpi.scorecard(q(req))), can_connect_google: req.user.role === 'admin' })));
     r.get('/kpi/drill', k((req) => kpi.drill({ ...q(req), kpi: String(req.query.kpi || '') })));
     r.post('/kpi/refresh', k((req) => kpi.refresh({ bearer: req.bearer })));
+    // Live Google reviews: an admin who can see the scorecard signs in to Google once (docs/kpi.md).
+    // Google sends the person back to the callback with a code; nothing is sent to Google but GETs after that.
+    const googleRedirect = (req) => `${req.protocol}://${req.get('host')}/api/kpi/google/callback`;
+    const kpiAdmin = (req, res) => {
+      if (!canSeeKpi(config, req.user.email)) return res.status(404).json({ error: 'Not found' }), false;
+      if (req.user.role !== 'admin') return res.status(403).json({ error: 'Only admins can connect Google' }), false;
+      return true;
+    };
+    r.get('/kpi/google/connect', wrap(async (req, res) => {
+      if (!kpiAdmin(req, res)) return;
+      try {
+        res.redirect(kpi.googleConnectUrl({ redirectUri: googleRedirect(req), userId: req.user.id }));
+      } catch (err) {
+        res.redirect(`/reports/kpi?google_error=${encodeURIComponent(err.message)}`);
+      }
+    }));
+    r.get('/kpi/google/callback', wrap(async (req, res) => {
+      if (!kpiAdmin(req, res)) return;
+      if (req.query.error) return res.redirect(`/reports/kpi?google_error=${encodeURIComponent(req.query.error === 'access_denied' ? 'Google sign-in was cancelled' : String(req.query.error))}`);
+      try {
+        await kpi.googleFinishConnect({ code: String(req.query.code || ''), state: String(req.query.state || ''), redirectUri: googleRedirect(req), userId: req.user.id, userEmail: req.user.email });
+        await svc.audit(db, req.user.id, 'kpi.google_connect', 'kpi', 'google', {}).catch(() => {});
+        res.redirect('/reports/kpi?google=connected');
+      } catch (err) {
+        res.redirect(`/reports/kpi?google_error=${encodeURIComponent(err.message)}`);
+      }
+    }));
+    r.post('/kpi/google/disconnect', wrap(async (req, res) => {
+      if (!kpiAdmin(req, res)) return;
+      try {
+        const out = await kpi.googleDisconnect();
+        await svc.audit(db, req.user.id, 'kpi.google_disconnect', 'kpi', 'google', {}).catch(() => {});
+        res.json(out);
+      } catch (err) {
+        if (err.status) return res.status(err.status).json({ error: err.message });
+        throw err;
+      }
+    }));
     // Manual Google review entry: the service refuses it in production.
     r.put('/kpi/reviews/:month', k((req) => kpi.saveManualReviews({ brand: req.body?.brand, month: req.params.month, entry: req.body, email: req.user.email })));
     r.delete('/kpi/reviews/:month', k((req) => kpi.clearManualReviews({ brand: req.query.brand ? String(req.query.brand) : null, month: req.params.month })));
