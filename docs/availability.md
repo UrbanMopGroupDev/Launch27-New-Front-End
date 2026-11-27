@@ -25,7 +25,7 @@ hours (8–12 and 1–5) can't be sent as one row, so that is refused with a mes
   is saved only when sent again with `confirm`. Mark off saves straight away and flags the visits in
   the planner's Changes.
 - Every save is in the Launch27 write log (`l27_writes`) and the audit log; the portal's own history
-  is `availability_changes` (migration 0039).
+  is `availability_changes` (migration 0042).
 - Only when Launch27 writes are on (`L27_ALLOW_WRITES`). With writes off, nothing is sent and the
   attempt is logged as blocked.
 - The `/l27` pass-through refuses availability writes: only these screens change availability.
