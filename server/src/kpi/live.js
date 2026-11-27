@@ -51,7 +51,7 @@ export function normalizeBooking(b, tt = null, fb = null) {
     rated_at: feedback ? localStamp(feedback.rated_at)?.slice(0, 10) || start?.slice(0, 10) || null : null,
     rating_comment: null, // comments stay in Launch27; the scorecard only needs the rating
     location: b.location?.name || null,
-    cancellation: c || b.active === false ? { at: localStamp(c?.date) || start, reason: String(c?.reason || '').slice(0, 300), by: same(c?.cancelled_by?.name, customer) ? 'customer' : 'staff', by_name: c?.cancelled_by?.name || null } : null,
+    cancellation: c || b.active === false ? { at: localStamp(c?.date) || start, reason: String(c?.reason || '').slice(0, 300), by: same(c?.cancelled_by?.name, customer) ? 'customer' : 'staff', by_name: c?.cancelled_by?.name || null, type: c?.type ? String(c.type).slice(0, 80) : null } : null,
   };
 }
 
@@ -130,7 +130,10 @@ export function createLaunch27Kpi({ db, config, fetchImpl = fetch, syncBearer, b
       );
       memo = { taken_at: taken, bookings };
       await logRun('ok', bookings.length, whole ? 'full history' : `last ${RECENT_BACK} days`);
-      log.info('kpi launch27 refreshed', { bookings: bookings.length, full: whole });
+      // Which cancellation types Launch27 sent (values and counts only), to check seriesCancelPattern against.
+      const types = {};
+      for (const x of bookings) if (x.cancellation) types[x.cancellation.type || '(none)'] = (types[x.cancellation.type || '(none)'] || 0) + 1;
+      log.info('kpi launch27 refreshed', { bookings: bookings.length, full: whole, cancel_types: JSON.stringify(types).slice(0, 600) });
       return { bookings: bookings.length, full: whole };
     } catch (err) {
       // The previous snapshot stays; the tile goes Stale once it is over 48 hours old.

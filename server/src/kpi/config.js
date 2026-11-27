@@ -4,13 +4,15 @@
 // Brands shown on the scorecard. To add a brand: add an entry here, give its connectors data
 // (connectors.js) and list which KPIs apply. No UI change is needed.
 export const KPI_BRANDS = [
-  { key: 'urbanmop', name: 'UrbanMop', detail: 'Ottawa Residential', locations: /^ottawa$/i, complaintBrand: 'residential', googleExport: 'google-reviews-urbanmop.json', syftReport: /(urban ?mop|um canada).*(management|monthly|syft) report/i, syftNotReport: /luxo|clean ?bee|\b(urban ?mop|um) us\b/i, syftEntity: /urban ?mop|um canada/i, syftQuery: 'from:indep.so has:attachment filename:pdf ("Management Report" OR "Management Reports" OR "Monthly Report") newer_than:1100d', syftScope: 'Whole company (UM Canada: Residential and Commercial)', kpis: ['ocr', 'churn', 'fulfilment', 'complaints', 'reviews', 'billing'] },
+  { key: 'urbanmop', name: 'UrbanMop', detail: 'Ottawa Residential', locations: /^ottawa$/i, complaintBrand: 'residential', googleExport: 'google-reviews-urbanmop.json', syftReport: /(urban ?mop|um canada).*(management|monthly|syft) report/i, syftNotReport: /luxo|clean ?bee|\b(urban ?mop|um) us\b/i, syftEntity: /urban ?mop|um canada/i, syftQuery: 'from:indep.so has:attachment filename:pdf ("Management Report" OR "Management Reports" OR "Monthly Report") newer_than:1100d', syftScope: 'Whole company (UM Canada: Residential and Commercial)', kpis: ['ocr', 'churn', 'churn_prepaid', 'churn_payg', 'fulfilment', 'complaints', 'reviews', 'billing'] },
   // { key: 'cleanbee', name: 'Clean Bee', detail: 'Spokane', kpis: ['ocr', 'churn', 'complaints', 'reviews', 'billing'] },
 ];
 
 export const KPI_LABELS = {
   ocr: 'Operational Cost Ratio',
   churn: 'Recurring client churn',
+  churn_prepaid: 'Prepaid churn',
+  churn_payg: 'Pay-as-you-go churn',
   fulfilment: 'Service fulfilment',
   complaints: 'Complaint rate',
   reviews: 'Google reviews',
@@ -34,11 +36,15 @@ export const KPI_RULES = {
     { key: 'temporary', label: 'Temporary (travel, hold, renovation, Airbnb, postpartum)', pattern: /travel|vacation|out of (town|the country)|snowbird|on hold|\bhold\b|pause|renovat|air\s?bnb|post\s?partum/i },
     { key: 'admin_error', label: 'Admin error', pattern: /admin(istrative|istration)? error|duplicate|by mistake|in error/i },
   ],
-  // "Came back": a later active recurring booking. null = any time after the cancellation;
-  // a number limits it to that many days.
-  returnWindowDays: null,
-  // Temporary cancellations: back within this many days = not churn; no return by then = churn.
+  // The return window. Back on a recurring visit within this many days of cancelling (or of the
+  // last prepaid visit) = not permanent churn; no return by then = permanent churn.
   temporaryReturnDays: 90,
+  // Temporary churn = back inside the return window after more than this many days between
+  // cleans. A shorter gap is a skipped or moved visit, not churn of either kind.
+  temporaryGapDays: 60,
+  // Launch27's cancellation type says whether the client cancelled this booking only or this
+  // and all future recurring bookings. A type matching this pattern is the whole plan.
+  seriesCancelPattern: /future|all|recurring|series/i,
   returnBuckets: [30, 60, 90],
   churnBands: [
     { max: 7, label: 'Excellent', tone: 'good' },
@@ -86,7 +92,8 @@ export const KPI_RULES = {
   closeDay: 10, // a month is Provisional until this day of the following month
 
   // ----- Freshness -----
-  staleHours: 48,
+  staleHours: 48, // older than this: the page says so in one notice (figures stay)
+  autoRefreshHours: 6, // opening the scorecard refreshes Launch27 by itself when its copy is older than this
 };
 
 export const KPI_SOURCES = {

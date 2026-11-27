@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { indexDataset, isRecurring, isTest, isInstitutional, reasonCategory, churnBand, isOverCancel, cancellationCause, churnMonth, fulfilmentMonth, complaintsMonth, reviewsMonth, ocrMonth, fulfilmentRange, scorecard, drill, lastClosedMonth, sourceState, ocrStatus, fulfilmentStatus } from '../src/kpi/calc.js';
+import { indexDataset, isRecurring, isTest, isInstitutional, reasonCategory, churnBand, isOverCancel, cancellationCause, churnMonth, churnSegment, churnForSegment, fulfilmentMonth, complaintsMonth, reviewsMonth, ocrMonth, fulfilmentRange, scorecard, drill, lastClosedMonth, sourceState, ocrStatus, fulfilmentStatus } from '../src/kpi/calc.js';
 import { KPI_BRANDS, KPI_RULES } from '../src/kpi/config.js';
 import { buildSyntheticDataset } from '../src/kpi/synthetic.js';
 import { createKpi, canSeeKpi } from '../src/kpi/service.js';
@@ -154,10 +154,99 @@ describe('churn', () => {
       b(3, 'Skipper', '2026-10-06', { cancellation: cx('2026-10-04', 'Client sick this week') }),
       b(3, 'Skipper', '2026-10-20'),
     ]);
-    assert.equal(outcome(r, 'Returner'), 'Excluded: came back (later active recurring booking)');
+    assert.equal(outcome(r, 'Returner'), 'Excluded: came back (skipped or moved visit, recurring visits continued)');
     assert.equal(outcome(r, 'One Off Later'), 'Counted as churn');
     assert.match(outcome(r, 'Skipper'), /came back/);
     assert.equal(r.num, 1);
+  });
+  test('prepaid and pay-as-you-go are reported separately, and add up to the blended number', () => {
+    const r = res([
+      b(1, 'Prepaid Leaver', '2026-10-02', { frequency: 'Prepaid Biweekly' }), b(1, 'Prepaid Leaver', '2026-10-16', { frequency: 'Prepaid Biweekly', cancellation: cx('2026-10-10', 'Too expensive') }),
+      b(2, 'Payg Leaver', '2026-10-02'), b(2, 'Payg Leaver', '2026-10-16', { cancellation: cx('2026-10-10', 'Moving away') }),
+      b(3, 'Prepaid Stayer', '2026-10-05', { frequency: 'Prepaid Monthly' }), b(3, 'Prepaid Stayer', '2026-11-02', { frequency: 'Prepaid Monthly' }), b(3, 'Prepaid Stayer', '2026-11-30', { frequency: 'Prepaid Monthly' }),
+      // On both kinds of plan in the month: kept under the first visit's plan, and flagged.
+      b(4, 'Both Plans', '2026-10-05'), b(4, 'Both Plans', '2026-10-19', { frequency: 'Prepaid Biweekly' }), b(4, 'Both Plans', '2026-11-02', { frequency: 'Prepaid Biweekly' }), b(4, 'Both Plans', '2026-11-30', { frequency: 'Prepaid Biweekly' }),
+    ]);
+    assert.deepEqual(r.segments.prepaid, { den: 2, permanent: 1, provisional: 1, temporary: 0 });
+    assert.deepEqual(r.segments.payg, { den: 12, permanent: 1, provisional: 1, temporary: 0 });
+    assert.deepEqual([r.num, r.den], [2, 14]);
+    assert.deepEqual(r.unclear, { mixed: 1, off_base: 0, moved: 0 });
+    assert.deepEqual([churnSegment('Prepaid Biweekly'), churnSegment('Pre-paid monthly'), churnSegment('Biweekly - 10% off')], ['prepaid', 'prepaid', 'payg']);
+  });
+  test('temporary churn: back inside 90 days after more than 60 days between cleans; later than 90 is permanent', () => {
+    const june = (extra) => churnMonth(ix([b(50, 'Steady', '2026-06-02'), ...extra]), '2026-06', TODAY);
+    const left = (id, name) => [b(id, name, '2026-06-01'), b(id, name, '2026-06-15', { cancellation: cx('2026-06-10', 'Too expensive') })];
+    const r = june([
+      ...left(1, 'Back In August'), b(1, 'Back In August', '2026-08-20'),
+      ...left(2, 'Back Too Late'), b(2, 'Back Too Late', '2026-09-20'),
+      ...left(3, 'Skipped One'), b(3, 'Skipped One', '2026-06-29'),
+    ]);
+    assert.match(outcome(r, 'Back In August'), /^Excluded: temporary churn, came back after 71 days/);
+    assert.equal(outcome(r, 'Back Too Late'), 'Counted as churn');
+    assert.match(outcome(r, 'Skipped One'), /skipped or moved visit/);
+    assert.deepEqual(r.segments.payg, { den: 4, permanent: 1, provisional: 0, temporary: 1 });
+  });
+  test("Launch27's cancellation type separates temporary churn from a skipped visit; the 90-day test decides permanent", () => {
+    const ALL = 'This booking and all future recurring bookings';
+    const ONE = 'This booking only';
+    const typed = (date, reason, type) => ({ ...cx(date, reason), type });
+    const r = churnMonth(ix([
+      b(50, 'Steady', '2026-06-02'),
+      // Cancelled the plan, back three weeks later: temporary churn even with a short gap.
+      b(1, 'Plan Then Back', '2026-06-01'), b(1, 'Plan Then Back', '2026-06-15', { cancellation: typed('2026-06-10', 'Too expensive', ALL) }), b(1, 'Plan Then Back', '2026-06-29', { cancellation: typed('2026-06-10', 'Too expensive', null) }), b(1, 'Plan Then Back', '2026-07-01'),
+      // Cancelled one visit, back after a long gap: a skipped visit, not temporary churn.
+      b(2, 'One Visit Then Back', '2026-06-01'), b(2, 'One Visit Then Back', '2026-06-15', { cancellation: typed('2026-06-10', 'Away', ONE) }), b(2, 'One Visit Then Back', '2026-08-20'),
+      b(3, 'Plan Gone', '2026-06-01'), b(3, 'Plan Gone', '2026-06-15', { cancellation: typed('2026-06-10', 'Moving', ALL) }),
+      b(4, 'One Visit Then Gone', '2026-06-01'), b(4, 'One Visit Then Gone', '2026-06-15', { cancellation: typed('2026-06-10', 'Busy that day', ONE) }),
+    ]), '2026-06', TODAY);
+    assert.match(outcome(r, 'Plan Then Back'), /^Excluded: temporary churn, came back after 21 days \(cancelled all future visits\)/);
+    assert.match(outcome(r, 'One Visit Then Back'), /skipped or moved visit/);
+    assert.equal(outcome(r, 'Plan Gone'), 'Counted as churn');
+    assert.equal(outcome(r, 'One Visit Then Gone'), 'Counted as churn (cancelled one visit, then no recurring visit after)');
+    assert.deepEqual(r.segments.payg, { den: 5, permanent: 2, provisional: 0, temporary: 1 });
+    assert.equal(r.single_visit, 1);
+    assert.deepEqual(r.events.find((e) => e.customer === 'Plan Gone').scope, 'All future visits');
+  });
+  test('a prepaid plan that runs out with no renewal is churn, dated the last prepaid visit', () => {
+    const P = { frequency: 'Prepaid Biweekly' };
+    const june = churnMonth(ix([
+      b(50, 'Steady', '2026-06-02'),
+      b(1, 'Ran Out', '2026-06-01', P), b(1, 'Ran Out', '2026-06-15', P),
+      b(2, 'Renewed', '2026-06-01', P), b(2, 'Renewed', '2026-06-15', P), b(2, 'Renewed', '2026-06-29', P), b(2, 'Renewed', '2026-07-13', P), b(2, 'Renewed', '2026-08-24', P), b(2, 'Renewed', '2026-10-05', P), b(2, 'Renewed', '2026-11-16', P),
+      b(3, 'Renewed Late', '2026-06-01', P), b(3, 'Renewed Late', '2026-06-15', P), b(3, 'Renewed Late', '2026-08-25', P), b(3, 'Renewed Late', '2026-10-06', P), b(3, 'Renewed Late', '2026-11-17', P),
+      b(4, 'Switched Plan', '2026-06-01', P), b(4, 'Switched Plan', '2026-06-15', P), b(4, 'Switched Plan', '2026-06-29'), b(4, 'Switched Plan', '2026-07-13'), b(4, 'Switched Plan', '2026-11-16'),
+    ]), '2026-06', TODAY);
+    const ev = (name) => june.events.filter((e) => e.customer === name);
+    assert.deepEqual(ev('Ran Out').map((e) => [e.cancelled_on, e.outcome, e.reason]), [['2026-06-15', 'Counted as churn (prepaid plan ended)', 'Prepaid plan ended, not renewed']]);
+    assert.equal(ev('Renewed').length, 0);
+    assert.match(ev('Renewed Late')[0].outcome, /^Excluded: temporary churn, renewed after 71 days/);
+    assert.equal(ev('Switched Plan').length, 0, 'moving to pay-as-you-go without a gap is not churn');
+    assert.deepEqual(june.segments.prepaid, { den: 4, permanent: 1, provisional: 0, temporary: 1 });
+    assert.equal(june.plan_ends, 1);
+    // A plan that ended inside the last 90 days counts now and is marked provisional; one whose last visit is still ahead does not.
+    const oct = res([b(1, 'Just Ended', '2026-10-02', P), b(1, 'Just Ended', '2026-10-16', P), b(2, 'Still Running', '2026-10-06', P), b(2, 'Still Running', '2026-11-24', P)]);
+    assert.match(oct.events.find((e) => e.customer === 'Just Ended').outcome, /prepaid plan ended, inside the 90-day return window/);
+    assert.deepEqual(oct.segments.prepaid, { den: 2, permanent: 1, provisional: 1, temporary: 0 });
+  });
+  test('the two plan cards: each has its own rate, events and starting clients, and they add up to the blended card', () => {
+    const data = indexDataset(buildSyntheticDataset({ today: TODAY, now: NOW, outage: null }));
+    const c = scorecard(data, { brand: KPI_BRANDS[0], month: '2026-10', now: NOW, today: TODAY });
+    const t = (k) => c.tiles.find((x) => x.kpi === k);
+    assert.deepEqual(c.tiles.map((x) => x.kpi).slice(1, 4), ['churn', 'churn_prepaid', 'churn_payg']);
+    assert.deepEqual([t('churn_prepaid').label, t('churn_payg').label], ['Prepaid churn', 'Pay-as-you-go churn']);
+    const oct = churnMonth(data, '2026-10', TODAY);
+    const pre = churnForSegment(oct, 'prepaid');
+    const payg = churnForSegment(oct, 'payg');
+    assert.deepEqual([pre.num + payg.num, pre.den + payg.den], [oct.num, oct.den]);
+    assert.equal(t('churn_prepaid').value, Math.round(pre.value * 10) / 10);
+    assert.equal(t('churn_payg').value, Math.round(payg.value * 10) / 10);
+    assert.ok(pre.events.length > 0 && pre.events.every((e) => e.segment === 'Prepaid'));
+    assert.equal(c.trends.churn_prepaid.length, c.trends.churn.length);
+    // The rows behind a plan card are that plan's only.
+    const rows = drill(data, { kpi: 'churn_payg', month: '2026-10', today: TODAY });
+    assert.match(rows.title, /^Pay-as-you-go churn/);
+    assert.ok(rows.tabs[0].rows.length > 0 && rows.tabs[0].rows.every((r) => r.segment === 'Pay-as-you-go'));
+    assert.ok(rows.tabs[1].rows.every((r) => r.segment === 'Pay-as-you-go'));
   });
   test('at most one churn event per client per calendar month', () => {
     const r = res([b(1, 'Twice', '2026-10-06', { cancellation: cx('2026-10-03', 'Too expensive') }), b(1, 'Twice', '2026-10-21', { cancellation: cx('2026-10-19', 'Stopping after all') })]);
@@ -345,7 +434,7 @@ describe('scorecard', () => {
       assert.equal(c.trends[t.kpi].length, 12);
     }
     // The same two reference lines, in the same words, on every tile.
-    assert.deepEqual(c.tiles.map((t) => t.target), ['63–68%', 'under 6.8%', '98.5% or higher', null, null, null]);
+    assert.deepEqual(c.tiles.map((t) => t.target), ['63–68%', 'under 6.8%', null, null, '98.5% or higher', null, null, null]);
     for (const t of c.tiles.filter((y) => y.kpi !== 'billing')) assert.ok(t.last12, t.kpi);
     assert.ok(!c.tiles.some((t) => t.details.some((d) => /north star|baseline|^target$/i.test(d.label))));
     assert.deepEqual([tile(c, 'billing').state, tile(c, 'billing').note, tile(c, 'billing').value], ['disabled', 'Coming later', null]);
@@ -361,10 +450,11 @@ describe('scorecard', () => {
     assert.equal(d.better, d.value === 0 ? null : d.value < 0);
     assert.equal(tile(c, 'fulfilment').delta.better === true, tile(c, 'fulfilment').delta.value > 0);
   });
-  test('a stale or missing source shows no value: never a zero, never last month', () => {
+  test('a missing source shows no value (never a zero); a stale one keeps its figures and is marked', () => {
     const stale = card('launch27_stale');
-    for (const k of ['churn', 'fulfilment', 'complaints', 'reviews']) assert.deepEqual([tile(stale, k).state, tile(stale, k).value, stale.trends[k]], ['stale', null, undefined], k);
-    assert.equal(tile(stale, 'ocr').state, 'ok');
+    const fresh = card(null);
+    for (const k of ['churn', 'fulfilment', 'complaints', 'reviews']) assert.deepEqual([tile(stale, k).state, tile(stale, k).stale, tile(stale, k).value], ['ok', true, tile(fresh, k).value], k);
+    assert.deepEqual([tile(stale, 'ocr').state, tile(stale, 'ocr').stale, tile(fresh, 'churn').stale], ['ok', undefined, undefined]);
     const noKustomer = card('kustomer_missing');
     assert.deepEqual([tile(noKustomer, 'complaints').state, tile(noKustomer, 'complaints').value], ['no_data', null]);
     assert.equal(tile(noKustomer, 'churn').state, 'ok');
@@ -609,6 +699,23 @@ describe('kpi live connectors (production path), run against the synthetic Launc
     const mine = await createSyncBearer({ config, fetchImpl })();
     const done = await l27.job.start({ bearer: mine });
     assert.ok(done.bookings > 100);
+    await db.close();
+  });
+  test('opening the scorecard refreshes Launch27 by itself on the viewer login, then leaves it alone', async () => {
+    const { db, fetchImpl } = await setup();
+    const live = { ...config, production: true, l27Mode: 'live', l27SyncEmail: null, l27SyncPassword: null };
+    const connectors = createLiveKpiConnectors({ db, config: live, fetchImpl, syncBearer: async () => null, brand, log: quiet });
+    const kpi = createKpi({ db, config: live, log: quiet, connectors });
+    // Nobody signed in to Launch27 on this request: nothing starts.
+    assert.equal((await kpi.scorecard()).refresh.running, false);
+    const mine = await createSyncBearer({ config, fetchImpl })();
+    assert.equal((await kpi.scorecard({ bearer: mine })).refresh.running, true);
+    await connectors[0].job.start();
+    const after = await kpi.scorecard({ bearer: mine });
+    assert.equal(after.refresh.running, false);
+    assert.equal(after.sources.find((x) => x.key === 'launch27').state, 'ok');
+    assert.equal(after.tiles.find((t) => t.kpi === 'fulfilment').state, 'ok');
+    assert.equal((await db.query("SELECT count(*)::int AS n FROM kpi_refresh_log WHERE source = 'launch27'")).rows[0].n, 1);
     await db.close();
   });
   test('a failed refresh keeps the previous snapshot and is logged', async () => {

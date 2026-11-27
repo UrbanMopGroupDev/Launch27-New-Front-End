@@ -29,8 +29,9 @@ Every tile shows its value, status, change, **Target** and **Last 12 months** (t
 the same words, on every tile), plus period, source, last refresh and an "i" button with the formula.
 The page opens on **Summary**; **Detailed** (or a tile's "Details") adds the breakdowns, and "View rows"
 goes down to the individual bookings and clients.
-If a source is missing or has not refreshed in 48 hours, the tile says "No data" or "Stale"
-and shows no number. A month with no data is a gap in the trend, never a zero.
+If a source is missing, the tile says "No data" and shows no number. If a source has not refreshed
+in 48 hours, the tiles keep their figures and one notice at the top of the page says when that
+source was last updated. A month with no data is a gap in the trend, never a zero.
 
 | KPI | Formula | Sources |
 | --- | --- | --- |
@@ -50,8 +51,26 @@ Churn rules, in the order they are applied to each cancellation in the month:
    Temporary reasons (travel, hold/pause, renovation, Airbnb, postpartum): out if the client is back
    on a recurring plan within 90 days (shown as back within 30, 60 or 90); counted as churn in the
    cancellation month once 90 days pass with no return; pending, and not counted, until then.
-5. The client has a later active recurring booking ("came back"): out.
+5. The client has a recurring visit within 90 days of cancelling: out. If Launch27's cancellation
+   type says they cancelled this and all future recurring bookings (`seriesCancelPattern`), it is
+   **temporary churn** (shown beside the rate, not in it); a cancellation of one booking is a
+   skipped or moved visit. Where Launch27 gives no type, more than 60 days between cleans stands
+   in for it. No recurring visit within 90 days is **permanent churn**, whichever was cancelled;
+   the tile says how many were counted after a one-visit cancellation. A cancellation
+   inside the last 90 days counts now and is marked provisional; it drops out if the client returns.
 6. A second event for the same client in the month: out.
+
+A **prepaid plan that runs out** with no renewal is also an event: dated the client's last prepaid
+visit, with the same 90-day return test (a renewal or a move to pay-as-you-go within 60 days is not
+an event).
+
+**By plan type.** Two cards sit beside the blended churn card: **Prepaid churn** and **Pay-as-you-go
+churn**, each with its own rate, change, 12-month trend and rows. The blended card's details also split the same events and base into **Prepaid** (the
+Launch27 frequency name contains "prepaid") and **Pay-as-you-go** (every other recurring frequency),
+with the blended row beside them. A churned client is counted under the plan of the booking that
+ended; the starting count under the client's first recurring visit in the period. Clients on both
+kinds of plan in the period, and churned clients not in the starting count, are listed as warnings.
+The windows are `temporaryReturnDays` (90) and `temporaryGapDays` (60) in `KPI_RULES`.
 
 Test and institutional clients are also left out of the base. The event is dated by the
 cancellation date, and the last cleaner is the one on the client's last completed visit.
@@ -60,6 +79,8 @@ cancellation date, and the last cleaner is the one on the client's last complete
 
 - **Month**: any month from January 2024, including the month in progress (shown "to date").
 - **Trailing 12**: the 12 months ending at the chosen month, pooled.
+- **Last 30 / 60 / 90 days**: the days ending today, today included. These are custom dates with the
+  dates filled in, so the same rules apply.
 - **Custom dates**: any start and end date up to today, compared with the same number of days
   before. Churn is events in the range ÷ clients with a recurring visit booked in the 31 days from
   the start date; the monthly bands and target are not applied to a partial period. OCR is
@@ -90,7 +111,11 @@ Production:
   month's report restating it in its previous-month column). The figure is for
   the whole company (Residential and Commercial), and it is Syft's own calculation, not the
   account-by-account definition above, until QuickBooks is connected.
-- A failed refresh keeps the previous snapshot; the affected tiles turn "Stale" after 48 hours.
+- Opening the scorecard also refreshes Launch27 on its own when its copy is over 6 hours old
+  (`autoRefreshHours`), read-only, on the viewer's own Launch27 login, so the nightly job's sync
+  login is not required. The page shows "Updating" and reloads the figures when it finishes.
+- A failed refresh keeps the previous snapshot; after 48 hours the page shows one notice with the
+  date of the last good refresh.
 - Every refresh writes one row per source per day to `kpi_refresh_log` (updated in place).
 - Only bookings at the Ottawa location count for UrbanMop Residential (`locations` in `KPI_BRANDS`).
 

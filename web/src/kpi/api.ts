@@ -2,7 +2,7 @@
 // dev/QA-only manual Google review entry.
 import { ApiError, describeErrors } from '../api';
 
-export type Kpi = 'ocr' | 'churn' | 'fulfilment' | 'complaints' | 'reviews' | 'billing';
+export type Kpi = 'ocr' | 'churn' | 'churn_prepaid' | 'churn_payg' | 'fulfilment' | 'complaints' | 'reviews' | 'billing';
 export type Mode = 'month' | 't12' | 'range';
 export type Tone = 'good' | 'warning' | 'critical' | 'neutral';
 
@@ -12,12 +12,15 @@ export interface Tile {
   period: string;
   formula: string;
   unit: 'pct' | 'per100' | 'count' | null;
-  state: 'ok' | 'no_data' | 'stale' | 'disabled';
+  state: 'ok' | 'no_data' | 'disabled';
+  stale?: boolean;
   value: number | null;
   delta: { value: number; unit: 'pp' | 'per100' | 'count'; better: boolean | null; versus: string } | null;
   status: { label: string; tone: Tone } | null;
   badges: { tone: Tone; text: string }[];
   details: { label: string; value: string; drill?: string }[];
+  segments?: { key: string; label: string; den: number; temporary: number; permanent: number; provisional: number; value: number | null }[];
+  segment_notes?: string[];
   breakdown?: { label: string; n: number; kind: 'company' | 'client' | 'unclassified'; group: string }[];
   weeks?: { from: string; to: string; value: number | null; num: number; den: number }[];
   sources: { key: string; label: string; refreshed_at: string | null; state: 'ok' | 'stale' | 'missing' }[];
@@ -44,7 +47,7 @@ export interface Scorecard {
   default_month: string;
   first_day: string;
   range: { from: string; to: string } | null;
-  sources: { key: string; label: string; mode: string; refreshed_at: string | null; note: string | null }[];
+  sources: { key: string; label: string; mode: string; refreshed_at: string | null; note: string | null; state: 'ok' | 'stale' | 'missing' }[];
   outage: string | null;
   outages: Record<string, string> | null;
   refresh: { available: boolean; running: boolean };

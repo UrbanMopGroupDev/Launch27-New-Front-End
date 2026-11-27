@@ -1,6 +1,7 @@
 // KPI scorecard (Reports → KPI scorecard): the monthly scorecard, read-only. Every number
 // comes from the server's calc module (server/src/kpi/calc.js); this page only renders it.
-// A tile with a missing or stale source shows "No data" or "Stale", never a number.
+// A tile with a missing source shows "No data", never a number. A source that has not refreshed
+// lately keeps its figures; one notice at the top of the page says so.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { kpiApi, type Drill, type DrillRow, type Kpi, type ManualReviews, type Mode, type Query, type Reference, type Scorecard, type Tile, type Tone, type TrendPoint } from '../kpi/api';
@@ -10,6 +11,9 @@ const signed = (v: number, digits: number) => `${v > 0 ? '+' : v < 0 ? '−' : '
 const fmtDelta = (d: NonNullable<Tile['delta']>) => (d.unit === 'pp' ? `${signed(d.value, 1)} pp` : d.unit === 'per100' ? signed(d.value, 2) : signed(d.value, 0));
 const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString('en-CA', { timeZone: 'America/Toronto', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'never');
 const shortMonth = (m: string) => new Date(`${m}-15T12:00:00Z`).toLocaleDateString('en-CA', { month: 'short', timeZone: 'UTC' });
+// Quick ranges: the last N days, today included. They are custom dates with the dates filled in.
+const LAST_DAYS = [30, 60, 90];
+const daysBack = (today: string, n: number) => new Date(Date.parse(`${today}T12:00:00Z`) - (n - 1) * 86_400_000).toISOString().slice(0, 10);
 const longMonth = (m: string) => new Date(`${m}-15T12:00:00Z`).toLocaleDateString('en-CA', { month: 'short', year: 'numeric', timeZone: 'UTC' });
 const UNIT_NOTE: Record<string, string> = { per100: 'per 100 visits', count: 'new this period' };
 const TONE_ICON: Record<Tone, string> = { good: '●', warning: '⚠', critical: '🔴', neutral: '' };
@@ -27,8 +31,10 @@ export function KpiScorecardPage() {
   const [range, setRange] = useState<{ from: string; to: string }>({ from: '', to: '' });
   const rangeReady = mode !== 'range' || (!!range.from && !!range.to && range.from <= range.to);
   const query: Query = { brand, month, mode, outage, from: range.from, to: range.to };
-  const q = useQuery({ queryKey: ['kpi', 'scorecard', brand, month, mode, outage, mode === 'range' ? range.from : '', mode === 'range' ? range.to : ''], queryFn: () => kpiApi.scorecard(query), retry: false, placeholderData: (p) => p, enabled: rangeReady });
+  const q = useQuery({ queryKey: ['kpi', 'scorecard', brand, month, mode, outage, mode === 'range' ? range.from : '', mode === 'range' ? range.to : ''], queryFn: () => kpiApi.scorecard(query), retry: false, placeholderData: (p) => p, enabled: rangeReady, refetchInterval: (x) => (x.state.data?.refresh.running ? 20_000 : false) });
   const s = q.data;
+  const lastDays = s && mode === 'range' && range.to === s.today ? LAST_DAYS.find((n) => range.from === daysBack(s.today, n)) || null : null;
+  const stale = s ? s.sources.filter((x) => x.state === 'stale') : [];
   return (
     <div className="seg-page sc-page">
       <header className="page-header">
@@ -53,7 +59,10 @@ export function KpiScorecardPage() {
             <div className="seg-period" role="group" aria-label="Period">
               <button className={mode === 'month' ? 'active' : ''} aria-pressed={mode === 'month'} onClick={() => setMode('month')}>Month</button>
               <button className={mode === 't12' ? 'active' : ''} aria-pressed={mode === 't12'} onClick={() => setMode('t12')}>Trailing 12</button>
-              <button className={mode === 'range' ? 'active' : ''} aria-pressed={mode === 'range'} onClick={() => { if (!range.from) setRange({ from: `${s.today.slice(0, 7)}-01`, to: s.today }); setMode('range'); }}>Custom dates</button>
+              {LAST_DAYS.map((n) => (
+                <button key={n} className={lastDays === n ? 'active' : ''} aria-pressed={lastDays === n} title={`The ${n} days ending today`} onClick={() => { setRange({ from: daysBack(s.today, n), to: s.today }); setMode('range'); }}>Last {n} days</button>
+              ))}
+              <button className={mode === 'range' && !lastDays ? 'active' : ''} aria-pressed={mode === 'range' && !lastDays} onClick={() => { if (!range.from) setRange({ from: `${s.today.slice(0, 7)}-01`, to: s.today }); setMode('range'); }}>Custom dates</button>
             </div>
             {mode === 'range' ? (
               <div className="sc-range">
@@ -88,6 +97,11 @@ export function KpiScorecardPage() {
       )}
       {s && (
         <>
+          {s.refresh.running ? (
+            <p className="notice sc-fresh" role="status">Updating from Launch27 now. The figures refresh on their own when it finishes (usually a minute or two).</p>
+          ) : stale.length > 0 && (
+            <p className="notice sc-fresh" role="status">{stale.map((x) => `${x.label} was last updated ${when(x.refreshed_at)}`).join(' · ')}. The figures below are as of then.</p>
+          )}
           <section className="sc-tiles" aria-label="KPIs">
             {s.tiles.map((t) => <TileCard key={t.kpi} tile={t} detailed={view === 'detailed'} onDrill={setDrill} />)}
           </section>
@@ -154,6 +168,29 @@ function TileCard({ tile: t, detailed, onDrill }: { tile: Tile; detailed: boolea
                   </div>
                 ))}
               </dl>
+              {t.segments && (
+                <div className="sc-segments">
+                  <span className="small muted">By plan type · {t.period}</span>
+                  <table>
+                    <thead>
+                      <tr><th scope="col">Plan</th><th scope="col" title="Recurring clients at the start of the period">Start</th><th scope="col" title="Temporary churn: back within 90 days">Temp.</th><th scope="col" title="Permanent churn (provisional in brackets)">Perm.</th><th scope="col">Churn</th></tr>
+                    </thead>
+                    <tbody>
+                      {t.segments.map((g) => (
+                        <tr key={g.key} className={g.key === 'all' ? 'sc-seg-total' : ''}>
+                          <th scope="row">{g.label}</th>
+                          <td>{g.den.toLocaleString('en-CA')}</td>
+                          <td>{g.temporary}</td>
+                          <td>{g.permanent}{g.provisional > 0 && <span className="muted"> ({g.provisional})</span>}</td>
+                          <td>{g.value == null ? '—' : `${g.value.toFixed(1)}%`}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <p className="small muted">Start = clients at the start of the period. Temp. = back within 90 days (not in the rate). Perm. = permanent churn; in brackets, how many are provisional (cancelled inside the last 90 days, so they can still return).</p>
+                  {(t.segment_notes || []).map((n) => <p key={n} className="small sc-status-warning">⚠ {n}</p>)}
+                </div>
+              )}
               {t.breakdown && t.breakdown.length > 0 && (
                 <div className="sc-breakdown">
                   <span className="small muted">Not fulfilled, by reason</span>
@@ -179,7 +216,7 @@ function TileCard({ tile: t, detailed, onDrill }: { tile: Tile; detailed: boolea
         </>
       ) : (
         <div className="sc-empty">
-          <span className="sc-value sc-value-none">{t.state === 'disabled' ? 'Coming later' : t.state === 'stale' ? 'Stale' : 'No data'}</span>
+          <span className="sc-value sc-value-none">{t.state === 'disabled' ? 'Coming later' : 'No data'}</span>
           {t.note && t.state !== 'disabled' && <p className="muted small">{t.note}</p>}
         </div>
       )}
@@ -208,7 +245,7 @@ function TrendCard({ tile, points, reference }: { tile: Tile; points: TrendPoint
     return (
       <div className="card sc-trend">
         <h3>{tile.label}</h3>
-        <p className="muted small sc-trend-none">{tile.state === 'stale' ? 'Stale: no trend shown' : 'No data'}</p>
+        <p className="muted small sc-trend-none">No data</p>
       </div>
     );
   }
@@ -282,7 +319,7 @@ function SourcesCard({ s, outage, setOutage }: { s: Scorecard; outage: string | 
       <p className="small muted">Read-only: this page never changes anything in Launch27, QuickBooks, Kustomer or Google.</p>
       {s.refresh.available && (
         <p className="small">
-          {s.refresh.running || refresh.isSuccess ? <span className="muted">Refreshing now (Launch27 takes about seven minutes the first time). Reload the page afterwards.</span> : <button className="link" disabled={refresh.isPending} onClick={() => refresh.mutate()}>Refresh now</button>}
+          {s.refresh.running || refresh.isSuccess ? <span className="muted">Refreshing now. The page updates itself when it finishes.</span> : <button className="link" disabled={refresh.isPending} onClick={() => refresh.mutate()}>Refresh now</button>}
           {refresh.isError && <span className="warn"> {(refresh.error as Error).message}</span>}
         </p>
       )}
