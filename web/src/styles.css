@@ -2459,3 +2459,10 @@ a.rep-factor:hover b { text-decoration: underline; }
 .ct-grade.low { color: var(--muted); }
 .ct-close-tag { margin-left: 6px; font-size: 11px; color: var(--muted); font-weight: normal; }
 .ct-needs input, .ct-needs select { outline: 2px solid var(--danger); outline-offset: 1px; }
+.cmp-offers { margin: 0; padding-left: 18px; }
+/* Complaint tracking: ranked responses */
+.ct-ranked td { vertical-align: top; }
+.ct-value { margin-left: 6px; font-size: 11px; }
+.ct-ranked td:nth-child(3) { min-width: 0; white-space: nowrap; }
+.ct-ranked td:nth-child(2) { white-space: normal; min-width: 150px; }
+.ct-ranked th, .ct-ranked td { padding: 8px 8px; }

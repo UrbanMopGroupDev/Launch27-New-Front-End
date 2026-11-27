@@ -32,6 +32,7 @@ import { createTracker } from './tracker/service.js';
 import { createAdjustments } from './tracker/adjustments.js';
 import { createKustomerMigration } from './kustomer-migration/service.js';
 import { createClassifier } from './complaints/classify.js';
+import { createSolutionReader } from './complaints/solutions.js';
 
 const config = loadConfig();
 const log = createLogger({ level: config.logLevel, base: { env: config.appEnv, version: config.version } });
@@ -128,6 +129,7 @@ const complaints = createComplaints({
   fetchImpl,
   gmail: gmailForComplaints,
   classifier: createClassifier({ apiKey: config.anthropicApiKey, log }),
+  solutionReader: createSolutionReader({ apiKey: config.anthropicApiKey, log }),
   l27: createL27Client({ baseUrl: config.l27BaseUrl, fetchImpl }),
   syncBearer: createSyncBearer({ config, fetchImpl }),
   log,

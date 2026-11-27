@@ -8,6 +8,8 @@ import { redact } from '../src/complaints/redact.js';
 import { outcomeAt, journeyAt, recleanCost, cleanerLastWorkedIndex, regularCleaner } from '../src/complaints/journey.js';
 import { normalizeSettings, canApprove, rungForRefund, budgetStatus, DEFAULT_SETTINGS } from '../src/complaints/settings.js';
 import { buildPlaybook } from '../src/complaints/playbook.js';
+import { formatThread, offerToResolution, normalizeSolution } from '../src/complaints/solutions.js';
+import { caseRows, rankResponses } from '../src/complaints/rank.js';
 import { mapStatus, toCase, discover, createKustomerClient, findListing } from '../src/complaints/sources/kustomer.js';
 import { createComplaints, buildReviewStats } from '../src/complaints/service.js';
 import { createReports } from '../src/reports/service.js';
@@ -876,6 +878,206 @@ describe('complaints: root causes (why it happened)', () => {
     assert.equal((await complaints.getCase(b.id)).cause, pick, "a later run doesn't undo a person's cause");
     const pb = await complaints.playbook({ from, to });
     assert.ok(pb.by_cause.find((x) => x.key === pick).ids.includes(b.id));
+    await db.close();
+  });
+});
+
+describe('complaints: solution mining (what we offered, and how the client took it)', () => {
+  test('threads read as CLIENT / US / NOTE; offers map onto the ladder; bad output is cleaned', () => {
+    const t = formatThread([
+      { kind: 'message', direction: 'in', body: 'The bathroom was skipped.', created_at: '2026-10-01T14:00:00Z', channel: 'email' },
+      { kind: 'message', direction: 'out', body: 'So sorry! We can send a reclean Thursday.', created_at: '2026-10-01T15:00:00Z', channel: 'email' },
+      { kind: 'note', direction: null, body: 'Refunded 30%.', created_at: '2026-10-02T15:00:00Z' },
+      { kind: 'message', direction: 'in', body: '   ', created_at: '2026-10-02T16:00:00Z' },
+    ]);
+    assert.match(t, /^CLIENT \(2026-10-01, email\):\nThe bathroom was skipped\./);
+    assert.match(t, /US \(2026-10-01, email\):\nSo sorry/);
+    assert.match(t, /NOTE \(2026-10-02\):\nRefunded 30%\./);
+    assert.equal(t.split('\n\n').length, 3, 'empty messages are left out');
+    assert.deepEqual(offerToResolution({ kind: 'partial_refund', pct: 30 }), { rung: 'L5', action: 'refund', pct: 30, amount: null });
+    assert.equal(offerToResolution({ kind: 'credit', amount: 5 }).rung, 'L1');
+    assert.equal(offerToResolution({ kind: 'reclean' }).action, 'reclean_full');
+    assert.equal(offerToResolution({ kind: 'same_cleaner' }), null, 'not a ladder step');
+    const n = normalizeSolution({ asked_for: 'bogus', offers: [{ kind: 'reclean', amount: null, pct: 140, detail: 'x', client_response: 'maybe' }, { kind: 'nope' }], final_kind: 'none', client_end: 'meh', said_will_leave: 1, handling: '' });
+    assert.equal(n.asked_for, 'nothing_specific');
+    assert.equal(n.offers.length, 1);
+    assert.deepEqual([n.offers[0].pct, n.offers[0].client_response], [100, 'unclear']);
+    assert.deepEqual([n.final_kind, n.client_end, n.said_will_leave, n.handling], [null, 'unknown', true, null]);
+  });
+
+  test('the playbook view: per offer, taken or pushed back, final answers, how clients ended, who stayed', () => {
+    const cases = [1, 2, 3, 4].map((id) => ({ id, source: 'kustomer', opened_at: '2026-06-10T12:00:00Z', category: 'quality_missed', l27_customer_id: 700 + id, classified_by: 'claude' }));
+    const outcomes = cases.map((c) => ({ case_id: c.id, day: 60, outcome: c.id === 3 ? 'lost' : 'saved' }));
+    const solutions = [
+      { case_id: 1, read_by: 'claude', asked_for: 'partial_refund', offers: [{ kind: 'reclean', client_response: 'declined' }, { kind: 'partial_refund', pct: 30, client_response: 'accepted' }], final_kind: 'partial_refund', client_end: 'satisfied' },
+      { case_id: 2, read_by: 'claude', asked_for: 'nothing_specific', offers: [{ kind: 'reclean', client_response: 'accepted' }], final_kind: 'reclean', client_end: 'satisfied' },
+      { case_id: 3, read_by: 'claude', asked_for: 'nothing_specific', offers: [{ kind: 'reclean', client_response: 'accepted' }], final_kind: 'reclean', client_end: 'unhappy', said_will_leave: true },
+      { case_id: 4, read_by: 'none', offers: [] },
+    ];
+    const pb = buildPlaybook({ cases, resolutions: [], costs: [], outcomes, solutions, visits: [], from: '2026-05-01', to: '2026-10-31', settings: normalizeSettings({}), today: '2026-11-27', mining: true });
+    const s = pb.solutions;
+    assert.deepEqual([s.enabled, s.read, s.no_thread, s.not_yet], [true, 3, 1, 0]);
+    const rec = s.offers.find((o) => o.key === 'reclean');
+    assert.deepEqual([rec.offered, rec.accepted, rec.pushed_back, rec.accept_rate], [3, 2, 1, 0.667]);
+    assert.deepEqual([rec.final.n, rec.final.saved_n, rec.final.lost_n, rec.ended_happy], [2, 1, 1, 0.5]);
+    const ref = s.offers.find((o) => o.key === 'partial_refund');
+    assert.deepEqual([ref.asked_for, ref.final.n, ref.ended_happy], [1, 1, 1]);
+    assert.equal(s.offers[0].key, 'reclean', 'the most common final answer first');
+    assert.deepEqual(s.said_will_leave_ids, [3]);
+    assert.deepEqual(s.pushed_back_first_ids, [1]);
+    assert.deepEqual(s.endings.satisfied, [1, 2]);
+  });
+
+  test('a case is matched to the client\'s conversation, read once, and read again when the thread grows', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await schedule.sync();
+    await reports.sync();
+    const to = (await reports.visitsSnapshot()).to;
+    const from = new Date(Date.parse(to) - 182 * 86_400_000).toISOString().slice(0, 10);
+    const seen = [];
+    const solutionReader = async (thread, { complaint }) => {
+      seen.push({ thread, complaint });
+      return { asked_for: 'nothing_specific', offers: [{ kind: 'credit', amount: 10, pct: null, detail: '$10 off', client_response: 'declined' }, { kind: 'reclean', amount: null, pct: null, detail: 'reclean Thursday', client_response: 'accepted' }], final_kind: 'reclean', final_detail: 'reclean done', client_end: 'satisfied', said_will_leave: false, said_will_stay: true, handling: 'Answered the same day.' };
+    };
+    const complaints = createComplaints({ db, config, reports, fetchImpl, log: quiet, solutionReader });
+    await complaints.run({ from, to });
+    const all = await complaints.listCases({ from, to });
+    const target = all.find((c) => c.l27_customer_id);
+    assert.ok(target, 'needs a case linked to a Launch27 client');
+    let st = await db.query('SELECT count(*)::int AS n FROM complaint_solutions');
+    assert.equal(st.rows[0].n, all.length, 'every case was looked at during the run');
+    assert.equal(seen.length, 0, 'no conversations on file yet: nothing sent to Claude');
+
+    // The migrated conversation for that client, around the complaint.
+    const contact = (await db.query("INSERT INTO contacts (name, l27_customer_id) VALUES ('Test Client', $1) RETURNING id", [target.l27_customer_id])).rows[0].id;
+    const conv = (await db.query("INSERT INTO conversations (contact_id, channel, source, source_id) VALUES ($1, 'email', 'kustomer', 'k-1') RETURNING id", [contact])).rows[0].id;
+    const at = Date.parse(target.opened_at);
+    const msg = (offsetH, kind, direction, body) => db.query('INSERT INTO messages (conversation_id, kind, direction, body, created_at) VALUES ($1, $2, $3, $4, $5)', [conv, kind, direction, body, new Date(at + offsetH * 3_600_000).toISOString()]);
+    await msg(1, 'message', 'in', 'Test Client here. The kitchen was not cleaned at all.');
+    await msg(3, 'message', 'out', 'Sorry! $10 off your next clean?');
+    await msg(5, 'message', 'in', 'I would rather have someone come back.');
+    await msg(6, 'message', 'out', 'Of course, a reclean on Thursday.');
+    await msg(7, 'note', null, 'Reclean booked.');
+    await msg(24 * 60, 'message', 'in', 'Unrelated, two months later.');
+    await db.query('DELETE FROM complaint_solutions WHERE case_id = $1', [target.id]);
+
+    let r = await complaints.mineSolutions();
+    assert.equal(r.read, 1);
+    assert.equal(seen.length, 1);
+    assert.match(seen[0].thread, /CLIENT .*\n.*kitchen was not cleaned/);
+    assert.match(seen[0].thread, /NOTE .*\nReclean booked\./);
+    assert.ok(!/Test Client/.test(seen[0].thread), 'names are redacted before Claude');
+    assert.ok(!/two months later/.test(seen[0].thread), 'only around the complaint');
+    const d = await complaints.getCase(target.id);
+    assert.deepEqual([d.solution.read_by, d.solution.thread_messages, d.solution.final_kind, d.solution.client_end], ['claude', 5, 'reclean', 'satisfied']);
+    assert.ok(d.resolutions.some((x) => x.source === 'conversation' && x.action === 'reclean_full' && x.accepted === 'yes'), 'what the client took becomes what we did');
+    assert.ok(!d.resolutions.some((x) => x.source === 'conversation' && x.action === 'credit'), 'a declined offer is not what we did');
+
+    // Nothing new: not sent again. A new message in the thread of a recent case: read again.
+    await db.query("UPDATE complaint_solutions SET mined_at = now() - interval '2 days' WHERE case_id = $1", [target.id]);
+    r = await complaints.mineSolutions();
+    assert.equal(seen.length, 1, 'an unchanged thread is not sent again');
+    await db.query('UPDATE complaint_cases SET opened_at = now() - interval \'3 days\' WHERE id = $1', [target.id]);
+    await db.query("UPDATE complaint_solutions SET mined_at = now() - interval '2 days' WHERE case_id = $1", [target.id]);
+    await db.query('INSERT INTO messages (conversation_id, kind, direction, body, created_at) VALUES ($1, \'message\', \'in\', \'Thanks, all good now.\', now())', [conv]);
+    r = await complaints.mineSolutions();
+    assert.equal(seen.length, 2, 'a grown thread is read again');
+    const pb = await complaints.playbook({ from: '2000-01-01', to: '2999-12-31' });
+    assert.ok(pb.solutions.read >= 1);
+    assert.ok(pb.solutions.offers.find((o) => o.key === 'reclean').final.ids.includes(target.id));
+    st = await db.query("SELECT count(*)::int AS n FROM complaint_resolutions WHERE case_id = $1 AND source = 'conversation'", [target.id]);
+    assert.equal(st.rows[0].n, 1, 're-reading replaces, never doubles');
+    await db.close();
+  });
+});
+
+describe('complaints: ranked responses for a new complaint', () => {
+  // n cases of a response, k of them kept, in a category/cause, optional cost / happiness / offers.
+  let id = 0;
+  const mk = (response, n, k, { category = 'quality_missed', cause = 'regular_left', cost = 0, happy = null, one_time = false, offered = [] } = {}) =>
+    Array.from({ length: n }, (_, i) => ({ id: ++id, category, cause, one_time, response, from_conversation: true, kept: i < k ? 1 : 0, happy, cost, offered, opened_at: null }));
+
+  test('past cases: the final answer from the conversation, else the ladder; kept from the outcome', () => {
+    const rows = caseRows({
+      cases: [{ id: 1, category: 'quality_missed' }, { id: 2, category: 'quality_missed' }, { id: 3, category: 'punctuality', one_time: true }, { id: 4, category: 'other' }],
+      resolutions: [{ case_id: 1, rung: 'L3' }, { case_id: 2, rung: 'L2' }, { case_id: 2, rung: 'L5' }],
+      costs: [{ case_id: 2, amount: '40' }, { case_id: 2, amount: '10' }],
+      outcomes: [{ case_id: 1, day: 60, outcome: 'saved' }, { case_id: 2, day: 60, outcome: 'partial_save' }, { case_id: 3, day: 120, outcome: 'not_rebooked' }],
+      solutions: [{ case_id: 1, read_by: 'claude', final_kind: 'same_cleaner', client_end: 'satisfied', offers: [{ kind: 'credit', client_response: 'declined' }] }],
+    });
+    assert.deepEqual(rows.map((r) => r.response), ['same_cleaner', 'partial_refund', 'apology', 'apology']);
+    assert.deepEqual(rows.map((r) => r.kept), [1, 0.5, 0, null]);
+    assert.equal(rows[1].cost, 50);
+    assert.equal(rows[0].happy, true);
+    assert.equal(rows[2].one_time, true);
+  });
+
+  test('three lucky cases do not outrank forty solid ones; small samples are graded Low', () => {
+    const rows = [...mk('full_refund', 3, 3), ...mk('reclean', 40, 32), ...mk('credit', 10, 4)];
+    const r = rankResponses(rows, { category: 'quality_missed', cause: 'regular_left' });
+    assert.deepEqual(r.options.map((o) => o.response), ['reclean', 'credit', 'full_refund'], 'proven responses first; 3 of 3 is not proven');
+    assert.equal(r.options[0].group, 'cause_category');
+    assert.deepEqual([r.options[0].kept, r.options[0].decided, r.options[0].grade], [0.8, 40, 'High']);
+    assert.equal(r.options[2].grade, 'Low');
+  });
+
+  test('each response is measured in the closest group with enough outcomes', () => {
+    const rows = [
+      ...mk('reclean', 6, 5),
+      ...mk('partial_refund', 2, 2), // too few with this cause and category…
+      ...mk('partial_refund', 8, 6, { category: 'punctuality' }), // …but enough with this cause
+      ...mk('apology', 20, 6, { cause: 'missed_areas' }),
+    ];
+    const r = rankResponses(rows, { category: 'quality_missed', cause: 'regular_left' });
+    const by = Object.fromEntries(r.options.map((o) => [o.response, o]));
+    assert.equal(by.reclean.group, 'cause_category');
+    assert.deepEqual([by.partial_refund.group, by.partial_refund.decided], ['cause', 10]);
+    assert.equal(by.apology.group, 'category');
+    assert.ok(r.groups.find((g) => g.key === 'all').cases === 36);
+    const noCause = rankResponses(rows, { category: 'quality_missed', cause: null });
+    assert.ok(!noCause.groups.some((g) => g.key.startsWith('cause')), 'no cause: category, then all');
+  });
+
+  test('ties go to the happier ending, then the cheaper; the best-value option is flagged', () => {
+    const rows = [...mk('reclean', 20, 15, { cost: 90, happy: true }), ...mk('credit', 20, 15, { cost: 10, happy: false }), ...mk('partial_refund', 20, 15, { cost: 120, happy: true })];
+    const r = rankResponses(rows, { category: 'quality_missed', cause: 'regular_left' });
+    assert.deepEqual(r.options.map((o) => o.response), ['reclean', 'partial_refund', 'credit']);
+    assert.equal(r.options.find((o) => o.response === 'credit').best_value, true);
+  });
+
+  test('one-time clients are ranked only on one-time clients; first offers that get turned down are noted', () => {
+    const turnedDown = [{ kind: 'credit', response: 'declined' }, { kind: 'reclean', response: 'accepted' }];
+    const rows = [...mk('reclean', 10, 8, { offered: turnedDown }), ...mk('credit', 10, 9, { one_time: true })];
+    const recurring = rankResponses(rows, { category: 'quality_missed', cause: 'regular_left' });
+    assert.deepEqual(recurring.options.map((o) => o.response), ['reclean']);
+    assert.equal(recurring.options[0].taken_when_offered, 1);
+    const oneTime = rankResponses(rows, { category: 'quality_missed', cause: 'regular_left', one_time: true });
+    assert.deepEqual(oneTime.options.map((o) => o.response), ['credit']);
+    const credit = rankResponses([...mk('credit', 6, 3, { offered: turnedDown }), ...mk('reclean', 6, 5, { offered: turnedDown })], { category: 'quality_missed', cause: 'regular_left' });
+    assert.equal(credit.options.find((o) => o.response === 'credit').first_turned_down, 1, 'credit was the first offer and got turned down');
+  });
+
+  test('the service ranks from every stored case', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await schedule.sync();
+    await reports.sync();
+    const to = (await reports.visitsSnapshot()).to;
+    const from = new Date(Date.parse(to) - 182 * 86_400_000).toISOString().slice(0, 10);
+    const complaints = createComplaints({ db, config, reports, fetchImpl, log: quiet });
+    await complaints.run({ from, to });
+    const cases = await complaints.listCases({ from, to });
+    const cat = cases.find((c) => !c.hard_route)?.category;
+    const r = await complaints.rankFor({ category: cat, cause: null, one_time: false });
+    assert.ok(r.groups.some((g) => g.key === 'category'));
+    assert.ok(r.options.every((o, i) => o.rank === i + 1 && o.cases > 0));
     await db.close();
   });
 });
