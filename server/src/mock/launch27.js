@@ -809,6 +809,14 @@ export function createMockLaunch27({ password = 'demo', now = () => Date.now(), 
     const teamList = () => (q.get('filter') === 'active' ? teams.filter((t) => t.active !== false) : teams);
     if (path === '/v1/staff/teams') return [200, page(teamList(), q)];
     if (path === '/v1/staff/teams/count') return [200, { count: teamList().length }];
+    // Time-off notes: one made-up note for some cleaners, so the calendar shows how they look.
+    if ((m = path.match(/^\/v1\/staff\/teams\/(\d+)\/availability\/notes$/)) && method === 'GET') {
+      const from = q.get('from');
+      const to = q.get('to');
+      if (!from || !to || hash(`note:${m[1]}`) % 3) return [200, []];
+      const d = new Date(Date.parse(`${from}T12:00:00Z`) + (hash(`notes:${m[1]}`) % 20) * 86_400_000).toISOString().slice(0, 10);
+      return [200, d <= to ? [{ id: Number(m[1]) * 10, start_date: d, end_date: d, note: "Doctor's appointment" }] : []];
+    }
     if ((m = path.match(/^\/v1\/staff\/teams\/(\d+)\/availability$/))) {
       // As Launch27 (recorded from its own "Specific date" screen): POST a list of dated rows; each
       // replaces that date's one-off change and comes back with a new id. There is no delete.

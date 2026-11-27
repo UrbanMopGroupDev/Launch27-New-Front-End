@@ -115,6 +115,7 @@ export function AvailabilityCalendar({ cleanerId, today }: { cleanerId: number; 
                     onClick={() => (can ? openDay(d) : x?.visits.length ? (setDay(d), setPanel('day')) : null)}>
                     <div className="small" style={{ textAlign: 'right' }}>{Number(d.slice(8))}</div>
                     {x && x.kind !== 'off' && <div className="small" style={{ background: t.bg, color: t.fg, borderRadius: 4, padding: '1px 4px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={x.kind === 'changed' ? `Changed for this date (usually ${x.usual || 'off'})` : undefined}>{t.label(x)}</div>}
+                    {x?.notes.map((n, i) => <div key={i} className="small" style={{ background: '#fde68a', color: '#713f12', borderRadius: 4, padding: '1px 4px', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={n}>{n}</div>)}
                     {x?.portal_off && <div className="small muted" title="Marked off in the portal only (before days off went to Launch27)">● off in the portal</div>}
                     {x && x.visits.length > 0 && <div className="small muted">{x.booked_h} h · {x.visits.length} visit{x.visits.length === 1 ? '' : 's'}</div>}
                     {outside > 0 && <div className="small warn">⚠ {outside} outside hours</div>}
@@ -139,6 +140,7 @@ export function AvailabilityCalendar({ cleanerId, today }: { cleanerId: number; 
             {sel.kind === 'day_off' ? 'Day off' : sel.hours ? `Working ${sel.hours}` : 'Not a working day'}
             {sel.kind === 'changed' || sel.kind === 'day_off' ? <span className="muted"> (usually {sel.usual || 'off'})</span> : null}
           </p>
+          {sel.notes.length > 0 && <p className="small" style={{ margin: '4px 0' }}>Note in Launch27: <b>{sel.notes.join(' · ')}</b></p>}
           {sel.visits.length > 0 && (
             <ul className="small" style={{ margin: '4px 0 8px', paddingLeft: 18 }}>
               {sel.visits.map((v) => (

@@ -218,6 +218,7 @@ export interface AvailabilityDay {
   kind: 'usual' | 'changed' | 'day_off' | 'off';
   change: { date: string; dayoff: boolean; start_time: string | null; end_time: string | null } | null;
   portal_off: boolean;
+  notes: string[];
   booked_h: number;
   visits: DayVisit[];
 }
