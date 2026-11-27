@@ -1432,6 +1432,7 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       res.json(await schedule.overview({ locations: brandLocs(req) }));
     }));
     r.get('/schedule/cleaners', sched(async (req, res) => res.json(await schedule.cleaners())));
+    r.get('/schedule/team-availability', sched(async (req, res) => res.json(await schedule.teamAvailability({ from: req.query.from ? String(req.query.from) : null, days: req.query.days }))));
 
     // ---------- a cleaner's availability, changed in Launch27 (docs/availability.md) ----------
     // Days off and one-off hours are saved in Launch27 (its own "Specific date" request); each change

@@ -204,6 +204,7 @@ export const scheduleApi = {
   assign: (visit_keys: string[], cleaner_id: number, recommended = false, override = false) => call<{ assigned: number; projected: number; cleaner: string; confirm_first: boolean }>('POST', '/assign', { visit_keys, cleaner_id, recommended, override }),
   unavailable: (cleaner_id: number, day: string, unavailable = true) => call<{ cleaner: string; day: string; unavailable: boolean; affected: number }>('PUT', '/unavailable', { cleaner_id, day, unavailable }),
   refresh: () => call<{ running: boolean }>('POST', '/refresh'),
+  teamAvailability: (from?: string, days = 14) => call<TeamAvailability>('GET', `/team-availability?days=${days}${from ? `&from=${from}` : ''}`),
   availability: (id: number, from: string, to: string) => call<AvailabilityMonth>('GET', `/cleaner/${id}/availability?from=${from}&to=${to}`),
   availabilityHistory: (id: number) => call<{ changes: AvailabilityHistoryRow[] }>('GET', `/cleaner/${id}/availability/history`),
 };
@@ -245,3 +246,8 @@ export async function assignAsking(visit_keys: string[], cleaner_id: number, rec
     throw err;
   }
 }
+
+// ---------- the whole team, day by day (Contacts › Cleaners) ----------
+export interface TeamDay { date: string; state: 'work' | 'changed' | 'off' | 'none'; hours: string | null; usual: string | null; capacity_h: number; booked_h: number }
+export interface TeamCleaner { id: number; name: string; status: string; status_label: string; assignable: boolean; phone: string | null; color: string; area: string | null; week: { booked_h: number; capacity_h: number; days_off: number }; days: TeamDay[] }
+export interface TeamAvailability { today: string; taken_at: string | null; dates: string[]; cleaners: TeamCleaner[] }
