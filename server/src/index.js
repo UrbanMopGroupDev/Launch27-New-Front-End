@@ -138,6 +138,7 @@ const complaints = createComplaints({
   log,
 });
 googleReviewSink.take = (reviews) => complaints.importReviews({ reviews }, null);
+complaints.logCoverage().catch((err) => log.warn('complaints coverage not logged', { error: err.message }));
 await complaints.markInterrupted().then((n) => n && log.warn('complaints: marked runs cut off by the restart as interrupted', { runs: n })).catch(() => {});
 // Kustomer historical migration: export (read-only), dry run, and the import (every conversation
 // onto someone's Story). Production reads Kustomer with KUSTOMER_API_KEY; dev and QA read a
