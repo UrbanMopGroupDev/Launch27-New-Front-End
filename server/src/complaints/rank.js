@@ -30,6 +30,15 @@ export const THREATS = [
 export const threatLabel = (k) => THREATS.find((t) => t.key === k)?.label || k;
 export const threatOf = (tone, saidWillLeave = false) => (tone === 'threat_review' ? 'review' : tone === 'threat_leave' || saidWillLeave ? 'leave' : 'none');
 
+// Client value tiers, by what the client spent with us in the 12 months before the complaint
+// (Launch27). Roughly: occasional or new, a monthly regular, a weekly or biweekly regular.
+export const VALUE_TIERS = [
+  { key: 'low', label: 'Under $1,500 a year', max: 1500 },
+  { key: 'mid', label: '$1,500 to $4,999 a year', max: 5000 },
+  { key: 'high', label: '$5,000 or more a year', max: Infinity },
+];
+export const valueTier = (spend) => (spend == null || !Number.isFinite(Number(spend)) ? null : VALUE_TIERS.find((t) => Number(spend) < t.max).key);
+
 // A rung of the ladder in the same terms as a mined offer.
 export const RUNG_TO_RESPONSE = { L0: 'apology', L1: 'credit', L2: 'credit', L3: 'reclean', L4: 'partial_refund', L5: 'partial_refund', L6: 'partial_refund', L7: 'full_refund', damage_reimbursement: 'damage_reimbursement' };
 const RUNG_ORDER = ['L0', 'L1', 'L2', 'L3', 'L4', 'L5', 'L6', 'L7', 'damage_reimbursement'];
@@ -89,7 +98,7 @@ const grade = (n) => (n >= 30 ? 'High' : n >= 10 ? 'Medium' : 'Low');
  * Rank responses for { category, cause, one_time }. rows: caseRows(). Returns the groups
  * looked at and the top responses, best first.
  */
-export function rankResponses(rows, { category = null, cause = null, one_time = false, threat = 'none' } = {}, { top = TOP, now = null } = {}) {
+export function rankResponses(rows, { category = null, cause = null, one_time = false, threat = 'none', value = null } = {}, { top = TOP, now = null } = {}) {
   const pool = rows.filter((r) => r.one_time === !!one_time && r.response);
   // A client who is threatening to leave or to post a review is first compared with past
   // clients who did the same: what keeps them can differ from what keeps everyone else.
@@ -160,8 +169,22 @@ export function rankResponses(rows, { category = null, cause = null, one_time = 
     const value = options.filter((o) => o.score >= best.score - 0.05 && o.decided >= MIN_DECIDED).sort((a, b) => (a.avg_cost ?? 0) - (b.avg_cost ?? 0))[0];
     if (value && value !== best && (value.avg_cost ?? 0) < (best.avg_cost ?? 0)) value.best_value = true;
   }
+  // What each option is worth for this client: the share of similar clients it kept (smoothed)
+  // times what this client is worth to us, less what the response costs on average. A full
+  // refund can be the right call for a $9,000 client and the wrong one for a $300 one.
+  const worth = Number(value) > 0 ? Number(value) : null;
+  if (worth) {
+    for (const o of options) {
+      o.kept_value = Math.round(o.score * worth);
+      o.net_value = Math.round(o.score * worth - (o.avg_cost ?? 0));
+    }
+    const sure = options.filter((o) => o.decided >= MIN_DECIDED);
+    const bestNet = (sure.length ? sure : options).slice().sort((a, b) => b.net_value - a.net_value)[0];
+    if (bestNet) bestNet.best_net = true;
+  }
   return {
     threat,
+    client_value: worth,
     groups: groups.map((g) => ({ key: g.key, label: g.label, cases: g.rows.length, decided: decided(g.rows).length, kept: r3(keptRate(g.rows)) })),
     options: options.slice(0, top).map((o, i) => ({ rank: i + 1, ...o })),
     considered: options.length,

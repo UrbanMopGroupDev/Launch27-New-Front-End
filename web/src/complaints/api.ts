@@ -68,7 +68,15 @@ export interface Playbook {
     by_category: { key: string; label: string; n: number; ids: number[] }[];
   })[];
   cause_groups: (OutcomeStats & { key: string; label: string; share: number | null })[];
-  threats: (OutcomeStats & { key: 'none' | 'leave' | 'review'; label: string; share: number | null; by_response: (OutcomeStats & { response: string; label: string })[] })[];
+  threats: (OutcomeStats & { key: string; label: string; share: number | null; by_response: (OutcomeStats & { response: string; label: string })[] })[];
+  value_tiers: (OutcomeStats & { key: string; label: string; share: number | null; avg_spend: number | null; by_response: (OutcomeStats & { response: string; label: string })[] })[];
+  value_unknown_ids: number[];
+  reviews: {
+    imported: number; imported_negative: number; first_at: string | null; last_at: string | null;
+    matched_ids: number[]; low_ids: number[]; high_ids: number[];
+    threatened_ids: number[]; threatened_posted_ids: number[]; threatened_not_posted_ids: number[]; low_without_threat_ids: number[];
+    low_by_response: { response: string; label: string; n: number; ids: number[] }[];
+  };
   solutions: {
     enabled: boolean;
     read: number; read_ids: number[];
@@ -225,6 +233,10 @@ export interface Clients {
   clients_with_complaints: number;
 }
 
+export interface ReviewsSummary {
+  imported: number; negative: number; matched: number; negative_matched: number; first_at: string | null; last_at: string | null;
+  low: { review_id: string; reviewer_name: string | null; stars: number; comment: string | null; created_at: string; replied: boolean; case_id: number | null; contact_id: number | null; case_opened_at: string | null; case_category: string | null }[];
+}
 export type Verdict = 'correct' | 'wrong_category' | 'not_complaint';
 // Root causes: why it happened (the category is what the client complained about).
 export type CauseBy = 'rules' | 'claude' | 'facts' | 'human';
@@ -291,6 +303,8 @@ export const complaintsApi = {
   playbook: (w?: { from?: string; to?: string }) => call<Playbook>('GET', `/playbook${qs(w)}`),
   cases: (w?: { from?: string; to?: string; category?: string; cause?: string }) => call<CaseRow[]>('GET', `/cases${qs(w)}`),
   codebook: () => call<Codebook>('GET', '/codebook'),
+  reviews: () => call<ReviewsSummary>('GET', '/reviews'),
+  importReviews: (file: unknown) => call<{ read: number; added: number; updated: number; matched: number; summary: ReviewsSummary }>('POST', '/reviews/import', file),
   clients: () => call<Clients>('GET', '/clients'),
   case: (id: number) => call<CaseDetail>('GET', `/cases/${id}`),
   reclassify: (id: number, patch: { category?: string; hard_route?: string | null }) => call<CaseDetail>('PATCH', `/cases/${id}`, patch),

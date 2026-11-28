@@ -10,7 +10,7 @@
 import { categoryLabel, causeLabel, CAUSES, CAUSE_GROUPS, HARD_ROUTES } from './taxonomy.js';
 import { RUNGS, rungIndex, rungName } from './settings.js';
 import { OFFER_KINDS, offerLabel } from './solutions.js';
-import { RUNG_TO_RESPONSE, THREATS, threatOf } from './rank.js';
+import { RUNG_TO_RESPONSE, THREATS, threatOf, VALUE_TIERS, valueTier } from './rank.js';
 
 export const THIN = 10;
 const r2 = (x) => (x == null ? null : Math.round(x * 100) / 100);
@@ -104,7 +104,7 @@ function oneTimeStats(list) {
   };
 }
 
-export function buildPlaybook({ cases, resolutions, costs, outcomes, solutions = [], visits = [], from, to, settings, today, mining = false }) {
+export function buildPlaybook({ cases, resolutions, costs, outcomes, solutions = [], reviews = [], reviewTotals = null, visits = [], from, to, settings, today, mining = false }) {
   const byCase = (rows) => {
     const m = new Map();
     for (const r of rows) {
@@ -274,6 +274,48 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, solutions =
     };
   });
 
+  // Google reviews matched to these complaints: which threats became a 1-2 star review, which
+  // low reviews came with no threat at all, and what we had done before each one.
+  const starsOf = new Map();
+  for (const r of reviews) starsOf.set(Number(r.case_id), Math.min(starsOf.get(Number(r.case_id)) ?? 5, Number(r.stars)));
+  const posted = rows.filter((c) => starsOf.has(c.id));
+  const low = posted.filter((c) => starsOf.get(c.id) <= 2);
+  const threatenedReview = rows.filter((c) => levelOf(c) === 'review');
+  const lowByResp = new Map();
+  for (const c of low) lowByResp.set(responseOf(c), [...(lowByResp.get(responseOf(c)) || []), c.id]);
+  const reviewView = {
+    imported: Number(reviewTotals?.imported) || 0,
+    imported_negative: Number(reviewTotals?.negative) || 0,
+    first_at: reviewTotals?.first_at || null,
+    last_at: reviewTotals?.last_at || null,
+    matched_ids: ids(posted),
+    low_ids: ids(low),
+    high_ids: ids(posted.filter((c) => starsOf.get(c.id) >= 4)),
+    threatened_ids: ids(threatenedReview),
+    threatened_posted_ids: ids(threatenedReview.filter((c) => starsOf.get(c.id) <= 2)),
+    threatened_not_posted_ids: ids(threatenedReview.filter((c) => !(starsOf.get(c.id) <= 2))),
+    low_without_threat_ids: ids(low.filter((c) => levelOf(c) !== 'review')),
+    low_by_response: [...lowByResp].map(([k, l]) => ({ response: k, label: offerLabel(k), n: l.length, ids: l })).sort((a, b) => b.n - a.n),
+  };
+
+  // Client value: the same split by what the client spent in the 12 months before the complaint.
+  // Do we lose our best clients more often, and does giving more keep them?
+  const valueTiers = VALUE_TIERS.map((t) => {
+    const list = rows.filter((c) => valueTier(c.spend_12m) === t.key);
+    const byResp = new Map();
+    for (const c of list) byResp.set(responseOf(c), [...(byResp.get(responseOf(c)) || []), c]);
+    const spend = list.map((c) => Number(c.spend_12m)).filter((x) => Number.isFinite(x));
+    return {
+      key: t.key,
+      label: t.label,
+      share: share(list.length, rows.length),
+      avg_spend: spend.length ? r2(spend.reduce((a, b) => a + b, 0) / spend.length) : null,
+      ...outcomeStats(list),
+      by_response: [...byResp].map(([k, l]) => ({ response: k, label: offerLabel(k), ...outcomeStats(l) })).sort((a, b) => b.n - a.n),
+    };
+  });
+  const noValue = rows.filter((c) => valueTier(c.spend_12m) == null);
+
   // Ladder: cost and retention per rung (hard-routed cases excluded: they're not on the ladder)
   const ladder = RUNGS.map((r) => ({ ...r, ...outcomeStats(ladderRows.filter((c) => c.rung === r.rung)) }));
 
@@ -353,7 +395,8 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, solutions =
   if (rulesOnly) gaps.push(`${rulesOnly} cases were classified by keyword rules only (lower confidence).`);
   const est = rows.filter((c) => c.estimatedCost).length;
   if (est) gaps.push(`${est} cases include estimated costs (reclean travel and lost-slot margin are modelled, not invoiced).`);
-  gaps.push('Public reviews: Google reviews are not connected, so LOST is based on churn only. 1–2★ Launch27 ratings are counted as complaints, not as public reviews.');
+  if (reviewView.imported) gaps.push(`Public reviews: ${reviewView.imported} Google reviews imported (${String(reviewView.first_at).slice(0, 10)} to ${String(reviewView.last_at).slice(0, 10)}), matched to complaints by the reviewer's full name and date. A matched 1–2★ review counts the client as LOST. Reviews under a different name, initials or a business name are not matched.`);
+  else gaps.push('Public reviews: no Google reviews imported yet, so LOST is based on churn only. 1–2★ Launch27 ratings are counted as complaints, not as public reviews.');
   gaps.push(`Client history goes back 12 months (nightly Launch27 sync), so tenure and lifetime spend are capped at 12 months.`);
 
   return {
@@ -363,6 +406,9 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, solutions =
     by_cause: byCause,
     solutions: solutionView,
     threats,
+    reviews: reviewView,
+    value_tiers: valueTiers,
+    value_unknown_ids: ids(noValue),
     cause_groups: causeGroups,
     ladder,
     reclean_vs_refund: recleanVsRefund,
