@@ -609,8 +609,8 @@ function GoogleReviews({ p, open, isAdmin }: { p: Playbook; open: Open; isAdmin:
   return (
     <section className="card">
       <h2>Google reviews</h2>
-      <p className="muted small">Reviews from your Google Business Profile export, matched to the complaint they followed by the reviewer's full name and the dates (a complaint up to 60 days before the review). A matched 1–2★ review counts that client as lost. Reviews posted under initials, a first name only or a business name can't be matched.</p>
-      {r.imported === 0 ? <p className="muted">No reviews imported yet.</p> : (
+      <p className="muted small">Reviews from your Google Business Profile export, matched to the complaint they followed by the reviewer's full name and the dates (a complaint up to 60 days before the review). A matched 1–2★ review counts that client as lost. Reviews posted under initials, a first name only or a business name can't be matched. Reviews come in on their own each time the KPI scorecard reads Google, once Google is connected on the KPI page (Connect Google).</p>
+      {r.imported === 0 ? <p className="muted">No reviews yet. They arrive on their own after Google is connected on the KPI page and the scorecard next refreshes.</p> : (
         <div className="cmp-arms">
           <div className="cmp-arm"><span className="small muted">Reviews imported</span><span className="cmp-arm-value">{r.imported}</span><span className="small muted">{day(r.first_at)} to {day(r.last_at)} · {r.imported_negative} at 1–2★</span></div>
           <div className="cmp-arm"><span className="small muted">Complaints followed by a 1–2★ review</span><span className="cmp-arm-value"><Num ids={r.low_ids} title="Complaints followed by a 1-2 star Google review" open={open}>{r.low_ids.length}</Num></span><span className="small muted"><Num ids={r.low_without_threat_ids} title="Low review with no threat first" open={open}>{r.low_without_threat_ids.length}</Num> gave no warning</span></div>
@@ -620,7 +620,7 @@ function GoogleReviews({ p, open, isAdmin }: { p: Playbook; open: Open; isAdmin:
       )}
       {r.low_by_response.length > 0 && <p className="small">What we had done before a 1–2★ review: {r.low_by_response.map((x, i) => <span key={x.response}>{i ? ' · ' : ''}{x.label} <Num ids={x.ids} title={`1-2 star review after: ${x.label}`} open={open}>{x.n}</Num></span>)}</p>}
       <div className="cmp-check-actions">
-        {isAdmin && <label className="link">{busy ? 'Importing…' : 'Import review files (reviews-….json)'}<input type="file" accept=".json,application/json" multiple hidden disabled={busy} onChange={(e) => { upload(e.target.files); e.target.value = ''; }} /></label>}
+        {isAdmin && <label className="link">{busy ? 'Importing…' : 'Or import export files (reviews-….json)'}<input type="file" accept=".json,application/json" multiple hidden disabled={busy} onChange={(e) => { upload(e.target.files); e.target.value = ''; }} /></label>}
         {s && s.low.length > 0 && <button type="button" className="link" onClick={() => setShow(!show)}>{show ? 'Hide' : 'Show'} the {s.low.length} reviews at 3★ or under</button>}
       </div>
       {msg && <p className="small cmp-note">{msg}</p>}
