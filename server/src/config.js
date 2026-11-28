@@ -236,6 +236,11 @@ export function loadConfig(env = process.env) {
     // only these logins (comma-separated); empty = nobody.
     // The one mailbox that receives the monthly Syft management report (read-only, production only).
     kpiSyftMailbox: isProd ? String(env.KPI_SYFT_MAILBOX || '').trim().toLowerCase() || null : null,
+    // Live Google reviews (Google Business Profile API, read-only, production only). The OAuth
+    // client must be in the Google Cloud project Google approved for the API. Connect from the
+    // KPI page, or set GBP_REFRESH_TOKEN. GBP_LOCATION ("accounts/1/locations/2") picks the listing
+    // when the account manages more than one.
+    gbp: isProd && env.GBP_CLIENT_ID && env.GBP_CLIENT_SECRET ? { clientId: String(env.GBP_CLIENT_ID).trim(), clientSecret: String(env.GBP_CLIENT_SECRET).trim(), refreshToken: String(env.GBP_REFRESH_TOKEN || '').trim() || null, location: String(env.GBP_LOCATION || '').trim() || null } : null,
     kpiEmails: String(env.KPI_EMAILS || '').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean),
     simulator: env.INBOX_SIMULATOR === undefined ? !isProd : truthy(env.INBOX_SIMULATOR),
     // Sample inbox conversations on an empty database. Never in production.
