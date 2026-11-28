@@ -11,6 +11,7 @@ import { readFileSync } from 'node:fs';
 import { addDays, localDate } from '../schedule/rules.js';
 import { KPI_RULES, KPI_SOURCES } from './config.js';
 import { createGoogleBusinessKpi } from './google.js';
+import { createGooglePlacesKpi } from './places.js';
 import { createSyftKpi } from './syft.js';
 
 const LOCAL = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Toronto', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
@@ -247,6 +248,17 @@ function loadGoogleExport(name) {
   }
 }
 
+/**
+ * Google reviews: the Business Profile API when configured (full history, every star), with
+ * Google Places public data (exact counts, some stars) behind it, then the dated export.
+ */
+function googleReviews({ db, config, brand, fetchImpl, log, now }) {
+  const exported = createGoogleExportKpi({ brand });
+  const places = config.places ? createGooglePlacesKpi({ db, places: config.places, brand, loadExport: loadGoogleExport, fetchImpl, log, now }) : null;
+  if (config.gbp) return createGoogleBusinessKpi({ db, gbp: config.gbp, secret: config.sessionSecret, brand, fallback: places || exported, fetchImpl, log, now });
+  return places || exported;
+}
+
 const notConnected = (key, note) => ({ key, label: KPI_SOURCES[key].label, mode: 'not_connected', pull: async () => ({ refreshed_at: null, note }) });
 
 /** Production connectors: Launch27, Kustomer, Syft (Gmail) and Google live; QuickBooks not connected yet. */
@@ -255,7 +267,7 @@ export function createLiveKpiConnectors({ db, config, fetchImpl, syncBearer, bra
   return [
     createLaunch27Kpi({ db, config, fetchImpl, syncBearer, brand, log, now }),
     createKustomerKpi({ db, brand }),
-    config.gbp ? createGoogleBusinessKpi({ db, gbp: config.gbp, secret: config.sessionSecret, brand, fallback: createGoogleExportKpi({ brand }), fetchImpl, log, now }) : createGoogleExportKpi({ brand }),
+    googleReviews({ db, config, brand, fetchImpl, log, now }),
     notConnected('qbo', 'QuickBooks is not connected yet'),
     syft,
   ];
