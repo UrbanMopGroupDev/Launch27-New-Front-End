@@ -170,6 +170,21 @@ bad review; the engine has to look at it end to end. First part, from data we al
 Not yet: Google reviews aren't connected (needs Google Business Profile access), so we can't
 see which threats became reviews; and options aren't weighed by the client's value.
 
+### Customer success brain, step 4: client value
+
+Derek, Nov 28: client value is LTV. Two numbers are already held: "LTV of Client" on each
+tracker complaint (from Kustomer) and each client's Launch27 spend in the 12 months before a
+complaint (`complaint_journeys.spend_12m`).
+
+- **Tracker.** Each ranked option shows its net for this client: the smoothed kept rate times
+  LTV of Client, less the option's average cost. The highest net among options with 5+ known
+  outcomes is tagged "best for this client". The order by clients kept does not change.
+- **Playbook.** "By client value": responses split by 12-month spend (under $1,500, $1,500 to
+  $4,999, $5,000+; `VALUE_TIERS` in `rank.js`).
+
+Google reviews: Derek's export (Nov 28) held only the Business Profile account files, no
+reviews; waiting on the review files to cross-reference threats with reviews actually posted.
+
 ### Still to come
 
 2. Cost lines per case (actual vs estimated) and the escalation audit.

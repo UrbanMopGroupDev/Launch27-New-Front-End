@@ -10,7 +10,7 @@
 import { categoryLabel, causeLabel, CAUSES, CAUSE_GROUPS, HARD_ROUTES } from './taxonomy.js';
 import { RUNGS, rungIndex, rungName } from './settings.js';
 import { OFFER_KINDS, offerLabel } from './solutions.js';
-import { RUNG_TO_RESPONSE, THREATS, threatOf } from './rank.js';
+import { RUNG_TO_RESPONSE, THREATS, threatOf, VALUE_TIERS, valueTier } from './rank.js';
 
 export const THIN = 10;
 const r2 = (x) => (x == null ? null : Math.round(x * 100) / 100);
@@ -274,6 +274,24 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, solutions =
     };
   });
 
+  // Client value: the same split by what the client spent in the 12 months before the complaint.
+  // Do we lose our best clients more often, and does giving more keep them?
+  const valueTiers = VALUE_TIERS.map((t) => {
+    const list = rows.filter((c) => valueTier(c.spend_12m) === t.key);
+    const byResp = new Map();
+    for (const c of list) byResp.set(responseOf(c), [...(byResp.get(responseOf(c)) || []), c]);
+    const spend = list.map((c) => Number(c.spend_12m)).filter((x) => Number.isFinite(x));
+    return {
+      key: t.key,
+      label: t.label,
+      share: share(list.length, rows.length),
+      avg_spend: spend.length ? r2(spend.reduce((a, b) => a + b, 0) / spend.length) : null,
+      ...outcomeStats(list),
+      by_response: [...byResp].map(([k, l]) => ({ response: k, label: offerLabel(k), ...outcomeStats(l) })).sort((a, b) => b.n - a.n),
+    };
+  });
+  const noValue = rows.filter((c) => valueTier(c.spend_12m) == null);
+
   // Ladder: cost and retention per rung (hard-routed cases excluded: they're not on the ladder)
   const ladder = RUNGS.map((r) => ({ ...r, ...outcomeStats(ladderRows.filter((c) => c.rung === r.rung)) }));
 
@@ -363,6 +381,8 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, solutions =
     by_cause: byCause,
     solutions: solutionView,
     threats,
+    value_tiers: valueTiers,
+    value_unknown_ids: ids(noValue),
     cause_groups: causeGroups,
     ladder,
     reclean_vs_refund: recleanVsRefund,
