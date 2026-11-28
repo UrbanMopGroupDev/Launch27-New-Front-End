@@ -217,16 +217,21 @@ export function createGoogleBusinessKpi({ db, gbp, secret, brand, fallback = nul
           reviewBaseline: { count: 0, avg: 0 },
         };
       }
-      // Not synced yet: the dated export, labelled as such, until the first live refresh.
+      // Not synced yet: the fallback (Google Places public data, or the dated export) until the first live refresh.
       const exp = fallback ? await fallback.pull(opts) : { refreshed_at: null };
       const why = lastError || ((await auth().catch(() => null)) ? null : 'Google is not connected yet');
       return exp.refreshed_at ? { ...exp, note: `${exp.note}${why ? `. ${why}` : ''}` } : { refreshed_at: null, note: why || 'Google has not been read yet' };
     },
     job: {
-      start,
-      running: () => !!running,
+      // The fallback (Google Places public data) keeps its own daily read until this one has data.
+      start: (opts) => {
+        if (fallback?.job && !memo) fallback.job.start(opts);
+        return start();
+      },
+      running: () => !!running || !!fallback?.job?.running(),
       // Once a day, at boot if never run, at most every 30 minutes after a failure; never before it is connected.
       async maybeRun() {
+        if (fallback?.job && !(memo || (await stored()))) await fallback.job.maybeRun();
         if (running || now() - lastAttempt < 30 * 60_000) return;
         if (!(await auth().catch(() => null))) return;
         const s = memo || (await stored());
@@ -237,7 +242,7 @@ export function createGoogleBusinessKpi({ db, gbp, secret, brand, fallback = nul
     async status() {
       const a = await auth().catch(() => null);
       const s = memo || (await stored());
-      return { configured: true, connected: !!a, email: a?.email || null, connected_at: a?.at ? new Date(a.at).toISOString() : null, location: s?.title || s?.location || null, total: s?.total ?? null, average: s?.average ?? null, error: lastError };
+      return { configured: true, connected: !!a, email: a?.email || null, connected_at: a?.at ? new Date(a.at).toISOString() : null, location: s?.title || s?.location || null, total: s?.total ?? null, average: s?.average ?? null, error: lastError, fallback: !s && fallback?.status ? await fallback.status() : null };
     },
     connectUrl({ redirectUri, userId }) {
       const p = new URLSearchParams({ client_id: gbp.clientId, redirect_uri: redirectUri, response_type: 'code', scope: `openid email ${GBP_SCOPE}`, access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true', state: makeState(secret, userId, now()) });
