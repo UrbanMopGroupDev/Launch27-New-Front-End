@@ -170,6 +170,40 @@ bad review; the engine has to look at it end to end. First part, from data we al
 Not yet: Google reviews aren't connected (needs Google Business Profile access), so we can't
 see which threats became reviews; and options aren't weighed by the client's value.
 
+### Customer success brain, step 4: client value
+
+Derek, Nov 28: client value is LTV. Two numbers are already held: "LTV of Client" on each
+tracker complaint (from Kustomer) and each client's Launch27 spend in the 12 months before a
+complaint (`complaint_journeys.spend_12m`).
+
+- **Tracker.** Each ranked option shows its net for this client: the smoothed kept rate times
+  LTV of Client, less the option's average cost. The highest net among options with 5+ known
+  outcomes is tagged "best for this client". The order by clients kept does not change.
+- **Playbook.** "By client value": responses split by 12-month spend (under $1,500, $1,500 to
+  $4,999, $5,000+; `VALUE_TIERS` in `rank.js`).
+
+Google reviews: Derek's export (Nov 28) held only the Business Profile account files, no
+reviews; waiting on the review files to cross-reference threats with reviews actually posted.
+
+### Customer success brain, step 5: Google reviews (`reviews.js`)
+
+Derek exports reviews from Google Business Profile (Takeout: files named `reviews-….json`).
+An admin imports them on the Complaint playbook, Google reviews card (never commit them: this
+repo is public and they carry reviewers' names).
+
+- **Stored** in `google_reviews` (migration 0046); importing a file again updates, never doubles.
+- **Matched** to the complaint the review followed: same full name (accents, case and
+  punctuation ignored) and a complaint opened from 60 days before the review to 14 days after;
+  the closest wins. A first name alone, initials or a business name never matches.
+- **Outcomes.** A matched 1-2 star review makes the complaint LOST at the next update,
+  whatever the bookings say (`outcomeAt`'s `negativeReview`).
+- **Playbook.** Complaints followed by a 1-2 star review, how many gave no warning, how many
+  review threats were carried out, what we had done first, complaints followed by 4-5 stars,
+  and the list of reviews at 3 stars or under with what each was matched to.
+
+Not yet: reviews don't feed the rankings as their own column (they count through LOST), and
+there is no live connection to Google, so new reviews need a fresh export.
+
 ### Still to come
 
 2. Cost lines per case (actual vs estimated) and the escalation audit.

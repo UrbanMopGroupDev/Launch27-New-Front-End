@@ -70,6 +70,11 @@ export function registerComplaintRoutes(r, { complaints, needRole, wrap, now = (
     await complaints.reviewCase(Number(req.params.id), { verdict, category, cause: cause ?? null, contributing: contributing ?? null, note }, req.user.id);
     res.json({ ok: true, stats: await complaints.reviewStats() });
   }));
+  r.get('/complaints/reviews', lead, h(async (req, res) => res.json(await complaints.reviewsSummary())));
+  r.post('/complaints/reviews/import', admin, h(async (req, res) => {
+    if (!req.body || (!Array.isArray(req.body.reviews) && !Array.isArray(req.body))) return res.status(400).json({ error: 'This is not a Google reviews export: expected a file named reviews-….json with a "reviews" list' });
+    res.json({ ...(await complaints.importReviews(req.body, req.user.id)), summary: await complaints.reviewsSummary() });
+  }));
   r.get('/complaints/codebook', lead, (req, res) => res.json(CODEBOOK));
   r.get('/complaints/clients', lead, h(async (req, res) => res.json(await complaints.clients())));
   r.post('/complaints/run', admin, h(async (req, res) => {
