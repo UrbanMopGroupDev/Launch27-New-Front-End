@@ -413,6 +413,8 @@ function PlaybookTab({ period }: { period: Period }) {
 
       <Threats p={p} open={open} labels={L} />
 
+      <ValueTiers p={p} open={open} labels={L} />
+
       <section className="card">
         <h2>One-time clients: did they book again?</h2>
         <p className="muted small">One-time clients have no schedule to keep, so they are left out of Saved and Lost above. The question here is whether they booked again within 90 and 120 days of the complaint. Recleans and free visits don't count as booking again.</p>
@@ -570,20 +572,48 @@ function WhatWeOffered({ p, open, labels }: { p: Playbook; open: Open; labels: R
   );
 }
 
+// Client value: do we lose our best clients more often, and what keeps them?
+function ValueTiers({ p, open, labels }: { p: Playbook; open: Open; labels: Record<ExcludedReason, string> }) {
+  const levels = (p.value_tiers || []).filter((t) => t.n > 0);
+  if (!levels.length) return null;
+  return (
+    <SplitSection
+      title="By client value"
+      intro={<>The same responses, split by what the client spent with us in the 12 months before the complaint (Launch27). Losing a client in the top group costs many times what a refund does, so compare what kept them there with what we usually do.{p.value_unknown_ids?.length ? <> <Num ids={p.value_unknown_ids} title="No Launch27 spend on file" open={open}>{p.value_unknown_ids.length}</Num> cases have no spend on file (not matched to a Launch27 client) and are left out.</> : null}</>}
+      levels={levels.map((t) => ({ ...t, extra: t.avg_spend != null ? `avg ${money(t.avg_spend)} a year` : '' }))}
+      open={open}
+      labels={labels}
+    />
+  );
+}
+
 // Threats: does giving more keep a client who threatens to leave or to post a review?
 function Threats({ p, open, labels }: { p: Playbook; open: Open; labels: Record<ExcludedReason, string> }) {
   const levels = (p.threats || []).filter((t) => t.n > 0);
   if (!levels.some((t) => t.key !== 'none')) return null;
   return (
+    <SplitSection
+      title="When clients threaten to leave or post a review"
+      intro="The same responses, split by how hard the client pushed. A threat is read from the complaint's tone, or from the client saying in the conversation that they'd leave. Compare a response's Saved rate under a threat with the same response under no threat: that is whether giving more actually keeps them. Google reviews aren't connected yet, so this shows who stayed, not which threats became reviews."
+      levels={levels}
+      open={open}
+      labels={labels}
+    />
+  );
+}
+
+type SplitLevel = OutcomeStats & { key: string; label: string; share: number | null; extra?: string; by_response: (OutcomeStats & { response: string; label: string })[] };
+function SplitSection({ title, intro, levels, open, labels }: { title: string; intro: React.ReactNode; levels: SplitLevel[]; open: Open; labels: Record<ExcludedReason, string> }) {
+  return (
     <section className="card">
-      <h2>When clients threaten to leave or post a review</h2>
-      <p className="muted small">The same responses, split by how hard the client pushed. A threat is read from the complaint's tone, or from the client saying in the conversation that they'd leave. Compare a response's Saved rate under a threat with the same response under no threat: that is whether giving more actually keeps them. Google reviews aren't connected yet, so this shows who stayed, not which threats became reviews.</p>
+      <h2>{title}</h2>
+      <p className="muted small">{intro}</p>
       <div className="cmp-arms">
         {levels.map((t) => (
           <div className="cmp-arm" key={t.key}>
             <span className="small muted">{t.label}</span>
             <span className="cmp-arm-value"><Num ids={t.ids} title={`${t.label}: every case`} open={open}>{t.n}</Num></span>
-            <span className="small muted">{pct(t.share)} of complaints{t.decided ? ` · ${pct(t.saved)} kept (${t.saved_n} of ${t.decided}) · avg ${money(t.avg_cost)}` : ''}</span>
+            <span className="small muted">{pct(t.share)} of complaints{t.extra ? ` · ${t.extra}` : ''}{t.decided ? ` · ${pct(t.saved)} kept (${t.saved_n} of ${t.decided}) · avg cost ${money(t.avg_cost)}` : ''}</span>
           </div>
         ))}
       </div>

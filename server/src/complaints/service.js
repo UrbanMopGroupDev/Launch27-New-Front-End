@@ -798,8 +798,8 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     rankCache = { at: now(), rows };
     return rows;
   }
-  async function rankFor({ category = null, cause = null, one_time = false, threat = 'none' } = {}) {
-    return rankResponses(await rankingRows(), { category, cause, one_time, threat }, { now: now() });
+  async function rankFor({ category = null, cause = null, one_time = false, threat = 'none', value = null } = {}) {
+    return rankResponses(await rankingRows(), { category, cause, one_time, threat, value }, { now: now() });
   }
 
   async function status() {

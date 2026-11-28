@@ -439,19 +439,20 @@ function RankedOptions({ r, d }: { r: Ranked; d: Guidance }) {
             <tr key={o.response} className={o.rank === 1 ? 'ct-row-best' : undefined}>
               <td>{o.rank}</td>
               <td>
-                {o.label}{o.best_value && <span className="pill ct-value" title="Keeps clients almost as well as the top option, for less">best value</span>}
+                {o.label}{o.best_value && <span className="pill ct-value" title="Keeps clients almost as well as the top option, for less">best value</span>}{o.best_net && <span className="pill ct-value" title="Highest expected value for this client: the chance of keeping them times their LTV, less the cost">best for this client</span>}
                 <div className="small muted">{o.cases} {o.cases === 1 ? 'case' : 'cases'} · {GROUP_WORD[o.group]}{o.first_turned_down != null && o.first_turned_down >= 0.5 ? ` · often turned down as a first offer (${pctOf(o.first_turned_down)})` : ''}</div>
               </td>
               <td>{o.kept == null ? '—' : <>{pctOf(o.kept)} <span className="small muted">{o.kept_n} of {o.decided}</span></>}</td>
               <td>{o.happy == null ? '—' : <>{pctOf(o.happy)} <span className="small muted">{o.happy_n} of {o.heard}</span></>}</td>
               <td>{o.taken_when_offered == null ? '—' : <>{pctOf(o.taken_when_offered)} <span className="small muted">of {o.offered_answered}</span></>}</td>
-              <td>{money(o.avg_cost)}</td>
+              <td>{money(o.avg_cost)}{o.net_value != null && <div className="small muted" title="Chance of keeping them times LTV of Client, less the average cost">net {money(o.net_value)}</div>}</td>
               <td><span className={`ct-grade ${o.grade.toLowerCase()}`}>{o.grade}</span></td>
             </tr>
           ))}
         </tbody>
       </table>
       </div>
+      {r.client_value ? <div className="small muted ct-worked-note">Net is what each option is worth for this client: the chance of keeping them, times their LTV ({money(r.client_value)}), less the average cost. "Best for this client" is the highest net among options with enough history.</div> : <div className="small muted ct-worked-note">Fill in LTV of Client to see what each option is worth for this client.</div>}
       {d.one_time && <div className="small muted ct-worked-note">One-time client: ranked on whether similar one-time clients booked again within 120 days.</div>}
     </>
   );

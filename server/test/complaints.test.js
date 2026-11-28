@@ -9,7 +9,7 @@ import { outcomeAt, journeyAt, recleanCost, cleanerLastWorkedIndex, regularClean
 import { normalizeSettings, canApprove, rungForRefund, budgetStatus, DEFAULT_SETTINGS } from '../src/complaints/settings.js';
 import { buildPlaybook } from '../src/complaints/playbook.js';
 import { formatThread, offerToResolution, normalizeSolution } from '../src/complaints/solutions.js';
-import { caseRows, rankResponses, threatOf } from '../src/complaints/rank.js';
+import { caseRows, rankResponses, threatOf, valueTier } from '../src/complaints/rank.js';
 import { mapStatus, toCase, discover, createKustomerClient, findListing } from '../src/complaints/sources/kustomer.js';
 import { createComplaints, buildReviewStats } from '../src/complaints/service.js';
 import { createReports } from '../src/reports/service.js';
@@ -1126,5 +1126,43 @@ describe('complaints: threats to leave or to post a review', () => {
     assert.deepEqual(by.review.by_response.map((r) => [r.response, r.saved_n, r.lost_n]).sort(), [['partial_refund', 1, 0], ['reclean', 0, 1]]);
     assert.equal(by.leave.by_response[0].response, 'same_cleaner', 'the final answer from the conversation');
     assert.deepEqual(by.review.ids, [2, 3]);
+  });
+});
+
+describe('complaints: client value', () => {
+  test('each option is weighed against what this client is worth', () => {
+    let id = 0;
+    const mk = (response, n, k, cost) => Array.from({ length: n }, (_, i) => ({ id: ++id, category: 'quality_missed', cause: null, threat: 'none', one_time: false, response, from_conversation: true, kept: i < k ? 1 : 0, happy: null, cost, offered: [], opened_at: null }));
+    // A full refund keeps more clients but costs $180; a credit keeps fewer for $10.
+    const rows = [...mk('full_refund', 20, 18, 180), ...mk('credit', 20, 14, 10)];
+    const big = rankResponses(rows, { category: 'quality_missed', value: 9000 });
+    assert.equal(big.client_value, 9000);
+    assert.equal(big.options.find((o) => o.best_net).response, 'full_refund', 'worth it for a $9,000 client');
+    const small = rankResponses(rows, { category: 'quality_missed', value: 300 });
+    assert.equal(small.options.find((o) => o.best_net).response, 'credit', 'not worth it for a $300 client');
+    assert.equal(small.options[0].response, 'full_refund', 'the order by clients kept does not change');
+    const o = small.options.find((x) => x.response === 'credit');
+    assert.equal(o.net_value, Math.round(o.score * 300 - 10));
+    const none = rankResponses(rows, { category: 'quality_missed' });
+    assert.ok(none.options.every((x) => x.net_value === undefined && !x.best_net));
+  });
+
+  test('the playbook splits responses by 12-month spend', () => {
+    assert.deepEqual([valueTier(null), valueTier('300'), valueTier(1500), valueTier(9214)], [null, 'low', 'mid', 'high']);
+    const cases = [];
+    const outcomes = [];
+    const add = (spend, outcome) => {
+      const id = cases.length + 1;
+      cases.push({ id, source: 'kustomer', opened_at: '2026-06-10T12:00:00Z', category: 'quality_missed', spend_12m: spend, l27_customer_id: 600 + id, classified_by: 'claude' });
+      outcomes.push({ case_id: id, day: 60, outcome });
+    };
+    add('400', 'lost');
+    add('6000', 'saved');
+    add('8000', 'saved');
+    add(null, 'saved');
+    const pb = buildPlaybook({ cases, resolutions: [], costs: [], outcomes, visits: [], from: '2026-05-01', to: '2026-10-31', settings: normalizeSettings({}), today: '2026-11-27' });
+    const by = Object.fromEntries(pb.value_tiers.map((t) => [t.key, t]));
+    assert.deepEqual([by.low.n, by.mid.n, by.high.n, by.high.avg_spend, by.high.saved_n], [1, 0, 2, 7000, 2]);
+    assert.deepEqual(pb.value_unknown_ids, [4]);
   });
 });
