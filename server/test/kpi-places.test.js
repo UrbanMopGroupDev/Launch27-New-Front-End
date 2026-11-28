@@ -30,7 +30,7 @@ function fakePlaces() {
   };
   return { calls, fetchImpl, day };
 }
-const review = (id, iso, rating) => ({ name: `places/P1/reviews/${id}`, publishTime: iso, rating, authorAttribution: { displayName: 'Ada Example' }, text: { text: 'Great' } });
+const review = (id, iso, rating) => ({ name: `places/P1/reviews/${id}`, publishTime: iso, rating, authorAttribution: { displayName: 'Ada Example' }, text: { text: 'Great' }, googleMapsUri: `https://maps.google.com/review/${id}` });
 
 describe('Google reviews from Google Places public data', () => {
   test('rebuilding the list: export, shown reviews with stars, the rest of each day counted without stars', () => {
@@ -46,7 +46,7 @@ describe('Google reviews from Google Places public data', () => {
     assert.equal(reviews.length, 7);
   });
 
-  test('daily reads: counts exact, stars when Google shows them, no names kept, only reads', async () => {
+  test('daily reads: counts exact, stars when Google shows them, reviewer and comment kept, only reads', async () => {
     const db = await openDb({});
     const g = fakePlaces();
     let now = Date.parse('2026-11-28T15:00:00Z');
@@ -69,7 +69,9 @@ describe('Google reviews from Google Places public data', () => {
     got = await places.pull();
     assert.deepEqual(got.reviews.filter((r) => r.date > '2026-11-12').map((r) => [r.date, r.rating]), [['2026-11-20', 4], ['2026-11-29', 2], ['2026-11-29', null], ['2026-11-29', null]]);
     const snap = JSON.stringify((await db.query("SELECT data FROM kpi_snapshots WHERE source = 'google_places'")).rows[0].data);
-    assert.ok(!snap.includes('Ada Example') && !snap.includes('Great'));
+    const r2 = got.reviews.find((r) => r.id === 'r2');
+    assert.deepEqual([r2.reviewer, r2.comment, r2.link, r2.replied], ['Ada Example', 'Great', 'https://maps.google.com/review/r2', null]);
+    assert.ok(snap.includes('Ada Example'));
 
     // On the scorecard. All time: 8, matching Google (3 export + r1 + r2 + 2 counted + 1 undated).
     const config = { ...loadConfig({ APP_ENV: 'development' }), production: true };
