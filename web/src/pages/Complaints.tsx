@@ -654,8 +654,8 @@ function ValueTiers({ p, open, labels }: { p: Playbook; open: Open; labels: Reco
   return (
     <SplitSection
       title="By client value"
-      intro={<>The same responses, split by what the client spent with us in the 12 months before the complaint (Launch27). Losing a client in the top group costs many times what a refund does, so compare what kept them there with what we usually do.{p.value_unknown_ids?.length ? <> <Num ids={p.value_unknown_ids} title="No Launch27 spend on file" open={open}>{p.value_unknown_ids.length}</Num> cases have no spend on file (not matched to a Launch27 client) and are left out.</> : null}</>}
-      levels={levels.map((t) => ({ ...t, extra: t.avg_spend != null ? `avg ${money(t.avg_spend)} a year` : '' }))}
+      intro={<>The same responses, split by what the client's plan is worth in a year: their usual visit price times the visits a year their frequency means (Launch27). That is what's at stake when they complain; past spend says little, because most complaints come on a first or second clean. One-time clients have no plan and are shown apart. Losing a top plan costs many times what a refund does, so compare what kept those clients with what we usually do.{p.value_unknown_ids?.length ? <> <Num ids={p.value_unknown_ids} title="No Launch27 visits on file" open={open}>{p.value_unknown_ids.length}</Num> cases have no paid visit on file (not matched to a Launch27 client) and are left out.</> : null}</>}
+      levels={levels.map((t) => ({ ...t, extra: t.avg_spend != null ? (t.key === 'one' ? `avg ${money(t.avg_spend)} a visit` : `avg plan ${money(t.avg_spend)} a year`) : '' }))}
       open={open}
       labels={labels}
     />

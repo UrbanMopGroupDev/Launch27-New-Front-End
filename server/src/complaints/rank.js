@@ -30,14 +30,21 @@ export const THREATS = [
 export const threatLabel = (k) => THREATS.find((t) => t.key === k)?.label || k;
 export const threatOf = (tone, saidWillLeave = false) => (tone === 'threat_review' ? 'review' : tone === 'threat_leave' || saidWillLeave ? 'leave' : 'none');
 
-// Client value tiers, by what the client spent with us in the 12 months before the complaint
-// (Launch27). Roughly: occasional or new, a monthly regular, a weekly or biweekly regular.
+// Client value tiers, by what the client's plan is worth in a year (visit price x visits a
+// year, journey.js planValue): what is at stake when they complain. Past spend says little:
+// most complaints come on a first or second clean. One-time clients have no plan and are
+// their own tier. Roughly: a monthly plan, a biweekly plan, a weekly plan.
 export const VALUE_TIERS = [
-  { key: 'low', label: 'Under $1,500 a year', max: 1500 },
-  { key: 'mid', label: '$1,500 to $4,999 a year', max: 5000 },
-  { key: 'high', label: '$5,000 or more a year', max: Infinity },
+  { key: 'one', label: 'One-time booking' },
+  { key: 'low', label: 'Plan under $2,500 a year', max: 2500 },
+  { key: 'mid', label: 'Plan of $2,500 to $5,999 a year', max: 6000 },
+  { key: 'high', label: 'Plan of $6,000 or more a year', max: Infinity },
 ];
-export const valueTier = (spend) => (spend == null || !Number.isFinite(Number(spend)) ? null : VALUE_TIERS.find((t) => Number(spend) < t.max).key);
+export const valueTier = (planValue, oneTime = false) => {
+  if (oneTime) return 'one';
+  if (planValue == null || !Number.isFinite(Number(planValue))) return null;
+  return VALUE_TIERS.find((t) => t.max != null && Number(planValue) < t.max).key;
+};
 
 // A rung of the ladder in the same terms as a mined offer.
 export const RUNG_TO_RESPONSE = { L0: 'apology', L1: 'credit', L2: 'credit', L3: 'reclean', L4: 'partial_refund', L5: 'partial_refund', L6: 'partial_refund', L7: 'full_refund', damage_reimbursement: 'damage_reimbursement' };
