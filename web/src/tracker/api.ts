@@ -70,8 +70,9 @@ export interface RankedOption {
   happy: number | null; happy_n: number; heard: number;
   taken_when_offered: number | null; offered_answered: number; first_turned_down: number | null;
   avg_cost: number | null; from_conversations: number; grade: 'High' | 'Medium' | 'Low'; best_value?: boolean;
+  kept_value?: number; net_value?: number; best_net?: boolean;
 }
-export interface Ranked { groups: { key: string; label: string; cases: number; decided: number; kept: number | null }[]; options: RankedOption[]; considered: number }
+export interface Ranked { client_value?: number | null; groups: { key: string; label: string; cases: number; decided: number; kept: number | null }[]; options: RankedOption[]; considered: number }
 export interface Guidance {
   ranked?: Ranked | null;
   threat?: 'none' | 'leave' | 'review';

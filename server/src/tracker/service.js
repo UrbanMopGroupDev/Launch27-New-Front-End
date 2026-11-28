@@ -425,7 +425,7 @@ export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}
   const CAUSE_MIN = 10;
   async function guidance(id) {
     if (!complaints) return { available: false, reason: 'The Complaint playbook is not running here.' };
-    const r = await one(db, 'SELECT complaint_type, complaint_notes, frequency, title FROM complaint_records WHERE id = $1', [id]);
+    const r = await one(db, 'SELECT complaint_type, complaint_notes, frequency, title, ltv_of_client FROM complaint_records WHERE id = $1', [id]);
     if (!r) return null;
     let category = null;
     let basis = 'type';
@@ -457,7 +457,9 @@ export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}
     // Is the client threatening to leave or to post a review? Read from the notes' tone.
     const tone = notes.trim() ? classifyRules(notes).tone : null;
     const threat = tone === 'threat_review' ? 'review' : tone === 'threat_leave' ? 'leave' : 'none';
-    const ranked = complaints.rankFor ? await complaints.rankFor({ category, cause, one_time: oneTime, threat }).catch(() => null) : null;
+    // What this client is worth (LTV of Client on the complaint), to weigh each option's cost against.
+    const value = Number(r.ltv_of_client) > 0 ? Number(r.ltv_of_client) : null;
+    const ranked = complaints.rankFor ? await complaints.rankFor({ category, cause, one_time: oneTime, threat, value }).catch(() => null) : null;
     return {
       ranked,
       threat,
