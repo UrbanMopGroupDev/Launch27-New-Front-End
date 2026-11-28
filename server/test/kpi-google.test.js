@@ -20,7 +20,7 @@ const idToken = (email) => `h.${Buffer.from(JSON.stringify({ email })).toString(
 function fakeGoogle({ reviewsStatus = 200, scope = `openid email ${GBP_SCOPE}` } = {}) {
   const calls = [];
   const reviews = [
-    { reviewId: 'r1', starRating: 'FIVE', createTime: '2026-10-03T14:00:00Z', reviewer: { displayName: 'Ada Example' }, comment: 'Great' },
+    { reviewId: 'r1', starRating: 'FIVE', createTime: '2026-10-03T14:00:00Z', reviewer: { displayName: 'Ada Example' }, comment: 'Great', reviewReply: { comment: 'Thank you!' } },
     { reviewId: 'r2', starRating: 'FOUR', createTime: '2026-10-09T14:00:00Z' },
     { reviewId: 'r3', starRating: 'THREE', createTime: '2026-10-20T14:00:00Z' },
     { reviewId: 'r4', starRating: 'STAR_RATING_UNSPECIFIED', createTime: '2026-10-21T14:00:00Z' },
@@ -62,7 +62,7 @@ describe('Google reviews, live (Business Profile API)', () => {
     assert.equal(openToken(SECRET, sealed), 'rt-secret');
   });
 
-  test('connect, read every page, keep dates and stars only, and the tile is live', async () => {
+  test('connect, read every page, keep the review details, and the tile is live', async () => {
     const db = await openDb({});
     const g = fakeGoogle();
     const google = createGoogleBusinessKpi({ db, gbp, secret: SECRET, brand, fallback: createGoogleExportKpi({ brand }), fetchImpl: g.fetchImpl, log: quiet, now: () => NOW });
@@ -88,9 +88,12 @@ describe('Google reviews, live (Business Profile API)', () => {
     const got = await google.pull({});
     assert.equal(got.reviewsExport, undefined);
     assert.deepEqual(got.reviews.map((r) => [r.date, r.rating]), [['2025-01-05', 5], ['2026-10-03', 5], ['2026-10-09', 4], ['2026-10-20', 3], ['2026-10-31', 1]]);
-    assert.ok(got.reviews.every((r) => r.reviewer === '' && r.comment === ''));
+    // Reviewer, comment and our reply are kept for the drill-down.
+    const r1 = got.reviews.find((r) => r.id === 'r1');
+    assert.deepEqual([r1.reviewer, r1.comment, r1.replied, r1.reply], ['Ada Example', 'Great', true, 'Thank you!']);
+    assert.equal(got.reviews.find((r) => r.id === 'r2').replied, false);
     const snap = JSON.stringify((await db.query("SELECT data FROM kpi_snapshots WHERE source = 'google'")).rows[0].data);
-    assert.ok(!snap.includes('Ada Example') && !snap.includes('Great'));
+    assert.ok(snap.includes('Ada Example') && !snap.includes('access_token'));
     const st = await google.status();
     assert.deepEqual([st.connected, st.email, st.location, st.total, st.average], [true, 'info@example.com', 'UrbanMop Cleaning Services Ottawa', 6, 3.8]);
 

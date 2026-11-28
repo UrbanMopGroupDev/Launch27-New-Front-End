@@ -8,7 +8,8 @@
 // The OAuth client (GBP_CLIENT_ID / GBP_CLIENT_SECRET) must belong to the Google Cloud project
 // Google approved for the Business Profile API: any other project gets a quota of 0.
 //
-// Kept per review: its id, date and star rating. No reviewer names or comments.
+// Kept per review: its id, date, stars, the reviewer's public name, the comment and our reply,
+// for the KPI drill-down (the page is limited to KPI_EMAILS in production).
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { localDate } from '../schedule/rules.js';
 import { KPI_SOURCES } from './config.js';
@@ -174,7 +175,15 @@ export function createGoogleBusinessKpi({ db, gbp, secret, brand, fallback = nul
         for (const r of page.reviews || []) {
           const rating = STARS[r.starRating];
           if (!rating || !r.createTime) continue; // no rating: nothing to count
-          reviews.push({ id: String(r.reviewId || r.name || reviews.length), date: localDate(Date.parse(r.createTime)), rating });
+          reviews.push({
+            id: String(r.reviewId || r.name || reviews.length),
+            date: localDate(Date.parse(r.createTime)),
+            rating,
+            reviewer: r.reviewer?.isAnonymous ? 'A Google user' : String(r.reviewer?.displayName || '').slice(0, 120),
+            comment: String(r.comment || '').slice(0, 4000),
+            replied: !!r.reviewReply?.comment,
+            reply: r.reviewReply?.comment ? String(r.reviewReply.comment).slice(0, 4000) : null,
+          });
         }
         pageToken = page.nextPageToken;
       } while (pageToken && reviews.length < 20_000);
@@ -213,7 +222,7 @@ export function createGoogleBusinessKpi({ db, gbp, secret, brand, fallback = nul
         return {
           refreshed_at: memo.taken_at,
           note: lastError ? `last refresh failed: ${lastError}` : null,
-          reviews: memo.reviews.map((r) => ({ id: r.id, date: r.date, rating: r.rating, reviewer: '', comment: '' })),
+          reviews: memo.reviews.map((r) => ({ id: r.id, date: r.date, rating: r.rating, reviewer: r.reviewer || '', comment: r.comment || '', replied: r.replied ?? null, reply: r.reply || null, link: null })),
           reviewBaseline: { count: 0, avg: 0 },
         };
       }
