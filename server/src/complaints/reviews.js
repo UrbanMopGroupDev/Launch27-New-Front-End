@@ -15,7 +15,8 @@ export function parseTakeout(json) {
   const list = Array.isArray(json?.reviews) ? json.reviews : Array.isArray(json) ? json : [];
   return list
     .map((r) => ({
-      review_id: typeof r?.name === 'string' ? r.name.slice(0, 500) : null,
+      // Google's full name for the review (the same in an export and from the API); its bare id otherwise.
+      review_id: typeof r?.name === 'string' && r.name ? r.name.slice(0, 500) : typeof r?.reviewId === 'string' && r.reviewId ? r.reviewId.slice(0, 500) : null,
       reviewer_name: String(r?.reviewer?.displayName || '').slice(0, 200) || null,
       stars: STARS[r?.starRating] ?? (Number.isInteger(r?.starRating) ? r.starRating : null),
       comment: typeof r?.comment === 'string' ? r.comment.slice(0, 8000) : null,
