@@ -991,8 +991,34 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
         count(DISTINCT k.id) FILTER (WHERE k.roles::text ILIKE '%cleaner%')::int AS cleaners, count(DISTINCT k.id) FILTER (WHERE k.roles::text ILIKE '%lead%')::int AS leads, count(DISTINCT k.id) FILTER (WHERE k.roles::text ILIKE '%customer%' OR k.roles::text ILIKE '%client%')::int AS customers,
         count(DISTINCT k.id) FILTER (WHERE k.brand <> 'urbanmop' AND k.brand <> 'residential')::int AS other_brand
         FROM complaint_cases c JOIN contact_identities i ON i.kind = 'email' AND i.value = lower(c.customer_email) JOIN contacts k ON k.id = i.contact_id WHERE ${live} AND c.l27_customer_id IS NULL`))[0],
+      // Who sends the unmatched emails: how many different senders, how concentrated, and from which
+      // mail domains (domains only, never addresses, and only domains with 3+ cases so a personal domain isn't shown). A few senders with many cases each are
+      // forwarders or systems, where the client is named in the message, not the sender.
+      unmatched_senders: (await q(`WITH s AS (SELECT lower(customer_email) AS e, count(*)::int AS n FROM complaint_cases c WHERE ${live} AND l27_customer_id IS NULL AND customer_email IS NOT NULL GROUP BY 1)
+        SELECT count(*)::int AS different_senders, count(*) FILTER (WHERE n = 1)::int AS senders_with_one_case, count(*) FILTER (WHERE n >= 5)::int AS senders_with_five_or_more,
+          coalesce(sum(n) FILTER (WHERE n >= 5), 0)::int AS cases_from_those, max(n)::int AS most_from_one_sender FROM s`))[0],
+      unmatched_sender_domains: pairs(await q(`SELECT split_part(lower(customer_email), '@', 2) AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} AND l27_customer_id IS NULL AND customer_email IS NOT NULL GROUP BY 1 HAVING count(*) >= 3 ORDER BY 2 DESC LIMIT 12`)),
+      // Contacts holding many email addresses each would mean contacts were merged that shouldn't have been.
+      contact_emails: (await q(`WITH n AS (SELECT contact_id, count(*)::int AS n FROM contact_identities WHERE kind = 'email' GROUP BY 1)
+        SELECT count(*)::int AS contacts_with_email, count(*) FILTER (WHERE n >= 5)::int AS with_five_or_more_emails, count(*) FILTER (WHERE n >= 50)::int AS with_fifty_or_more_emails, max(n)::int AS most_emails_on_one_contact FROM n`))[0],
       unmatched_by_category: pairs(await q(`SELECT category AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} AND l27_customer_id IS NULL GROUP BY 1 ORDER BY 2 DESC`)),
       matched_how: pairs(await q(`SELECT coalesce(client_match, 'when_read') AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} AND l27_customer_id IS NOT NULL GROUP BY 1`)),
+      // Step 0 of the numbers fix (docs/complaints-engine.md): where the history is, what the
+      // page says today per response, and which cause/category pairs exist. Month keys are
+      // written like 2026_Nov so the log viewer doesn't mistake them for phone numbers.
+      by_month: pairs(await q(`SELECT to_char(opened_at, 'YYYY_Mon') AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} GROUP BY 1, date_trunc('month', opened_at) ORDER BY date_trunc('month', opened_at)`)),
+      by_month_source: pairs(await q(`SELECT to_char(opened_at, 'YYYY_Mon') || ' ' || source AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} GROUP BY 1, date_trunc('month', opened_at), source ORDER BY date_trunc('month', opened_at), source`)),
+      runs_by_window: pairs(await q(`SELECT to_char(window_from, 'DDMonYY') || '_to_' || to_char(window_to, 'DDMonYY') || ' ' || status AS k, count(*)::int AS n FROM complaint_runs GROUP BY 1, window_from ORDER BY window_from`)),
+      stored_settings: (await q(`SELECT data->'costs' AS costs, data->'auto' AS auto, data->'pilot_months' AS pilot_months FROM complaint_settings LIMIT 1`))[0] || null,
+      cause_by_category: pairs(await q(`SELECT cause || ' x ' || category AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} AND cause IS NOT NULL AND cause <> 'other' GROUP BY 1 ORDER BY 2 DESC`)),
+      cause_by_category_setter: pairs(await q(`SELECT cause || ' x ' || category || ' by ' || coalesce(cause_by, 'none') AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} AND cause IN ('marketing_emails', 'language', 'team_size') GROUP BY 1 ORDER BY 2 DESC`)),
+      recleans: (await q(`SELECT count(DISTINCT r.case_id)::int AS cases_with_a_reclean,
+        count(DISTINCT r.case_id) FILTER (WHERE NOT EXISTS (SELECT 1 FROM complaint_costs k WHERE k.case_id = r.case_id AND k.kind LIKE 'reclean%' AND k.amount > 0))::int AS of_those_costed_at_zero,
+        count(DISTINCT r.case_id) FILTER (WHERE r.source = 'conversation')::int AS found_in_conversation, count(DISTINCT r.case_id) FILTER (WHERE r.source = 'launch27')::int AS found_as_a_visit
+        FROM complaint_resolutions r JOIN complaint_cases c ON c.id = r.case_id WHERE ${live} AND (r.action LIKE 'reclean%' OR r.rung = 'L3')`))[0],
+      cost_lines: pairs(await q(`SELECT k.kind || (CASE WHEN k.estimated THEN ' estimated' ELSE ' actual' END) || ' n' AS k, count(*)::int AS n FROM complaint_costs k JOIN complaint_cases c ON c.id = k.case_id WHERE ${live} GROUP BY 1 ORDER BY 1`)),
+      cost_totals: pairs(await q(`SELECT k.kind AS k, round(sum(k.amount))::int AS n FROM complaint_costs k JOIN complaint_cases c ON c.id = k.case_id WHERE ${live} GROUP BY 1 ORDER BY 1`)),
+      per_response_before: await responseSnapshot().catch((err) => ({ error: err.message })),
       by_year: pairs(await q(`SELECT to_char(opened_at, 'YYYY') AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} GROUP BY 1 ORDER BY 1`)),
       by_category: pairs(await q(`SELECT category AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} GROUP BY 1 ORDER BY 2 DESC`)),
       classified_by: pairs(await q(`SELECT classified_by AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} GROUP BY 1`)),
@@ -1031,10 +1057,90 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       mined,
     };
   }
+  // What the page says per response today (as rank.js counts them): cases, known outcomes, kept,
+  // lost, partly kept, average cost over those cases, and how many carry any cost at all.
+  async function responseSnapshot() {
+    const rows = await rankingRows();
+    const out = {};
+    for (const oneTime of [false, true]) {
+      const by = new Map();
+      for (const r of rows.filter((x) => x.one_time === oneTime && x.response)) by.set(r.response, [...(by.get(r.response) || []), r]);
+      for (const [k, l] of by) {
+        const d = l.filter((x) => x.kept != null);
+        out[`${oneTime ? 'one_time' : 'recurring'} ${k}`] = {
+          cases: l.length, decided: d.length, kept: d.filter((x) => x.kept === 1).length, partly: d.filter((x) => x.kept === 0.5).length, lost: d.filter((x) => x.kept === 0).length,
+          avg_cost: l.length ? Math.round(l.reduce((t, x) => t + x.cost, 0) / l.length) : null, with_cost: l.filter((x) => x.cost > 0).length,
+          threat_review: l.filter((x) => x.threat === 'review').length, threat_leave: l.filter((x) => x.threat === 'leave').length,
+        };
+      }
+    }
+    return out;
+  }
+
+  // Why 20 real unmatched cases don't match: each path, by case number, with no names or
+  // addresses. Uses the Launch27 snapshot (every brand, to see whether the sender is a client of
+  // another brand) and, when a Launch27 login is at hand, Launch27's own email lookup.
+  async function matchDiagnostics(limit = 20) {
+    const snap = await reports.visitsSnapshot();
+    const all = new Map();
+    const residential = new Map();
+    const overrides = new Map((await many(db, 'SELECT location_id, brand FROM brand_locations')).map((r) => [Number(r.location_id), r.brand]));
+    for (const v of snap.visits) {
+      const k = nameKey(v.customer);
+      if (!k) continue;
+      all.set(k, (all.get(k) || new Set()).add(v.customer_id));
+      const brand = overrides.has(Number(v.location_id)) ? overrides.get(Number(v.location_id)) : suggestBrand(v.location_name);
+      if (brand === 'residential' && !v.partner_kind) residential.set(k, (residential.get(k) || new Set()).add(v.customer_id));
+    }
+    const first = new Map(); // first names only, to spot "first name matches, last name differs"
+    for (const k of residential.keys()) first.set(k.split(' ')[0], (first.get(k.split(' ')[0]) || 0) + 1);
+    const FREE = /@(gmail|hotmail|yahoo|outlook|live|icloud|me|rogers|bell|sympatico|videotron|msn|aol|protonmail|proton)\./;
+    const cases = await many(db, `SELECT c.id, c.source, c.category, to_char(c.opened_at, 'YYYY_Mon') AS month, c.customer_name, lower(c.customer_email) AS email, c.customer_phone,
+        (SELECT count(*)::int FROM complaint_cases x WHERE x.merged_into IS NULL AND x.excluded_at IS NULL AND x.l27_customer_id IS NULL AND lower(x.customer_email) = lower(c.customer_email)) AS sender_cases,
+        (SELECT count(*)::int FROM complaint_solutions s WHERE s.case_id = c.id AND s.read_by = 'claude') AS has_conversation
+      FROM complaint_cases c WHERE c.merged_into IS NULL AND c.excluded_at IS NULL AND c.l27_customer_id IS NULL ORDER BY md5(c.id::text) LIMIT $1`, [limit]);
+    const bearer = syncBearer ? await syncBearer().catch(() => null) : null;
+    const out = [];
+    for (const c of cases) {
+      const key = nameKey(c.customer_name);
+      const parts = key ? key.split(' ').filter((x) => x.length >= 2) : [];
+      const contacts = c.email ? await many(db, `SELECT k.id, k.name, k.l27_customer_id, k.roles::text AS roles, (SELECT count(*)::int FROM contact_identities i2 WHERE i2.contact_id = k.id AND i2.kind = 'email') AS emails
+        FROM contact_identities i JOIN contacts k ON k.id = i.contact_id WHERE i.kind = 'email' AND i.value = $1`, [c.email]) : [];
+      let lookup = 'no_login';
+      if (bearer && l27 && c.email) lookup = await l27.identify(bearer, 'email', c.email).then((f) => (f?.l27_customer_id ? 'found' : 'not_found')).catch(() => 'error');
+      out.push({
+        case: Number(c.id), source: c.source, month: c.month, category: c.category,
+        email: !c.email ? 'none' : OWN_DOMAINS.some((d) => c.email.endsWith(d)) ? 'our_own' : FREE.test(c.email) ? 'personal_mail' : 'other_domain',
+        unmatched_cases_from_this_sender: c.sender_cases,
+        l27_email_lookup: lookup,
+        contacts_with_this_email: contacts.length,
+        contact_tied_to_l27: contacts.filter((k) => k.l27_customer_id).length,
+        contact_emails_max: Math.max(0, ...contacts.map((k) => k.emails)),
+        contact_roles: [...new Set(contacts.map((k) => k.roles))].join(' ').slice(0, 80),
+        contact_name_is_a_residential_client: contacts.filter((k) => residential.get(nameKey(k.name))?.size === 1).length,
+        sender_name_words: parts.length,
+        sender_name_residential_clients: key ? residential.get(key)?.size || 0 : 0,
+        sender_name_any_brand_clients: key ? all.get(key)?.size || 0 : 0,
+        first_name_matches_residential: parts.length ? first.get(parts[0]) || 0 : 0,
+        name_looks_like: !c.customer_name ? 'none' : /@/.test(c.customer_name) ? 'an_email_address' : /(inc|ltd|corp|llc|property|management|realty|team|support|service|notification|no-?reply|info)\b/i.test(c.customer_name) ? 'a_company_or_system' : parts.length >= 2 ? 'a_full_name' : 'a_single_word',
+        conversation_read: c.has_conversation > 0,
+      });
+    }
+    return out;
+  }
+
   // One log line per section, so no line is too long for the log viewer.
   async function logCoverage() {
     const c = await coverage();
-    for (const [section, value] of Object.entries(c)) log.info('complaints coverage', { section, value: JSON.stringify(value) });
+    for (const [section, value] of Object.entries(c)) {
+      // Long sections (per response, by month and source) go out a few entries at a time.
+      const entries = value && typeof value === 'object' && !Array.isArray(value) ? Object.entries(value) : null;
+      if (entries && JSON.stringify(value).length > 900) {
+        for (let i = 0; i < entries.length; i += 6) log.info('complaints coverage', { section: `${section} ${i / 6 + 1}`, value: JSON.stringify(Object.fromEntries(entries.slice(i, i + 6))) });
+      } else log.info('complaints coverage', { section, value: JSON.stringify(value) });
+    }
+    const sample = await matchDiagnostics().catch((err) => [{ error: err.message }]);
+    for (const row of sample) log.info('complaints unmatched case', { value: JSON.stringify(row) });
     return c;
   }
 
