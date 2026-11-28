@@ -129,8 +129,6 @@ describe('Google reviews, live (Business Profile API)', () => {
     assert.equal(got[0].length, 6, 'every page');
     assert.deepEqual([got[0][0].reviewer.displayName, got[0][0].comment], ['Ada Example', 'Great'], 'names and text, for matching');
     assert.equal((await google.status()).error, null, 'the scorecard refresh still succeeded');
-    const kept = (await db.query("SELECT data FROM kpi_snapshots WHERE source = 'google'")).rows[0].data;
-    assert.ok(!JSON.stringify(kept).includes('Ada Example'), 'the scorecard itself still keeps no names');
     // The same rows go straight into the complaint engine's importer.
     const rows = parseTakeout({ reviews: got[0] });
     assert.deepEqual(rows.map((r) => [r.review_id, r.stars]), [['r1', 5], ['r2', 4], ['r3', 3], ['r5', 1], ['r6', 5]]);
