@@ -441,7 +441,7 @@ export function reviewsMonth(ix, month, rules = KPI_RULES, win = null) {
   const visits = inWindow(ix.byMonth, from, to, (x) => x.date).filter((b) => b.completed && !b.cancellation && !isTest(b.customer, null, rules)).length;
   const manual = win ? null : ix.ds.manualReviews?.[month];
   if (manual) {
-    return { month, state: 'ok', manual: true, value: manual.new_reviews, num: manual.new_reviews, avg: manual.avg_rating, rating_sum: manual.avg_rating * manual.new_reviews, alltime_avg: manual.alltime_avg, alltime_count: manual.alltime_count, visits, per100: visits ? (manual.new_reviews / visits) * 100 : null, rows: [] };
+    return { month, state: 'ok', manual: true, value: manual.new_reviews, num: manual.new_reviews, rated: manual.new_reviews, avg: manual.avg_rating, rating_sum: manual.avg_rating * manual.new_reviews, alltime_avg: manual.alltime_avg, alltime_count: manual.alltime_count, visits, per100: visits ? (manual.new_reviews / visits) * 100 : null, rows: [] };
   }
   const base = ix.ds.reviewBaseline;
   if (!ix.ds.reviews || !base) return { month, state: 'no_data', value: null, num: 0, rows: [], visits };
@@ -449,11 +449,15 @@ export function reviewsMonth(ix, month, rules = KPI_RULES, win = null) {
   const exp = ix.ds.reviewsExport || null;
   if (exp && from > exp.reviews_to) return { month, state: 'no_data', value: null, num: 0, rows: [], visits, after_export: true };
   const rows = inWindow(ix.reviewsByMonth, from, to, (x) => x.date);
-  const sum = rows.reduce((t, r) => t + r.rating, 0);
+  // A review can be counted without its stars (Google Places public data: the count is exact,
+  // the stars are known only for the few reviews Google shows). Averages use the known stars.
+  const rated = rows.filter((r) => r.rating != null);
+  const sum = rated.reduce((t, r) => t + r.rating, 0);
   let allCount = base.count;
-  let allSum = base.count * base.avg;
-  for (const [m, list] of ix.reviewsByMonth) if (m <= monthOf(to)) for (const r of list) if (r.date <= to) (allCount += 1), (allSum += r.rating);
-  return { month, state: 'ok', manual: false, value: rows.length, num: rows.length, avg: rows.length ? sum / rows.length : null, rating_sum: sum, alltime_avg: allCount ? allSum / allCount : null, alltime_count: allCount, visits, per100: visits ? (rows.length / visits) * 100 : null, rows, export: exp, partial: !!exp && to > exp.reviews_to };
+  let allRated = base.avg != null ? (base.rated ?? base.count) : 0;
+  let allSum = base.avg != null ? allRated * base.avg : 0;
+  for (const [m, list] of ix.reviewsByMonth) if (m <= monthOf(to)) for (const r of list) if (r.date <= to) (allCount += 1), r.rating != null && ((allRated += 1), (allSum += r.rating));
+  return { month, state: 'ok', manual: false, value: rows.length, num: rows.length, rated: rated.length, avg: rated.length ? sum / rated.length : null, rating_sum: sum, alltime_avg: allRated ? allSum / allRated : null, alltime_count: allCount, visits, per100: visits ? (rows.length / visits) * 100 : null, rows, export: exp, partial: !!exp && to > exp.reviews_to };
 }
 
 /** OCR against its target range (lower is better): on track, within 5% of missing it, or more than 5% off. */
@@ -651,13 +655,15 @@ export function scorecard(ix, { brand, month, mode = 'month', range = null, now,
     }
     if (kpi === 'reviews') {
       const sum = cur.parts.reduce((t, p) => t + (p.rating_sum || 0), 0);
+      const rated = cur.parts.reduce((t, p) => t + (p.rated ?? p.num ?? 0), 0);
       const visits = cur.parts.reduce((t, p) => t + (p.visits || 0), 0);
       const last = cur.parts[cur.parts.length - 1];
       tile.details = [
-        { label: 'Average rating', value: cur.num ? `${(sum / cur.num).toFixed(2)} ★` : '—' },
+        { label: 'Average rating', value: rated ? `${(sum / rated).toFixed(2)} ★${rated < cur.num ? ` (stars known for ${rated} of ${cur.num})` : ''}` : cur.num ? 'Stars not known yet' : '—' },
         { label: 'All-time average', value: last.alltime_avg != null ? `${last.alltime_avg.toFixed(2)} ★ (${last.alltime_count.toLocaleString('en-CA')} reviews)` : '—' },
         { label: 'Per 100 completed visits', value: visits ? (cur.num / visits * 100).toFixed(1) : '—' },
       ];
+      if (cur.num > rated && !cur.parts.some((p) => p.manual)) tile.badges.push({ tone: 'neutral', text: `Google public data: every new review is counted; stars are known for ${rated} of ${cur.num}` });
       if (cur.parts.some((p) => p.manual)) tile.badges.push({ tone: 'warning', text: 'Manual entry (Google API not connected)' });
       const exp = cur.parts.find((p) => p.export)?.export;
       if (exp) {

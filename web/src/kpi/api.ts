@@ -56,7 +56,9 @@ export interface Scorecard {
   can_connect_google?: boolean;
 }
 /** Live Google reviews (Google Business Profile). `configured` is false outside production or before the client is set. */
-export interface GoogleStatus { configured: boolean; connected?: boolean; email?: string | null; connected_at?: string | null; location?: string | null; total?: number | null; average?: number | null; error?: string | null }
+export interface GoogleStatus { configured: boolean; connected?: boolean; email?: string | null; connected_at?: string | null; location?: string | null; total?: number | null; average?: number | null; error?: string | null; fallback?: PlacesStatus | null }
+/** Google Places public data: exact review counts, stars only for the reviews Google shows. */
+export interface PlacesStatus { source: 'places'; total: number | null; rating: number | null; title: string | null; refreshed_at: string | null; error: string | null }
 export interface ManualReviews { new_reviews: number; avg_rating: number; alltime_avg: number; alltime_count: number }
 export interface DrillColumn { key: string; label: string; kind?: 'money' | 'pct' | 'num' }
 export type DrillRow = Record<string, string | number | boolean | null> & { counted?: boolean; outcome?: string };

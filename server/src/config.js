@@ -241,6 +241,10 @@ export function loadConfig(env = process.env) {
     // KPI page, or set GBP_REFRESH_TOKEN. GBP_LOCATION ("accounts/1/locations/2") picks the listing
     // when the account manages more than one.
     gbp: isProd && env.GBP_CLIENT_ID && env.GBP_CLIENT_SECRET ? { clientId: String(env.GBP_CLIENT_ID).trim(), clientSecret: String(env.GBP_CLIENT_SECRET).trim(), refreshToken: String(env.GBP_REFRESH_TOKEN || '').trim() || null, location: String(env.GBP_LOCATION || '').trim() || null } : null,
+    // Google reviews from Google's public listing data (Places API (New)), production only: an API
+    // key from any Google Cloud project with Places API (New) on and billing set. Used when the
+    // Business Profile API is not set or not read yet. GOOGLE_PLACES_PLACE_ID skips the listing search.
+    places: isProd && env.GOOGLE_PLACES_API_KEY ? { apiKey: String(env.GOOGLE_PLACES_API_KEY).trim(), placeId: String(env.GOOGLE_PLACES_PLACE_ID || '').trim() || null } : null,
     kpiEmails: String(env.KPI_EMAILS || '').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean),
     simulator: env.INBOX_SIMULATOR === undefined ? !isProd : truthy(env.INBOX_SIMULATOR),
     // Sample inbox conversations on an empty database. Never in production.
