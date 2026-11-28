@@ -24,6 +24,8 @@ export function createKpi({ db, config, log = { info() {}, warn() {}, error() {}
   const jobs = connectors.map((c) => c.job).filter(Boolean);
   // Live Google reviews, when configured (src/kpi/google.js): connected from this page.
   const google = connectors.find((c) => c.key === 'google' && c.connectUrl) || null;
+  // Google Places public data on its own (no Business Profile client set).
+  const placesOnly = google ? null : connectors.find((c) => c.key === 'google' && c.status) || null;
   const needGoogle = () => {
     if (!google) throw fail(409, 'Google reviews are not set up here: GBP_CLIENT_ID and GBP_CLIENT_SECRET are needed (production only)');
     return google;
@@ -140,7 +142,7 @@ export function createKpi({ db, config, log = { info() {}, warn() {}, error() {}
         outage: o,
         outages: synthetic ? KPI_OUTAGES : null,
         refresh: { available: jobs.length > 0, running: autoRefresh(c.ds, bearer) || jobs.some((j) => j.running()) },
-        google: google ? await google.status() : { configured: false },
+        google: google ? await google.status() : { configured: false, fallback: placesOnly ? await placesOnly.status() : null },
         manual_reviews: synthetic ? { can_enter: true, entry: c.ds.manualReviews[m.month] || null } : { can_enter: false, entry: null },
       };
     },

@@ -301,6 +301,16 @@ function TrendCard({ tile, points, reference }: { tile: Tile; points: TrendPoint
   );
 }
 
+// Google Places public data, used until the Business Profile API is read (or instead of it).
+function PlacesLine({ p }: { p: NonNullable<Scorecard['google']['fallback']> }) {
+  return (
+    <span className="small">
+      {p.refreshed_at ? `Live from Google's public data: ${p.total?.toLocaleString('en-CA') ?? '—'} reviews${p.rating ? `, ${p.rating.toFixed(1)} ★` : ''} · read ${when(p.refreshed_at)} · New reviews are counted exactly; stars only for the reviews Google shows.` : 'Reading Google\'s public data for the first time…'}
+      {p.error && <span className="warn"> · Last read failed: {p.error}</span>}
+    </span>
+  );
+}
+
 // ---------- connecting Google reviews (Google Business Profile, read-only) ----------
 function GoogleConnect({ s }: { s: Scorecard }) {
   const queryClient = useQueryClient();
@@ -309,15 +319,16 @@ function GoogleConnect({ s }: { s: Scorecard }) {
   return (
     <div className="sc-google">
       <b>Google reviews</b>
-      {g.connected ? (
+      {g.fallback && <PlacesLine p={g.fallback} />}
+      {!g.configured ? null : g.connected ? (
         <span className="small">
-          Live{g.email ? ` · signed in as ${g.email}` : ''}{g.location ? ` · ${g.location}` : ''}{g.total != null ? ` · ${g.total.toLocaleString('en-CA')} reviews` : ''}{g.average ? `, ${g.average.toFixed(1)} ★ on Google` : ''}
+          Business Profile API: {g.total != null ? 'live' : 'signed in, not read yet'}{g.email ? ` · ${g.email}` : ''}{g.location ? ` · ${g.location}` : ''}{g.total != null ? ` · ${g.total.toLocaleString('en-CA')} reviews` : ''}{g.average ? `, ${g.average.toFixed(1)} ★ on Google` : ''}
           {g.error && <span className="warn"> · Last refresh failed: {g.error}</span>}
         </span>
       ) : (
         <span className="small muted">Not connected. Sign in with the Google account that manages the listing (info@urbanmop.ca) to read reviews every day. Read-only: nothing is posted or changed on Google.</span>
       )}
-      {s.can_connect_google && (
+      {g.configured && s.can_connect_google && (
         <span className="small">
           <a className="link" href="/api/kpi/google/connect">{g.connected ? 'Connect again' : 'Connect Google'}</a>
           {g.connected && <> · <button className="link" disabled={disconnect.isPending} onClick={() => disconnect.mutate()}>Disconnect</button></>}
@@ -352,7 +363,7 @@ function SourcesCard({ s, outage, setOutage }: { s: Scorecard; outage: string | 
       </div>
       <p className="small muted">Read-only: this page never changes anything in Launch27, QuickBooks, Kustomer or Google.</p>
       {googleNotice && <p className={`small ${googleNotice.ok ? '' : 'warn'}`}>{googleNotice.text}</p>}
-      {s.google.configured && <GoogleConnect s={s} />}
+      {(s.google.configured || s.google.fallback) && <GoogleConnect s={s} />}
       {s.refresh.available && (
         <p className="small">
           {s.refresh.running || refresh.isSuccess ? <span className="muted">Refreshing now. The page updates itself when it finishes.</span> : <button className="link" disabled={refresh.isPending} onClick={() => refresh.mutate()}>Refresh now</button>}
