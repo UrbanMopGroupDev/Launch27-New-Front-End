@@ -298,13 +298,14 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, solutions =
     low_by_response: [...lowByResp].map(([k, l]) => ({ response: k, label: offerLabel(k), n: l.length, ids: l })).sort((a, b) => b.n - a.n),
   };
 
-  // Client value: the same split by what the client spent in the 12 months before the complaint.
-  // Do we lose our best clients more often, and does giving more keep them?
+  // Client value: the same split by what the client's plan is worth in a year (one-time clients
+  // apart). Do we lose our best plans more often, and does giving more keep them?
+  const tierOf = (c) => valueTier(c.plan_value, c.one_time);
   const valueTiers = VALUE_TIERS.map((t) => {
-    const list = rows.filter((c) => valueTier(c.spend_12m) === t.key);
+    const list = rows.filter((c) => tierOf(c) === t.key);
     const byResp = new Map();
     for (const c of list) byResp.set(responseOf(c), [...(byResp.get(responseOf(c)) || []), c]);
-    const spend = list.map((c) => Number(c.spend_12m)).filter((x) => Number.isFinite(x));
+    const spend = list.map((c) => (c.plan_value == null ? NaN : Number(c.plan_value))).filter((x) => Number.isFinite(x));
     return {
       key: t.key,
       label: t.label,
@@ -314,7 +315,7 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, solutions =
       by_response: [...byResp].map(([k, l]) => ({ response: k, label: offerLabel(k), ...outcomeStats(l) })).sort((a, b) => b.n - a.n),
     };
   });
-  const noValue = rows.filter((c) => valueTier(c.spend_12m) == null);
+  const noValue = rows.filter((c) => tierOf(c) == null);
 
   // Ladder: cost and retention per rung (hard-routed cases excluded: they're not on the ladder)
   const ladder = RUNGS.map((r) => ({ ...r, ...outcomeStats(ladderRows.filter((c) => c.rung === r.rung)) }));

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { parseRefundPost, reasonKind } from '../src/complaints/slackRefunds.js';
 import { classifyRules, mergeClassification, hardRouteFor, causeRules, causeFacts, CAUSES, CAUSE_GROUPS } from '../src/complaints/taxonomy.js';
 import { redact } from '../src/complaints/redact.js';
-import { outcomeAt, journeyAt, recleanCost, cleanerLastWorkedIndex, regularCleaner } from '../src/complaints/journey.js';
+import { outcomeAt, journeyAt, recleanCost, cleanerLastWorkedIndex, regularCleaner, planValue } from '../src/complaints/journey.js';
 import { normalizeSettings, canApprove, rungForRefund, budgetStatus, DEFAULT_SETTINGS } from '../src/complaints/settings.js';
 import { buildPlaybook } from '../src/complaints/playbook.js';
 import { formatThread, offerToResolution, normalizeSolution } from '../src/complaints/solutions.js';
@@ -1148,23 +1148,34 @@ describe('complaints: client value', () => {
     assert.ok(none.options.every((x) => x.net_value === undefined && !x.best_net));
   });
 
-  test('the playbook splits responses by 12-month spend', () => {
-    assert.deepEqual([valueTier(null), valueTier('300'), valueTier(1500), valueTier(9214)], [null, 'low', 'mid', 'high']);
+  test("a plan's yearly worth: usual visit price times visits a year; one visit for a one-time client", () => {
+    const v = (revenue, freq, i) => ({ id: i, at: i * 86_400_000, revenue, freq, teams: [] });
+    assert.deepEqual(planValue([v(320, 'Biweekly - 10% off', 1)]), { visit_price: 320, plan_value: 8320 }, 'only the first deep clean on file');
+    assert.deepEqual(planValue([v(320, 'Biweekly', 1), v(150, 'Biweekly', 2), v(150, 'Biweekly', 3)]), { visit_price: 150, plan_value: 3900 }, 'the usual price, not the first deep clean');
+    assert.deepEqual(planValue([v(160, 'Weekly - 15% off', 1), v(0, 'Weekly - 15% off', 2)]), { visit_price: 160, plan_value: 8320 }, 'a free reclean is not the price');
+    assert.deepEqual(planValue([v(180, 'Every 4 weeks / Monthly', 1)]), { visit_price: 180, plan_value: 2340 });
+    assert.deepEqual(planValue([v(240, 'One Time', 1)]), { visit_price: 240, plan_value: 240 });
+    assert.deepEqual(planValue([]), { visit_price: null, plan_value: null });
+    assert.deepEqual([valueTier(null), valueTier(240, true), valueTier(2340), valueTier(3900), valueTier(8320)], [null, 'one', 'low', 'mid', 'high']);
+  });
+
+  test('the playbook splits responses by plan value, one-time clients apart', () => {
     const cases = [];
     const outcomes = [];
-    const add = (spend, outcome) => {
+    const add = (plan, outcome, one_time = false) => {
       const id = cases.length + 1;
-      cases.push({ id, source: 'kustomer', opened_at: '2026-06-10T12:00:00Z', category: 'quality_missed', spend_12m: spend, l27_customer_id: 600 + id, classified_by: 'claude' });
-      outcomes.push({ case_id: id, day: 60, outcome });
+      cases.push({ id, source: 'kustomer', opened_at: '2026-06-10T12:00:00Z', category: 'quality_missed', plan_value: plan, one_time, l27_customer_id: 600 + id, classified_by: 'claude' });
+      outcomes.push({ case_id: id, day: one_time ? 120 : 60, outcome });
     };
-    add('400', 'lost');
-    add('6000', 'saved');
-    add('8000', 'saved');
+    add('2340', 'lost');
+    add('7800', 'saved');
+    add('8320', 'saved');
+    add('240', 'not_rebooked', true);
     add(null, 'saved');
     const pb = buildPlaybook({ cases, resolutions: [], costs: [], outcomes, visits: [], from: '2026-05-01', to: '2026-10-31', settings: normalizeSettings({}), today: '2026-11-27' });
     const by = Object.fromEntries(pb.value_tiers.map((t) => [t.key, t]));
-    assert.deepEqual([by.low.n, by.mid.n, by.high.n, by.high.avg_spend, by.high.saved_n], [1, 0, 2, 7000, 2]);
-    assert.deepEqual(pb.value_unknown_ids, [4]);
+    assert.deepEqual([by.one.n, by.low.n, by.mid.n, by.high.n, by.high.avg_spend, by.high.saved_n], [1, 1, 0, 2, 8060, 2]);
+    assert.deepEqual(pb.value_unknown_ids, [5]);
   });
 });
 

@@ -39,12 +39,38 @@ export function journeyAt(list, at, { priorCases = [], cleanerStatsAt = null, da
     cleaner_visits_before: cs?.visits ?? null,
     cleaner_unhappy_rate_90d: cs?.unhappyRate ?? null,
     data_from: dataFrom,
+    ...planValue(before),
     regular_cleaner_name: regular?.name ?? null,
     regular_cleaner_last_worked: regularLast ? new Date(regularLast).toISOString().slice(0, 10) : null,
     // Stopped working with us: their last visit with any client was before the complaint and
     // at least LEFT_AFTER_DAYS before the end of the data (so a week off doesn't count).
     regular_cleaner_left: regular && regularLast && dataTo ? regularLast < at && dataTo - regularLast >= LEFT_AFTER_DAYS * DAY : null,
   };
+}
+
+// Visits a year by frequency. One-time clients have no plan: what is at stake is one more booking.
+export const VISITS_A_YEAR = { weekly: 52, bi: 26, tri: 17, monthly: 13, one: 1 };
+const freqKind = (name) => {
+  const n = String(name || '').toLowerCase();
+  if (/one\s*-?\s*time/.test(n)) return 'one';
+  if (/tri\s*-?\s*weekly/.test(n)) return 'tri';
+  if (/bi\s*-?\s*weekly/.test(n)) return 'bi';
+  if (/weekly/.test(n)) return 'weekly';
+  if (/month/.test(n)) return 'monthly';
+  return 'one';
+};
+/**
+ * The client's plan as of the complaint: their usual visit price (the median of their last
+ * three paid visits, so a pricier first deep clean doesn't set it once regular visits exist)
+ * times the visits a year their frequency means. Null when they have no paid visit yet.
+ */
+export function planValue(before) {
+  const paid = (before || []).filter((v) => (v.revenue || 0) > 0);
+  if (!paid.length) return { visit_price: null, plan_value: null };
+  const last3 = paid.slice(-3).map((v) => v.revenue).sort((a, b) => a - b);
+  const price = last3[Math.floor((last3.length - 1) / 2)];
+  const kind = freqKind(paid[paid.length - 1].freq);
+  return { visit_price: Math.round(price * 100) / 100, plan_value: Math.round(price * VISITS_A_YEAR[kind] * 100) / 100 };
 }
 
 export const LEFT_AFTER_DAYS = 21;
