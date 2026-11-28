@@ -301,12 +301,46 @@ function TrendCard({ tile, points, reference }: { tile: Tile; points: TrendPoint
   );
 }
 
+// ---------- connecting Google reviews (Google Business Profile, read-only) ----------
+function GoogleConnect({ s }: { s: Scorecard }) {
+  const queryClient = useQueryClient();
+  const g = s.google;
+  const disconnect = useMutation({ mutationFn: kpiApi.disconnectGoogle, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['kpi'] }) });
+  return (
+    <div className="sc-google">
+      <b>Google reviews</b>
+      {g.connected ? (
+        <span className="small">
+          Live{g.email ? ` · signed in as ${g.email}` : ''}{g.location ? ` · ${g.location}` : ''}{g.total != null ? ` · ${g.total.toLocaleString('en-CA')} reviews` : ''}{g.average ? `, ${g.average.toFixed(1)} ★ on Google` : ''}
+          {g.error && <span className="warn"> · Last refresh failed: {g.error}</span>}
+        </span>
+      ) : (
+        <span className="small muted">Not connected. Sign in with the Google account that manages the listing (info@urbanmop.ca) to read reviews every day. Read-only: nothing is posted or changed on Google.</span>
+      )}
+      {s.can_connect_google && (
+        <span className="small">
+          <a className="link" href="/api/kpi/google/connect">{g.connected ? 'Connect again' : 'Connect Google'}</a>
+          {g.connected && <> · <button className="link" disabled={disconnect.isPending} onClick={() => disconnect.mutate()}>Disconnect</button></>}
+          {disconnect.isError && <span className="warn"> {(disconnect.error as Error).message}</span>}
+        </span>
+      )}
+    </div>
+  );
+}
+
 // ---------- sources, outage preview and manual review entry ----------
 function SourcesCard({ s, outage, setOutage }: { s: Scorecard; outage: string | null; setOutage: (o: string | null) => void }) {
   const queryClient = useQueryClient();
   const refresh = useMutation({ mutationFn: kpiApi.refresh, onSuccess: () => queryClient.invalidateQueries({ queryKey: ['kpi'] }) });
+  // Back from Google's sign-in: ?google=connected or ?google_error=…
+  const [googleNotice] = useState<{ ok: boolean; text: string } | null>(() => {
+    const p = new URLSearchParams(window.location.search);
+    if (p.get('google') === 'connected') return { ok: true, text: 'Google is connected. Reviews are being read now; reload the page in a minute.' };
+    if (p.get('google_error')) return { ok: false, text: p.get('google_error')! };
+    return null;
+  });
   return (
-    <details className="card sc-sources" open={!!outage}>
+    <details className="card sc-sources" open={!!outage || googleNotice != null}>
       <summary>Sources and data freshness</summary>
       <div className="sc-source-list">
         {s.sources.map((x) => (
@@ -317,6 +351,8 @@ function SourcesCard({ s, outage, setOutage }: { s: Scorecard; outage: string | 
         ))}
       </div>
       <p className="small muted">Read-only: this page never changes anything in Launch27, QuickBooks, Kustomer or Google.</p>
+      {googleNotice && <p className={`small ${googleNotice.ok ? '' : 'warn'}`}>{googleNotice.text}</p>}
+      {s.google.configured && <GoogleConnect s={s} />}
       {s.refresh.available && (
         <p className="small">
           {s.refresh.running || refresh.isSuccess ? <span className="muted">Refreshing now. The page updates itself when it finishes.</span> : <button className="link" disabled={refresh.isPending} onClick={() => refresh.mutate()}>Refresh now</button>}
