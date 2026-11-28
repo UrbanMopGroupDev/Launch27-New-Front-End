@@ -34,6 +34,8 @@ const CREDIT_RE = /\$\s?(\d{1,3})(?:\.\d{2})?\s*(?:off|credit|discount)\b|\bcred
 
 const CLASSIFY_CONCURRENCY = 6;
 const SOLUTIONS_PER_RUN = 300;
+const SOLUTION_BATCHES = 5;
+const OWN_DOMAINS = ['@urbanmop.ca', '@urbanmop.com'];
 // Run fn over items with at most n in flight.
 async function pool(items, n, fn) {
   let i = 0;
@@ -167,9 +169,22 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       if (config.slackBotToken) await guarded('Slack', () => fromSlack(from, to, ctx, note));
       else note('warn', 'Slack refund history skipped: SLACK_BOT_TOKEN is not set');
 
+      // Cases still without a Launch27 client, from any date: try the contact records and the name.
+      const newlyLinked = await linkClients(ctx, note).catch((err) => {
+        note('warn', `Clients not matched: ${err.message}`);
+        return [];
+      });
       await linkReviews().catch((err) => note('warn', `Google reviews not matched: ${err.message}`));
-      await enrich(refreshFrom && refreshFrom < from ? refreshFrom : from, to, ctx, settings, note);
-      if (solutionReader) await guarded('Solutions', () => mineSolutions({ note }));
+      await enrich(refreshFrom && refreshFrom < from ? refreshFrom : from, to, ctx, settings, note, newlyLinked);
+      // Read conversations in batches until the never-read backlog is gone (up to 5 batches a run).
+      if (solutionReader) {
+        await guarded('Solutions', async () => {
+          for (let i = 0; i < SOLUTION_BATCHES; i++) {
+            const r = await mineSolutions({ note });
+            if (r.read + r.no_thread + (r.unchanged || 0) < SOLUTIONS_PER_RUN) break;
+          }
+        });
+      }
       // 'partial': it finished, but a source failed (shown on the page with the reason).
       logCoverage().catch(() => {});
       const status = runLog.some((l) => l.level === 'error') ? 'partial' : 'done';
@@ -213,6 +228,61 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     const ids = ctx.byName.get(nameKey(name));
     return ids && ids.size === 1 ? [...ids][0] : null; // ambiguous names are left unlinked
   };
+  // ---------- tying cases to clients after the fact ----------
+  // A case is first matched when it is read: Launch27's own lookup of the sender's email or
+  // phone. Many info@ complaints come from another address than the one on the booking, so
+  // every run retries the cases still unmatched, from any date, in order of confidence:
+  //   contact       the email or phone belongs to a contact (the migrated Kustomer contacts
+  //                 and everyone since) that is tied to exactly one Launch27 client
+  //   contact_name  it belongs to a contact whose full name is exactly one Launch27 client's
+  //   name          the sender's own full name is exactly one Launch27 client's
+  // A first name alone never matches, nor a name two clients share, nor our own staff.
+  async function linkClients(ctx, note = () => {}) {
+    const open = await many(db, `SELECT id, customer_name, customer_email, customer_phone FROM complaint_cases
+      WHERE merged_into IS NULL AND excluded_at IS NULL AND l27_customer_id IS NULL`);
+    if (!open.length) return [];
+    const staff = new Set((await many(db, 'SELECT lower(email) AS e FROM users WHERE email IS NOT NULL')).map((r) => r.e));
+    const fullName = (n) => (nameKey(n).split(' ').filter((p) => p.length >= 2).length >= 2 ? n : null);
+    const linked = [];
+    const how = { contact: 0, contact_name: 0, name: 0 };
+    for (const c of open) {
+      const email = String(c.customer_email || '').toLowerCase();
+      if (email && (staff.has(email) || OWN_DOMAINS.some((d) => email.endsWith(d)))) continue;
+      let id = null;
+      let match = null;
+      if (email || c.customer_phone) {
+        const contacts = await many(
+          db,
+          `SELECT DISTINCT k.id, k.name, k.l27_customer_id FROM contact_identities i JOIN contacts k ON k.id = i.contact_id
+            WHERE (i.kind = 'email' AND i.value = $1) OR (i.kind = 'phone' AND i.value = $2)`,
+          [email, c.customer_phone || ''],
+        );
+        const ids = new Set(contacts.map((k) => Number(k.l27_customer_id)).filter(Boolean));
+        if (ids.size === 1) {
+          id = [...ids][0];
+          match = 'contact';
+        } else if (ids.size === 0) {
+          const byName = new Set(contacts.map((k) => (fullName(k.name) ? customerByName(ctx, k.name) : null)).filter(Boolean));
+          if (byName.size === 1) {
+            id = [...byName][0];
+            match = 'contact_name';
+          }
+        }
+      }
+      if (!id && fullName(c.customer_name)) {
+        id = customerByName(ctx, c.customer_name);
+        if (id) match = 'name';
+      }
+      if (!id) continue;
+      await db.query('UPDATE complaint_cases SET l27_customer_id = $2, client_match = $3, updated_at = now() WHERE id = $1 AND l27_customer_id IS NULL', [c.id, id, match]);
+      linked.push(Number(c.id));
+      how[match]++;
+    }
+    if (linked.length) rankCache = null;
+    note('info', `Clients: ${linked.length} of ${open.length} unmatched cases tied to a Launch27 client (${how.contact} through a contact, ${how.contact_name} through a contact's name, ${how.name} by the sender's name)`);
+    return linked;
+  }
+
   async function customerByEmail(ctx, emails = [], phones = []) {
     if (!l27 || !ctx.bearer) return null;
     for (const [kind, v] of [...emails.map((e) => ['email', e]), ...phones.map((p) => ['phone', p])]) {
@@ -482,8 +552,9 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
   }
 
   // ---------- per-case enrichment ----------
-  async function enrich(from, to, ctx, settings, note) {
-    const rows = await many(db, `SELECT * FROM complaint_cases WHERE merged_into IS NULL AND opened_at >= $1 AND opened_at < $2::date + 1 ORDER BY opened_at`, [from, to]);
+  // alsoIds: cases outside the dates that were just tied to a client and need their journey and outcome.
+  async function enrich(from, to, ctx, settings, note, alsoIds = []) {
+    const rows = await many(db, `SELECT * FROM complaint_cases WHERE merged_into IS NULL AND ((opened_at >= $1 AND opened_at < $2::date + 1) OR id = ANY($3::bigint[])) ORDER BY opened_at`, [from, to, alsoIds]);
     const allCases = await many(db, 'SELECT id, l27_customer_id, opened_at FROM complaint_cases WHERE merged_into IS NULL');
     // The Google review that followed each complaint, if one was matched (the lowest, if several).
     const reviewOf = new Map();
@@ -900,6 +971,12 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       totals,
       dropped,
       by_source: pairs(await q(`SELECT source AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} GROUP BY 1`)),
+      unmatched_by_source: pairs(await q(`SELECT source AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} AND l27_customer_id IS NULL GROUP BY 1`)),
+      unmatched_have: (await q(`SELECT count(*) FILTER (WHERE customer_email IS NOT NULL)::int AS email, count(*) FILTER (WHERE customer_phone IS NOT NULL)::int AS phone, count(*) FILTER (WHERE customer_name IS NOT NULL)::int AS name,
+        count(*) FILTER (WHERE EXISTS (SELECT 1 FROM contact_identities i WHERE i.kind = 'email' AND i.value = lower(c.customer_email)))::int AS email_on_a_contact,
+        count(*) FILTER (WHERE lower(customer_email) LIKE '%@urbanmop.%')::int AS from_our_own_address
+        FROM complaint_cases c WHERE ${live} AND l27_customer_id IS NULL`))[0],
+      matched_how: pairs(await q(`SELECT coalesce(client_match, 'when_read') AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} AND l27_customer_id IS NOT NULL GROUP BY 1`)),
       by_year: pairs(await q(`SELECT to_char(opened_at, 'YYYY') AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} GROUP BY 1 ORDER BY 1`)),
       by_category: pairs(await q(`SELECT category AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} GROUP BY 1 ORDER BY 2 DESC`)),
       classified_by: pairs(await q(`SELECT classified_by AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} GROUP BY 1`)),
@@ -907,6 +984,12 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       outcome_120_one_time: pairs(o120),
       no_verdict_why: why,
       journey: value,
+      // Is the spend figure believable? Typical spend, cleans and revenue per clean before a complaint.
+      journey_stats: (await q(`SELECT round(avg(j.spend_12m))::int AS avg_spend, round(percentile_cont(0.5) WITHIN GROUP (ORDER BY j.spend_12m))::int AS median_spend, round(max(j.spend_12m))::int AS max_spend,
+        round(avg(j.cleans_total), 1)::float AS avg_cleans, round(percentile_cont(0.5) WITHIN GROUP (ORDER BY j.cleans_total))::int AS median_cleans, max(j.cleans_total)::int AS max_cleans,
+        round(avg(j.tenure_days))::int AS avg_tenure_days, count(*) FILTER (WHERE j.cleans_total <= 2)::int AS two_cleans_or_fewer, count(*) FILTER (WHERE j.cleans_total >= 12)::int AS twelve_cleans_or_more,
+        round(sum(j.spend_12m) / nullif(sum(j.cleans_total), 0))::int AS spend_per_clean
+        FROM complaint_cases c JOIN complaint_journeys j ON j.case_id = c.id WHERE ${live}`))[0],
       cause_set_by: pairs(await q(`SELECT cause_by AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} GROUP BY 1`)),
       causes: pairs(await q(`SELECT cause AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} GROUP BY 1 ORDER BY 2 DESC`)),
       tones: pairs(await q(`SELECT tone AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} GROUP BY 1`)),
@@ -1124,7 +1207,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     return buildReviewStats(rows, waiting);
   }
 
-  return { coverage, logCoverage, importReviews, linkReviews, reviewsSummary, rankFor, mineSolutions, getSettings, saveSettings, kustomerDiscover, start, run, status, markInterrupted, maybeRun, listCases, getCase, setCategory, playbook, clients, sources, reviewQueue, reviewCase, reviewStats };
+  return { linkClients, coverage, logCoverage, importReviews, linkReviews, reviewsSummary, rankFor, mineSolutions, getSettings, saveSettings, kustomerDiscover, start, run, status, markInterrupted, maybeRun, listCases, getCase, setCategory, playbook, clients, sources, reviewQueue, reviewCase, reviewStats };
 }
 
 // Measured accuracy from hand checks: of the cases the engine put in a category, how many a
