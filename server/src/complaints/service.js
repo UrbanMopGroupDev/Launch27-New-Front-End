@@ -245,9 +245,14 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     const fullName = (n) => (nameKey(n).split(' ').filter((p) => p.length >= 2).length >= 2 ? n : null);
     const linked = [];
     const how = { contact: 0, contact_name: 0, name: 0 };
+    // Why the rest stay unmatched, for the log: counts only.
+    const why = { our_own_address: 0, no_full_name: 0, nobody_by_that_name: 0, several_clients_share_the_name: 0 };
     for (const c of open) {
       const email = String(c.customer_email || '').toLowerCase();
-      if (email && (staff.has(email) || OWN_DOMAINS.some((d) => email.endsWith(d)))) continue;
+      if (email && (staff.has(email) || OWN_DOMAINS.some((d) => email.endsWith(d)))) {
+        why.our_own_address++;
+        continue;
+      }
       let id = null;
       let match = null;
       if (email || c.customer_phone) {
@@ -273,13 +278,18 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
         id = customerByName(ctx, c.customer_name);
         if (id) match = 'name';
       }
-      if (!id) continue;
+      if (!id) {
+        if (!fullName(c.customer_name)) why.no_full_name++;
+        else if (ctx.byName.get(nameKey(c.customer_name))?.size > 1) why.several_clients_share_the_name++;
+        else why.nobody_by_that_name++;
+        continue;
+      }
       await db.query('UPDATE complaint_cases SET l27_customer_id = $2, client_match = $3, updated_at = now() WHERE id = $1 AND l27_customer_id IS NULL', [c.id, id, match]);
       linked.push(Number(c.id));
       how[match]++;
     }
     if (linked.length) rankCache = null;
-    note('info', `Clients: ${linked.length} of ${open.length} unmatched cases tied to a Launch27 client (${how.contact} through a contact, ${how.contact_name} through a contact's name, ${how.name} by the sender's name)`);
+    note('info', `Clients: ${linked.length} of ${open.length} unmatched cases tied to a Launch27 client (${how.contact} through a contact, ${how.contact_name} through a contact's name, ${how.name} by the sender's name). Still unmatched: ${why.nobody_by_that_name} have no Residential client by that name in the last 12 months, ${why.no_full_name} have no full name, ${why.several_clients_share_the_name} share a name with another client, ${why.our_own_address} are from our own addresses`);
     return linked;
   }
 
@@ -633,15 +643,15 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
         const j = journeyAt(list, at, { priorCases: prior, cleanerStatsAt: ctx.cleanerStatsAt, dataFrom: ctx.snap.from, complainedVisitId: visit?.id ?? null, cleanerLastWorked: ctx.cleanerLastWorked, dataTo: todayMs });
         await db.query(
           `INSERT INTO complaint_journeys (case_id, tenure_days, frequency, cleans_total, spend_12m, price_change_pct, distinct_cleaners_90d, cleaner_changed_last_visit, prior_complaints, prior_unhappy_ratings,
-             days_since_last_clean, cleaner_id, cleaner_name, cleaner_visits_before, cleaner_unhappy_rate_90d, data_from, regular_cleaner_name, regular_cleaner_left, regular_cleaner_last_worked, computed_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19, now())
+             days_since_last_clean, cleaner_id, cleaner_name, cleaner_visits_before, cleaner_unhappy_rate_90d, data_from, regular_cleaner_name, regular_cleaner_left, regular_cleaner_last_worked, plan_value, visit_price, computed_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21, now())
            ON CONFLICT (case_id) DO UPDATE SET tenure_days = EXCLUDED.tenure_days, frequency = EXCLUDED.frequency, cleans_total = EXCLUDED.cleans_total, spend_12m = EXCLUDED.spend_12m,
              price_change_pct = EXCLUDED.price_change_pct, distinct_cleaners_90d = EXCLUDED.distinct_cleaners_90d, cleaner_changed_last_visit = EXCLUDED.cleaner_changed_last_visit,
              prior_complaints = EXCLUDED.prior_complaints, prior_unhappy_ratings = EXCLUDED.prior_unhappy_ratings, days_since_last_clean = EXCLUDED.days_since_last_clean,
              cleaner_id = EXCLUDED.cleaner_id, cleaner_name = EXCLUDED.cleaner_name, cleaner_visits_before = EXCLUDED.cleaner_visits_before,
              cleaner_unhappy_rate_90d = EXCLUDED.cleaner_unhappy_rate_90d, data_from = EXCLUDED.data_from,
-             regular_cleaner_name = EXCLUDED.regular_cleaner_name, regular_cleaner_left = EXCLUDED.regular_cleaner_left, regular_cleaner_last_worked = EXCLUDED.regular_cleaner_last_worked, computed_at = now()`,
-          [c.id, j.tenure_days, j.frequency, j.cleans_total, j.spend_12m, j.price_change_pct, j.distinct_cleaners_90d, j.cleaner_changed_last_visit, j.prior_complaints, j.prior_unhappy_ratings, j.days_since_last_clean, j.cleaner_id, j.cleaner_name, j.cleaner_visits_before, j.cleaner_unhappy_rate_90d, j.data_from, j.regular_cleaner_name, j.regular_cleaner_left, j.regular_cleaner_last_worked],
+             regular_cleaner_name = EXCLUDED.regular_cleaner_name, regular_cleaner_left = EXCLUDED.regular_cleaner_left, regular_cleaner_last_worked = EXCLUDED.regular_cleaner_last_worked, plan_value = EXCLUDED.plan_value, visit_price = EXCLUDED.visit_price, computed_at = now()`,
+          [c.id, j.tenure_days, j.frequency, j.cleans_total, j.spend_12m, j.price_change_pct, j.distinct_cleaners_90d, j.cleaner_changed_last_visit, j.prior_complaints, j.prior_unhappy_ratings, j.days_since_last_clean, j.cleaner_id, j.cleaner_name, j.cleaner_visits_before, j.cleaner_unhappy_rate_90d, j.data_from, j.regular_cleaner_name, j.regular_cleaner_left, j.regular_cleaner_last_worked, j.plan_value, j.visit_price],
         );
         // Nothing in the client's words names a cause, but Launch27 does: fill it in from the facts
         // (marked 'facts', so the checks measure it separately). Only for complaints a cleaner
@@ -976,6 +986,12 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
         count(*) FILTER (WHERE EXISTS (SELECT 1 FROM contact_identities i WHERE i.kind = 'email' AND i.value = lower(c.customer_email)))::int AS email_on_a_contact,
         count(*) FILTER (WHERE lower(customer_email) LIKE '%@urbanmop.%')::int AS from_our_own_address
         FROM complaint_cases c WHERE ${live} AND l27_customer_id IS NULL`))[0],
+      // What the contacts behind unmatched emails are: their roles, and whether any is tied to Launch27.
+      unmatched_contacts: (await q(`SELECT count(DISTINCT k.id)::int AS contacts, count(DISTINCT k.id) FILTER (WHERE k.l27_customer_id IS NOT NULL)::int AS tied_to_l27, count(DISTINCT k.id) FILTER (WHERE k.name IS NULL OR btrim(k.name) = '')::int AS no_name,
+        count(DISTINCT k.id) FILTER (WHERE k.roles::text ILIKE '%cleaner%')::int AS cleaners, count(DISTINCT k.id) FILTER (WHERE k.roles::text ILIKE '%lead%')::int AS leads, count(DISTINCT k.id) FILTER (WHERE k.roles::text ILIKE '%customer%' OR k.roles::text ILIKE '%client%')::int AS customers,
+        count(DISTINCT k.id) FILTER (WHERE k.brand <> 'urbanmop' AND k.brand <> 'residential')::int AS other_brand
+        FROM complaint_cases c JOIN contact_identities i ON i.kind = 'email' AND i.value = lower(c.customer_email) JOIN contacts k ON k.id = i.contact_id WHERE ${live} AND c.l27_customer_id IS NULL`))[0],
+      unmatched_by_category: pairs(await q(`SELECT category AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} AND l27_customer_id IS NULL GROUP BY 1 ORDER BY 2 DESC`)),
       matched_how: pairs(await q(`SELECT coalesce(client_match, 'when_read') AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} AND l27_customer_id IS NOT NULL GROUP BY 1`)),
       by_year: pairs(await q(`SELECT to_char(opened_at, 'YYYY') AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} GROUP BY 1 ORDER BY 1`)),
       by_category: pairs(await q(`SELECT category AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} GROUP BY 1 ORDER BY 2 DESC`)),
@@ -984,6 +1000,12 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       outcome_120_one_time: pairs(o120),
       no_verdict_why: why,
       journey: value,
+      // Client value as the plan's worth in a year (visit price x visits a year), by frequency.
+      plan_value: (await q(`SELECT count(*) FILTER (WHERE j.plan_value IS NOT NULL)::int AS with_plan_value, round(percentile_cont(0.5) WITHIN GROUP (ORDER BY j.visit_price))::int AS median_visit_price,
+        count(*) FILTER (WHERE j.frequency ~* 'one\\s*-?\\s*time' OR j.frequency IS NULL)::int AS one_time, count(*) FILTER (WHERE j.plan_value < 2500 AND NOT (j.frequency ~* 'one\\s*-?\\s*time'))::int AS recurring_under_2500,
+        count(*) FILTER (WHERE j.plan_value >= 2500 AND j.plan_value < 6000)::int AS recurring_2500_to_6000, count(*) FILTER (WHERE j.plan_value >= 6000)::int AS recurring_6000_plus,
+        round(percentile_cont(0.5) WITHIN GROUP (ORDER BY j.plan_value) FILTER (WHERE j.plan_value >= 1000))::int AS median_recurring_plan
+        FROM complaint_cases c JOIN complaint_journeys j ON j.case_id = c.id WHERE ${live}`))[0],
       // Is the spend figure believable? Typical spend, cleans and revenue per clean before a complaint.
       journey_stats: (await q(`SELECT round(avg(j.spend_12m))::int AS avg_spend, round(percentile_cont(0.5) WITHIN GROUP (ORDER BY j.spend_12m))::int AS median_spend, round(max(j.spend_12m))::int AS max_spend,
         round(avg(j.cleans_total), 1)::float AS avg_cleans, round(percentile_cont(0.5) WITHIN GROUP (ORDER BY j.cleans_total))::int AS median_cleans, max(j.cleans_total)::int AS max_cleans,
