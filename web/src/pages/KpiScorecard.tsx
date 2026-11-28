@@ -429,8 +429,13 @@ function DrillTabs({ data }: { data: Drill }) {
     if (v == null || v === '') return '';
     if (c.kind === 'money') return Number(v).toLocaleString('en-CA', { style: 'currency', currency: 'CAD', maximumFractionDigits: 0 });
     if (c.kind === 'pct') return `${Number(v).toFixed(1)}%`;
+    const href = c.link ? r[c.link] : null;
+    if (typeof href === 'string' && href) {
+      return href.startsWith('https://') ? <a href={href} target="_blank" rel="noopener noreferrer">{String(v)}</a> : <a href={href}>{String(v)}</a>;
+    }
     return String(v);
   };
+  const num = (c: Drill['tabs'][number]['columns'][number]) => (c.kind && c.kind !== 'text' ? 'sc-num' : c.kind === 'text' ? 'sc-text' : '');
   const filters: [Filter, string][] = tab.defaultFilter === 'issues' ? [['issues', 'Not fulfilled or late'], ['all', 'All bookings']] : hasExcluded ? [['all', 'All'], ['counted', 'Counted'], ['excluded', 'Excluded']] : [];
   return (
     <>
@@ -450,11 +455,11 @@ function DrillTabs({ data }: { data: Drill }) {
       </div>
       <div className="table-wrap sc-drill-table">
         <table>
-          <thead><tr>{tab.columns.map((c) => <th key={c.key} className={c.kind ? 'sc-num' : ''}>{c.label}</th>)}</tr></thead>
+          <thead><tr>{tab.columns.map((c) => <th key={c.key} className={num(c)}>{c.label}</th>)}</tr></thead>
           <tbody>
             {rows.slice(0, limit).map((r, i) => (
               <tr key={i} className={r.counted === false ? 'sc-row-out' : ''}>
-                {tab.columns.map((c) => <td key={c.key} className={c.kind ? 'sc-num' : ''} data-label={c.label}>{cell(r, c)}</td>)}
+                {tab.columns.map((c) => <td key={c.key} className={num(c)} data-label={c.label}>{cell(r, c)}</td>)}
               </tr>
             ))}
             {!rows.length && <tr><td colSpan={tab.columns.length} className="muted">No rows</td></tr>}
