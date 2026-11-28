@@ -454,9 +454,13 @@ export function createTracker({ db, config, fetchImpl = fetch, log = { info() {}
     const oneTime = /one time/i.test(r.frequency || '');
     // Ranked responses from every past complaint like this one (what we offered, what the
     // client took, who stayed): the agent's options, best first.
-    const ranked = complaints.rankFor ? await complaints.rankFor({ category, cause, one_time: oneTime }).catch(() => null) : null;
+    // Is the client threatening to leave or to post a review? Read from the notes' tone.
+    const tone = notes.trim() ? classifyRules(notes).tone : null;
+    const threat = tone === 'threat_review' ? 'review' : tone === 'threat_leave' ? 'leave' : 'none';
+    const ranked = complaints.rankFor ? await complaints.rankFor({ category, cause, one_time: oneTime, threat }).catch(() => null) : null;
     return {
       ranked,
+      threat,
       available: true,
       category,
       label: categoryLabel(category),

@@ -65,7 +65,7 @@ export interface GuidanceOption { rung: string; name: string; saved: number | nu
 // Ranked responses from every similar past complaint (customer success brain, step 2).
 export interface RankedOption {
   rank: number; response: string; label: string;
-  group: 'cause_category' | 'cause' | 'category' | 'all'; group_label: string; group_cases: number;
+  group: 'threat_category' | 'threat' | 'cause_category' | 'cause' | 'category' | 'all'; group_label: string; group_cases: number;
   cases: number; decided: number; kept: number | null; kept_n: number | null; score: number; vs_group: number | null;
   happy: number | null; happy_n: number; heard: number;
   taken_when_offered: number | null; offered_answered: number; first_turned_down: number | null;
@@ -74,6 +74,7 @@ export interface RankedOption {
 export interface Ranked { groups: { key: string; label: string; cases: number; decided: number; kept: number | null }[]; options: RankedOption[]; considered: number }
 export interface Guidance {
   ranked?: Ranked | null;
+  threat?: 'none' | 'leave' | 'review';
   cause?: string | null;
   cause_label?: string | null;
   cause_cases?: number;

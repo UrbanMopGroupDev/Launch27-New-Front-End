@@ -9,7 +9,8 @@
 // Every figure carries n; anything resting on fewer than THIN cases is flagged.
 import { categoryLabel, causeLabel, CAUSES, CAUSE_GROUPS, HARD_ROUTES } from './taxonomy.js';
 import { RUNGS, rungIndex, rungName } from './settings.js';
-import { OFFER_KINDS } from './solutions.js';
+import { OFFER_KINDS, offerLabel } from './solutions.js';
+import { RUNG_TO_RESPONSE, THREATS, threatOf } from './rank.js';
 
 export const THIN = 10;
 const r2 = (x) => (x == null ? null : Math.round(x * 100) / 100);
@@ -255,6 +256,24 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, solutions =
     pushed_back_first_ids: ids(readRows.filter((c) => ['declined', 'countered'].includes(offersOf(c)[0]?.client_response))),
   };
 
+  // Threats: what each response did when the client threatened to leave or to post a review,
+  // next to clients who threatened nothing. Answers "does giving more keep them when they
+  // threaten?" A case's response is the final answer from its conversation, else its ladder step.
+  const levelOf = (c) => threatOf(c.tone, S.get(c.id)?.read_by === 'claude' && S.get(c.id).said_will_leave);
+  const responseOf = (c) => (S.get(c.id)?.read_by === 'claude' && S.get(c.id).final_kind ? S.get(c.id).final_kind : RUNG_TO_RESPONSE[c.rung] || 'apology');
+  const threats = THREATS.map((t) => {
+    const list = rows.filter((c) => levelOf(c) === t.key);
+    const byResp = new Map();
+    for (const c of list) byResp.set(responseOf(c), [...(byResp.get(responseOf(c)) || []), c]);
+    return {
+      key: t.key,
+      label: t.label,
+      share: share(list.length, rows.length),
+      ...outcomeStats(list),
+      by_response: [...byResp].map(([k, l]) => ({ response: k, label: offerLabel(k), ...outcomeStats(l) })).sort((a, b) => b.n - a.n),
+    };
+  });
+
   // Ladder: cost and retention per rung (hard-routed cases excluded: they're not on the ladder)
   const ladder = RUNGS.map((r) => ({ ...r, ...outcomeStats(ladderRows.filter((c) => c.rung === r.rung)) }));
 
@@ -343,6 +362,7 @@ export function buildPlaybook({ cases, resolutions, costs, outcomes, solutions =
     taxonomy,
     by_cause: byCause,
     solutions: solutionView,
+    threats,
     cause_groups: causeGroups,
     ladder,
     reclean_vs_refund: recleanVsRefund,
