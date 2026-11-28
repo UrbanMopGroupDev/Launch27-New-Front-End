@@ -315,7 +315,7 @@ describe('Complaints tracker', () => {
       assert.deepEqual([g.category, g.label, g.basis, g.cases, g.typical, g.cheapest.name, g.one_time, g.one_time_stats.rebooked_90], ['quality_missed', 'Quality: missed areas', 'type', 120, 'Reclean', '$10 credit', true, 0.25]);
       assert.deepEqual(g.options.map((o) => o.name), ['$10 credit', 'Reclean'], 'responses never used are left out');
       assert.equal(g.ranked.options[0].response, 'reclean', 'the ranked options come with the guidance');
-      assert.deepEqual(asked[0], { category: 'quality_missed', cause: null, one_time: true });
+      assert.deepEqual(asked[0], { category: 'quality_missed', cause: null, one_time: true, threat: 'none' });
       assert.equal(g.escalation, null);
 
       const fromNotes = Number((await t.create(user, { title: 'Broken vase', complaint_notes: 'The cleaner broke a vase in the hallway.' })).record.id);
@@ -335,6 +335,10 @@ describe('Complaints tracker', () => {
       const thin = Number((await t.create(user, { title: 'x', complaint_type: 'Quality of Cleaning', complaint_notes: "She didn't understand my instructions." })).record.id);
       const tg = await t.guidance(thin);
       assert.deepEqual([tg.cause, tg.based_on, tg.cheapest.name], ['language', 'category', '$10 credit'], 'too few outcomes for the cause: the category answers');
+
+      const angry = Number((await t.create(user, { title: 'x', complaint_type: 'Quality of Cleaning', complaint_notes: 'Bathroom missed again. I will be leaving a Google review about this.' })).record.id);
+      assert.equal((await t.guidance(angry)).threat, 'review');
+      assert.equal(asked.at(-1).threat, 'review', 'a review threat in the notes is passed to the ranking');
 
       const clientFault = Number((await t.create(user, { title: 'x', complaint_type: "Complaint but Client's Fault" })).record.id);
       assert.deepEqual([(await t.guidance(clientFault)).category, (await t.guidance(clientFault)).available], [null, true]);

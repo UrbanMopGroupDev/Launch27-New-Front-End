@@ -20,8 +20,18 @@ export const SMOOTH = 10;
 export const TOP = 5;
 const DAY = 86_400_000;
 
+// How hard the client pushed: threatened a public review, threatened to leave (in the complaint's
+// tone or said so in the conversation), or neither. A review threat outranks a threat to leave.
+export const THREATS = [
+  { key: 'none', label: 'No threat' },
+  { key: 'leave', label: 'Threatened to leave' },
+  { key: 'review', label: 'Threatened a public review' },
+];
+export const threatLabel = (k) => THREATS.find((t) => t.key === k)?.label || k;
+export const threatOf = (tone, saidWillLeave = false) => (tone === 'threat_review' ? 'review' : tone === 'threat_leave' || saidWillLeave ? 'leave' : 'none');
+
 // A rung of the ladder in the same terms as a mined offer.
-const RUNG_TO_RESPONSE = { L0: 'apology', L1: 'credit', L2: 'credit', L3: 'reclean', L4: 'partial_refund', L5: 'partial_refund', L6: 'partial_refund', L7: 'full_refund', damage_reimbursement: 'damage_reimbursement' };
+export const RUNG_TO_RESPONSE = { L0: 'apology', L1: 'credit', L2: 'credit', L3: 'reclean', L4: 'partial_refund', L5: 'partial_refund', L6: 'partial_refund', L7: 'full_refund', damage_reimbursement: 'damage_reimbursement' };
 const RUNG_ORDER = ['L0', 'L1', 'L2', 'L3', 'L4', 'L5', 'L6', 'L7', 'damage_reimbursement'];
 
 /**
@@ -58,6 +68,7 @@ export function caseRows({ cases, resolutions = [], costs = [], outcomes = [], s
       id,
       category: c.category,
       cause: c.cause || null,
+      threat: threatOf(c.tone, mined && s.said_will_leave),
       one_time: one,
       response,
       from_conversation: !!(mined && s.final_kind),
@@ -78,9 +89,14 @@ const grade = (n) => (n >= 30 ? 'High' : n >= 10 ? 'Medium' : 'Low');
  * Rank responses for { category, cause, one_time }. rows: caseRows(). Returns the groups
  * looked at and the top responses, best first.
  */
-export function rankResponses(rows, { category = null, cause = null, one_time = false } = {}, { top = TOP, now = null } = {}) {
+export function rankResponses(rows, { category = null, cause = null, one_time = false, threat = 'none' } = {}, { top = TOP, now = null } = {}) {
   const pool = rows.filter((r) => r.one_time === !!one_time && r.response);
+  // A client who is threatening to leave or to post a review is first compared with past
+  // clients who did the same: what keeps them can differ from what keeps everyone else.
+  const threatened = threat === 'leave' || threat === 'review';
   const groups = [
+    threatened && category && { key: 'threat_category', label: `${threatLabel(threat)} · ${categoryLabel(category)}`, rows: pool.filter((r) => r.threat === threat && r.category === category) },
+    threatened && { key: 'threat', label: threatLabel(threat), rows: pool.filter((r) => r.threat === threat) },
     cause && category && cause !== 'other' && { key: 'cause_category', label: `${causeLabel(cause)} · ${categoryLabel(category)}`, rows: pool.filter((r) => r.cause === cause && r.category === category) },
     cause && cause !== 'other' && { key: 'cause', label: causeLabel(cause), rows: pool.filter((r) => r.cause === cause) },
     category && { key: 'category', label: categoryLabel(category), rows: pool.filter((r) => r.category === category) },
@@ -145,6 +161,7 @@ export function rankResponses(rows, { category = null, cause = null, one_time = 
     if (value && value !== best && (value.avg_cost ?? 0) < (best.avg_cost ?? 0)) value.best_value = true;
   }
   return {
+    threat,
     groups: groups.map((g) => ({ key: g.key, label: g.label, cases: g.rows.length, decided: decided(g.rows).length, kept: r3(keptRate(g.rows)) })),
     options: options.slice(0, top).map((o, i) => ({ rank: i + 1, ...o })),
     considered: options.length,
