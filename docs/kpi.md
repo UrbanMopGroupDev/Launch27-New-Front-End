@@ -19,7 +19,7 @@ a dated export.
 | Every formula and exclusion rule | `server/src/kpi/calc.js` (pure; tests in `server/test/kpi.test.js`) |
 | One read-only connector per source | `server/src/kpi/connectors.js` |
 | Synthetic data for dev and QA | `server/src/kpi/synthetic.js` |
-| Live connectors (production) | `server/src/kpi/live.js`, `server/src/kpi/syft.js`, `server/src/kpi/google.js` |
+| Live connectors (production) | `server/src/kpi/live.js`, `server/src/kpi/syft.js`, `server/src/kpi/google.js`, `server/src/kpi/places.js` |
 | Service and API (`/api/kpi/*`) | `server/src/kpi/service.js`, routes at the end of `server/src/inbox/api.js` |
 | Page | `web/src/pages/KpiScorecard.tsx`, `web/src/kpi/api.ts` |
 | Tables | `server/migrations/0029_kpi.sql` (`kpi_refresh_log`, `kpi_manual_reviews`), `server/migrations/0030_kpi_snapshots.sql` (`kpi_snapshots`), `server/migrations/0045_kpi_google_auth.sql` (`kpi_google_auth`) |
@@ -136,7 +136,21 @@ Production:
   - **Which listing.** The one whose name or city matches the brand's `googleLocation` (Ottawa).
     If more than one could match, the refresh fails listing them: set `GBP_LOCATION`
     (`accounts/<id>/locations/<id>`).
-  - **Until connected,** and until the first refresh, the tile reads the dated Google Takeout export
+  - **Until connected,** and until the first refresh, the tile reads Google Places public data
+    (below) when its key is set, otherwise the dated Google Takeout export.
+- **Google reviews from public data** (`server/src/kpi/places.js`, Places API (New)): needs no
+  Business Profile approval, only `GOOGLE_PLACES_API_KEY` (any Google Cloud project with Places API
+  (New) on and billing set; production only). The listing is found once by name (`googlePlaceQuery`)
+  or set with `GOOGLE_PLACES_PLACE_ID`. Read once a day (and by Refresh now) into `kpi_snapshots`
+  (source `google_places`): the listing's total and rating, and the up to 5 reviews Google shows
+  (picked as "most relevant", not newest), as ids, dates and stars.
+  - **Counts are exact:** each day's rise in Google's total is that day's new reviews.
+  - **Stars are partial:** known only for new reviews Google shows; the tile says "stars known for
+    X of Y", and averages use the known stars.
+  - History up to the export's last date comes from the export. Reviews between the export and the
+    first read that Google never shows count all time, with no date.
+  - Once the Business Profile API is read, it takes over (full history, every star).
+  - **Dated export (last resort):** the tile reads the dated Google Takeout export
     in `server/src/kpi/data/google-reviews-urbanmop.json`, labelled "not live"; months after its
     last review read "No data".
 
