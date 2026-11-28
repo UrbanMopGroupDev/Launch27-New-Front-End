@@ -991,6 +991,16 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
         count(DISTINCT k.id) FILTER (WHERE k.roles::text ILIKE '%cleaner%')::int AS cleaners, count(DISTINCT k.id) FILTER (WHERE k.roles::text ILIKE '%lead%')::int AS leads, count(DISTINCT k.id) FILTER (WHERE k.roles::text ILIKE '%customer%' OR k.roles::text ILIKE '%client%')::int AS customers,
         count(DISTINCT k.id) FILTER (WHERE k.brand <> 'urbanmop' AND k.brand <> 'residential')::int AS other_brand
         FROM complaint_cases c JOIN contact_identities i ON i.kind = 'email' AND i.value = lower(c.customer_email) JOIN contacts k ON k.id = i.contact_id WHERE ${live} AND c.l27_customer_id IS NULL`))[0],
+      // Who sends the unmatched emails: how many different senders, how concentrated, and from which
+      // mail domains (domains only, never addresses, and only domains with 3+ cases so a personal domain isn't shown). A few senders with many cases each are
+      // forwarders or systems, where the client is named in the message, not the sender.
+      unmatched_senders: (await q(`WITH s AS (SELECT lower(customer_email) AS e, count(*)::int AS n FROM complaint_cases c WHERE ${live} AND l27_customer_id IS NULL AND customer_email IS NOT NULL GROUP BY 1)
+        SELECT count(*)::int AS different_senders, count(*) FILTER (WHERE n = 1)::int AS senders_with_one_case, count(*) FILTER (WHERE n >= 5)::int AS senders_with_five_or_more,
+          coalesce(sum(n) FILTER (WHERE n >= 5), 0)::int AS cases_from_those, max(n)::int AS most_from_one_sender FROM s`))[0],
+      unmatched_sender_domains: pairs(await q(`SELECT split_part(lower(customer_email), '@', 2) AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} AND l27_customer_id IS NULL AND customer_email IS NOT NULL GROUP BY 1 HAVING count(*) >= 3 ORDER BY 2 DESC LIMIT 12`)),
+      // Contacts holding many email addresses each would mean contacts were merged that shouldn't have been.
+      contact_emails: (await q(`WITH n AS (SELECT contact_id, count(*)::int AS n FROM contact_identities WHERE kind = 'email' GROUP BY 1)
+        SELECT count(*)::int AS contacts_with_email, count(*) FILTER (WHERE n >= 5)::int AS with_five_or_more_emails, count(*) FILTER (WHERE n >= 50)::int AS with_fifty_or_more_emails, max(n)::int AS most_emails_on_one_contact FROM n`))[0],
       unmatched_by_category: pairs(await q(`SELECT category AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} AND l27_customer_id IS NULL GROUP BY 1 ORDER BY 2 DESC`)),
       matched_how: pairs(await q(`SELECT coalesce(client_match, 'when_read') AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} AND l27_customer_id IS NOT NULL GROUP BY 1`)),
       by_year: pairs(await q(`SELECT to_char(opened_at, 'YYYY') AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} GROUP BY 1 ORDER BY 1`)),
