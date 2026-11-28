@@ -2,6 +2,7 @@
 // for its shape): no database, no network, no clock except the `now` passed in. Every
 // formula and exclusion rule on the scorecard lives in this file and is tested in
 // server/test/kpi.test.js. The UI only renders what these functions return.
+import { reviewRows, starCounts } from './review-details.js';
 import { KPI_RULES, KPI_LABELS, KPI_SOURCES } from './config.js';
 
 // ---------- dates (local calendar strings: 'YYYY-MM-DD', 'YYYY-MM', 'YYYY-MM-DDTHH:MM') ----------
@@ -663,6 +664,16 @@ export function scorecard(ix, { brand, month, mode = 'month', range = null, now,
         { label: 'All-time average', value: last.alltime_avg != null ? `${last.alltime_avg.toFixed(2)} ★ (${last.alltime_count.toLocaleString('en-CA')} reviews)` : '—' },
         { label: 'Per 100 completed visits', value: visits ? (cur.num / visits * 100).toFixed(1) : '—' },
       ];
+      const shown = cur.parts.flatMap((p) => p.rows || []);
+      if (shown.length) {
+        const n = starCounts(shown);
+        const low = shown.filter((r) => r.rating != null && r.rating <= 3).length;
+        const unanswered = shown.filter((r) => r.replied === false).length;
+        tile.details.push({ label: 'Stars', value: [5, 4, 3, 2, 1].map((k) => `${k}★ ${n[k]}`).join(' · '), drill: 'reviews_stars' });
+        tile.details.push({ label: 'Low-star reviews (1–3★)', value: String(low), drill: 'reviews_low' });
+        if (shown.some((r) => r.replied != null)) tile.details.push({ label: 'Not replied to', value: String(unanswered), drill: 'reviews_unanswered' });
+        if (shown.some((r) => r.comment)) tile.details.push({ label: 'Reviews naming a cleaner', value: String(reviewRows(shown.filter((r) => r.comment), ix.ds.bookings).filter((r) => r.cleaners).length), drill: 'reviews_cleaners' });
+      }
       if (cur.num > rated && !cur.parts.some((p) => p.manual)) tile.badges.push({ tone: 'neutral', text: `Google public data: every new review is counted; stars are known for ${rated} of ${cur.num}` });
       if (cur.parts.some((p) => p.manual)) tile.badges.push({ tone: 'warning', text: 'Manual entry (Google API not connected)' });
       const exp = cur.parts.find((p) => p.export)?.export;
@@ -697,7 +708,8 @@ export function drill(ix, { kpi, month, mode = 'month', range = null, today, rul
   if (isRange) month = monthOf(range.to);
   const span = mode === 't12' ? 12 : 1;
   const months = monthsBetween(addMonths(month, 1 - span), month).filter((m) => m >= rules.firstMonth);
-  const parts = isRange ? ranged(ix, kpi === 'over_cancel' ? 'churn' : kpi, range, today, rules).parts.map((p) => ({ ...p, month: p.month || month, lines: p.lines || [] })) : months.map((m) => monthly(ix, kpi === 'over_cancel' ? 'churn' : kpi, m, today, rules));
+  const baseKpi = kpi === 'over_cancel' ? 'churn' : String(kpi).startsWith('reviews') ? 'reviews' : kpi;
+  const parts = isRange ? ranged(ix, baseKpi, range, today, rules).parts.map((p) => ({ ...p, month: p.month || month, lines: p.lines || [] })) : months.map((m) => monthly(ix, baseKpi, m, today, rules));
   // (a plan tile's parts are already narrowed to that plan's events and starting clients)
   const all = (pick) => parts.flatMap((p) => pick(p) || []);
   const period = isRange ? `${dayLabel(range.from)} – ${dayLabel(range.to)}` : span === 1 ? monthLabel(month) : `${monthLabel(months[0])} – ${monthLabel(month)}`;
@@ -720,8 +732,28 @@ export function drill(ix, { kpi, month, mode = 'month', range = null, today, rul
   if (kpi === 'complaints') {
     return { title: `${KPI_LABELS.complaints} · ${period}`, tabs: [{ key: 'complaints', label: 'Complaints', columns: [col('date', 'Date'), col('customer', 'Client'), col('source', 'Source'), col('detail', 'Detail'), col('booking_id', 'Booking'), col('saved_label', `Saved (${rules.savedDays}-day)`), col('outcome', 'Result')], rows: all((p) => p.rows.map((r) => ({ ...r, source: r.sources.join(' + '), saved_label: !r.counted ? '' : r.saved == null ? 'Too recent' : r.saved ? 'Yes' : 'No' }))) }] };
   }
-  if (kpi === 'reviews') {
-    return { title: `${KPI_LABELS.reviews} · ${period}`, tabs: [{ key: 'reviews', label: 'Reviews', columns: [col('date', 'Date'), col('reviewer', 'Reviewer'), col('rating', 'Rating', 'num'), col('comment', 'Comment')], rows: all((p) => p.rows.map((r) => ({ ...r, counted: true, outcome: '' }))) }] };
+  if (baseKpi === 'reviews') {
+    // Newest first. Client and cleaner are suggestions from names (src/kpi/review-details.js).
+    const reviews = all((p) => p.rows).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+    const rows = reviewRows(reviews, ix.ds.bookings);
+    const link = (key, label, href) => ({ key, label, link: href });
+    const text = (key, label) => ({ key, label, kind: 'text' });
+    const cols = [col('date', 'Date'), col('stars', 'Stars'), col('reviewer', 'Reviewer'), text('comment', 'Comment'), link('client', 'Client (by name)', 'client_href'), col('cleaners', 'Cleaners mentioned')];
+    if (rows.some((r) => r.replied)) cols.push(col('replied', 'Replied'), text('reply', 'Our reply'));
+    if (rows.some((r) => r.link_href)) cols.push(link('link', 'Google', 'link_href'));
+    const n = starCounts(reviews);
+    const known = Object.values(n).reduce((t, x) => t + x, 0);
+    const tabs = [
+      { key: 'reviews_all', label: 'All reviews', columns: cols, rows },
+      { key: 'reviews_low', label: 'Low stars (1–3★)', columns: cols, rows: rows.filter((r) => r.low) },
+      ...(rows.some((r) => r.replied) ? [{ key: 'reviews_unanswered', label: 'Not replied to', columns: cols, rows: rows.filter((r) => r.unanswered).reverse() }] : []),
+      { key: 'reviews_cleaners', label: 'Cleaners mentioned', columns: [col('cleaners', 'Cleaner'), col('date', 'Date'), col('stars', 'Stars'), col('reviewer', 'Reviewer'), text('comment', 'Comment'), link('client', 'Client (by name)', 'client_href')], rows: rows.filter((r) => r.cleaners) },
+      { key: 'reviews_stars', label: 'Stars', columns: [col('stars', 'Stars'), col('count', 'Reviews', 'num'), col('share', 'Share', 'pct')], rows: [5, 4, 3, 2, 1].map((k) => ({ stars: `${'★'.repeat(k)}${'☆'.repeat(5 - k)}`, count: n[k], share: known ? (n[k] / known) * 100 : null, counted: true, outcome: '' })).concat(reviews.length > known ? [{ stars: 'Stars not shown by Google', count: reviews.length - known, share: null, counted: true, outcome: '' }] : []) },
+    ];
+    // A tile detail opens the drill on its own tab.
+    const first = tabs.findIndex((t) => t.key === kpi);
+    if (first > 0) tabs.unshift(tabs.splice(first, 1)[0]);
+    return { title: `${KPI_LABELS.reviews} · ${period}`, tabs };
   }
   return null;
 }
