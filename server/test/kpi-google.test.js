@@ -1,5 +1,6 @@
 // Live Google reviews (src/kpi/google.js): connecting, reading, and what the scorecard shows.
 import { test, describe } from 'node:test';
+import { parseTakeout } from '../src/complaints/reviews.js';
 import assert from 'node:assert/strict';
 import { openDb } from '../src/db/index.js';
 import { KPI_BRANDS } from '../src/kpi/config.js';
@@ -114,6 +115,23 @@ describe('Google reviews, live (Business Profile API)', () => {
     // Disconnect forgets the sign-in; the last snapshot stays.
     await kpi.googleDisconnect();
     assert.equal((await google.status()).connected, false);
+    await db.close();
+  });
+
+  test('each read hands the full reviews to the complaint engine; its failure never fails the refresh', async () => {
+    const db = await openDb({});
+    const g = fakeGoogle();
+    const got = [];
+    const google = createGoogleBusinessKpi({ db, gbp: { ...gbp, refreshToken: 'rt-secret' }, secret: SECRET, brand, fetchImpl: g.fetchImpl, log: quiet, now: () => NOW, onReviews: (rows) => { got.push(rows); throw new Error('matching broke'); } });
+    await google.job.start();
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(got.length, 1);
+    assert.equal(got[0].length, 6, 'every page');
+    assert.deepEqual([got[0][0].reviewer.displayName, got[0][0].comment], ['Ada Example', 'Great'], 'names and text, for matching');
+    assert.equal((await google.status()).error, null, 'the scorecard refresh still succeeded');
+    // The same rows go straight into the complaint engine's importer.
+    const rows = parseTakeout({ reviews: got[0] });
+    assert.deepEqual(rows.map((r) => [r.review_id, r.stars]), [['r1', 5], ['r2', 4], ['r3', 3], ['r5', 1], ['r6', 5]]);
     await db.close();
   });
 

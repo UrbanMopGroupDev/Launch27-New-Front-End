@@ -171,6 +171,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       await enrich(refreshFrom && refreshFrom < from ? refreshFrom : from, to, ctx, settings, note);
       if (solutionReader) await guarded('Solutions', () => mineSolutions({ note }));
       // 'partial': it finished, but a source failed (shown on the page with the reason).
+      logCoverage().catch(() => {});
       const status = runLog.some((l) => l.level === 'error') ? 'partial' : 'done';
       await db.query('UPDATE complaint_runs SET finished_at = now(), status = $3, log = $2::jsonb WHERE id = $1', [runRow.id, json(runLog), status]);
       return { run_id: Number(runRow.id), cases: saved };
@@ -859,6 +860,79 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     return { ...t, low };
   }
 
+  // ---------- coverage: how much of the history has an answer ----------
+  // Counts only (no names, no text): logged at start-up and after each run, so the state of the
+  // data can be read from the logs without anyone opening the database.
+  async function coverage() {
+    const q = async (sql) => many(db, sql).catch((err) => [{ error: err.message }]);
+    const pairs = (rows, k = 'k') => Object.fromEntries(rows.map((r) => [r[k] ?? 'none', Number(r.n)]));
+    const live = 'c.merged_into IS NULL AND c.excluded_at IS NULL';
+    const [totals] = await q(`SELECT count(*)::int AS cases, min(opened_at)::date::text AS first, max(opened_at)::date::text AS last,
+        count(*) FILTER (WHERE l27_customer_id IS NOT NULL)::int AS matched_client, count(*) FILTER (WHERE l27_booking_id IS NOT NULL)::int AS matched_booking,
+        count(*) FILTER (WHERE hard_route IS NOT NULL)::int AS escalated, count(*) FILTER (WHERE opened_at > now() - interval '60 days')::int AS under_60_days,
+        count(*) FILTER (WHERE opened_at > now() - interval '365 days')::int AS last_12_months
+      FROM complaint_cases c WHERE ${live}`);
+    const [dropped] = await q('SELECT count(*) FILTER (WHERE merged_into IS NOT NULL)::int AS merged, count(*) FILTER (WHERE excluded_at IS NOT NULL)::int AS excluded FROM complaint_cases');
+    const o60 = await q(`SELECT coalesce(o.outcome, 'no_outcome_row') AS k, count(*)::int AS n FROM complaint_cases c LEFT JOIN complaint_outcomes o ON o.case_id = c.id AND o.day = 60 WHERE ${live} GROUP BY 1`);
+    const o120 = await q(`SELECT o.outcome AS k, count(*)::int AS n FROM complaint_cases c JOIN complaint_outcomes o ON o.case_id = c.id AND o.day = 120 WHERE ${live} GROUP BY 1`);
+    // Why a case has no verdict: no Launch27 client, a client but no visits in the 12-month snapshot, or simply too recent.
+    const [why] = await q(`SELECT count(*) FILTER (WHERE c.l27_customer_id IS NULL)::int AS no_client,
+        count(*) FILTER (WHERE c.l27_customer_id IS NOT NULL AND j.case_id IS NULL)::int AS client_but_no_visits,
+        count(*) FILTER (WHERE j.case_id IS NOT NULL AND c.opened_at > now() - interval '60 days')::int AS too_recent,
+        count(*) FILTER (WHERE j.case_id IS NOT NULL AND j.data_from IS NOT NULL AND c.opened_at::date < j.data_from)::int AS before_history_starts,
+        min(j.data_from)::text AS history_from
+      FROM complaint_cases c LEFT JOIN complaint_journeys j ON j.case_id = c.id
+      WHERE ${live} AND NOT EXISTS (SELECT 1 FROM complaint_outcomes o WHERE o.case_id = c.id AND o.outcome NOT IN ('pending'))`);
+    const [value] = await q(`SELECT count(*) FILTER (WHERE j.spend_12m IS NOT NULL)::int AS with_spend, count(*) FILTER (WHERE j.spend_12m < 1500)::int AS low, count(*) FILTER (WHERE j.spend_12m >= 1500 AND j.spend_12m < 5000)::int AS mid, count(*) FILTER (WHERE j.spend_12m >= 5000)::int AS high,
+        count(*) FILTER (WHERE j.regular_cleaner_left)::int AS regular_cleaner_left, count(*) FILTER (WHERE j.cleaner_changed_last_visit)::int AS cleaner_changed
+      FROM complaint_cases c JOIN complaint_journeys j ON j.case_id = c.id WHERE ${live}`);
+    const [sol] = await q(`SELECT count(*)::int AS looked_at, count(*) FILTER (WHERE read_by = 'claude')::int AS read, count(*) FILTER (WHERE read_by = 'none')::int AS no_conversation, coalesce(sum(thread_messages), 0)::int AS messages_read FROM complaint_solutions`);
+    const [inbox] = await q(`SELECT (SELECT count(*) FROM conversations)::int AS conversations, (SELECT count(*) FROM conversations WHERE source = 'kustomer')::int AS from_kustomer, (SELECT count(*) FROM messages)::int AS messages,
+        (SELECT min(created_at)::date::text FROM messages) AS first_message, (SELECT count(*) FROM contacts)::int AS contacts, (SELECT count(*) FROM contacts WHERE l27_customer_id IS NOT NULL)::int AS contacts_with_l27`);
+    const [reviews] = await q('SELECT count(*)::int AS imported, count(*) FILTER (WHERE case_id IS NOT NULL)::int AS matched FROM google_reviews');
+    const [checks] = await q(`SELECT count(*)::int AS checked, count(*) FILTER (WHERE cause_verdict IS NOT NULL)::int AS cause_checked, count(*) FILTER (WHERE cause_verdict = 'correct')::int AS cause_right FROM complaint_reviews`);
+    const [tracker] = await q(`SELECT count(*)::int AS complaints, count(*) FILTER (WHERE ltv_of_client > 0)::int AS with_ltv, count(*) FILTER (WHERE state = 'done' OR status = 'Closed')::int AS closed, count(*) FILTER (WHERE final_resolution_category IS NOT NULL AND final_resolution_category <> '')::int AS with_final_resolution FROM complaint_records`);
+    const runs = await q(`SELECT status AS k, count(*)::int AS n FROM complaint_runs GROUP BY 1`);
+    const [mined] = await q(`SELECT min(window_from)::text AS "from", max(window_to)::text AS "to", max(finished_at)::text AS last_finished FROM complaint_runs WHERE status IN ('done', 'partial')`);
+    return {
+      claude: !!classifier,
+      solution_mining: !!solutionReader,
+      totals,
+      dropped,
+      by_source: pairs(await q(`SELECT source AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} GROUP BY 1`)),
+      by_year: pairs(await q(`SELECT to_char(opened_at, 'YYYY') AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} GROUP BY 1 ORDER BY 1`)),
+      by_category: pairs(await q(`SELECT category AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} GROUP BY 1 ORDER BY 2 DESC`)),
+      classified_by: pairs(await q(`SELECT classified_by AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} GROUP BY 1`)),
+      outcome_60: pairs(o60),
+      outcome_120_one_time: pairs(o120),
+      no_verdict_why: why,
+      journey: value,
+      cause_set_by: pairs(await q(`SELECT cause_by AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} GROUP BY 1`)),
+      causes: pairs(await q(`SELECT cause AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} GROUP BY 1 ORDER BY 2 DESC`)),
+      tones: pairs(await q(`SELECT tone AS k, count(*)::int AS n FROM complaint_cases c WHERE ${live} GROUP BY 1`)),
+      what_we_did: pairs(await q(`SELECT coalesce(r.rung, r.action) AS k, count(DISTINCT r.case_id)::int AS n FROM complaint_resolutions r JOIN complaint_cases c ON c.id = r.case_id WHERE ${live} GROUP BY 1 ORDER BY 2 DESC`)),
+      what_we_did_source: pairs(await q(`SELECT r.source AS k, count(DISTINCT r.case_id)::int AS n FROM complaint_resolutions r GROUP BY 1`)),
+      cases_with_any_response: Number((await q(`SELECT count(DISTINCT r.case_id)::int AS n FROM complaint_resolutions r JOIN complaint_cases c ON c.id = r.case_id WHERE ${live}`))[0]?.n) || 0,
+      cases_with_cost: Number((await q(`SELECT count(DISTINCT k.case_id)::int AS n FROM complaint_costs k JOIN complaint_cases c ON c.id = k.case_id WHERE ${live} AND k.amount > 0`))[0]?.n) || 0,
+      solutions: sol,
+      solution_final: pairs(await q(`SELECT final_kind AS k, count(*)::int AS n FROM complaint_solutions WHERE read_by = 'claude' GROUP BY 1 ORDER BY 2 DESC`)),
+      solution_client_end: pairs(await q(`SELECT client_end AS k, count(*)::int AS n FROM complaint_solutions WHERE read_by = 'claude' GROUP BY 1`)),
+      inbox,
+      reviews,
+      checks,
+      tracker,
+      tracker_resolutions: pairs(await q(`SELECT final_resolution_category AS k, count(*)::int AS n FROM complaint_records WHERE final_resolution_category IS NOT NULL AND final_resolution_category <> '' GROUP BY 1 ORDER BY 2 DESC LIMIT 20`)),
+      runs: pairs(runs),
+      mined,
+    };
+  }
+  // One log line per section, so no line is too long for the log viewer.
+  async function logCoverage() {
+    const c = await coverage();
+    for (const [section, value] of Object.entries(c)) log.info('complaints coverage', { section, value: JSON.stringify(value) });
+    return c;
+  }
+
   async function status() {
     const last = await one(db, 'SELECT id, started_at, finished_at, status, window_from, window_to, log FROM complaint_runs ORDER BY id DESC LIMIT 1');
     // Which periods have been mined (finished runs), so the page can say what a date range covers.
@@ -1050,7 +1124,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     return buildReviewStats(rows, waiting);
   }
 
-  return { importReviews, linkReviews, reviewsSummary, rankFor, mineSolutions, getSettings, saveSettings, kustomerDiscover, start, run, status, markInterrupted, maybeRun, listCases, getCase, setCategory, playbook, clients, sources, reviewQueue, reviewCase, reviewStats };
+  return { coverage, logCoverage, importReviews, linkReviews, reviewsSummary, rankFor, mineSolutions, getSettings, saveSettings, kustomerDiscover, start, run, status, markInterrupted, maybeRun, listCases, getCase, setCategory, playbook, clients, sources, reviewQueue, reviewCase, reviewStats };
 }
 
 // Measured accuracy from hand checks: of the cases the engine put in a category, how many a
