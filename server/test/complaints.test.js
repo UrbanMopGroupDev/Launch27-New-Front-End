@@ -1272,3 +1272,59 @@ describe('complaints: coverage summary', () => {
     await db.close();
   });
 });
+
+describe('complaints: tying unmatched cases to clients', () => {
+  test('through a contact, a contact\'s name, or the sender\'s full name; never a first name, a shared name or our own staff', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await schedule.sync();
+    await reports.sync();
+    const snap = await reports.visitsSnapshot();
+    const to = snap.to;
+    const from = new Date(Date.parse(to) - 182 * 86_400_000).toISOString().slice(0, 10);
+    const complaints = createComplaints({ db, config, reports, fetchImpl, log: quiet });
+    await complaints.run({ from, to });
+    // Three Residential clients whose full name nobody else has, with visits a year back.
+    const cov0 = await complaints.coverage();
+    const names = new Map();
+    for (const v of snap.visits) names.set(v.customer, (names.get(v.customer) || new Set()).add(v.customer_id));
+    const all = await complaints.listCases({ from: '2000-01-01', to: '2999-12-31' });
+    const known = all.filter((c) => c.l27_customer_id && /\S+\s+\S+/.test(c.customer_name || '') && names.get(c.customer_name)?.size === 1);
+    assert.ok(known.length >= 3, 'needs three matched clients with unique full names');
+    const [A, B, C] = known;
+    const opened = new Date(Date.parse(to) - 100 * 86_400_000).toISOString();
+    const add = async (key, name, email) => Number((await db.query(
+      `INSERT INTO complaint_cases (brand, source, source_id, opened_at, status, category, customer_name, customer_email, classified_by) VALUES ('residential', 'gmail', $1, $2, 'resolved', 'quality_missed', $3, $4, 'rules') RETURNING id`,
+      [`test:${key}`, opened, name, email],
+    )).rows[0].id);
+    const viaContact = await add('a', 'Somebody Else', 'other-address@example.com');
+    const viaContactName = await add('b', null, 'second-address@example.com');
+    const viaName = await add('c', C.customer_name.toUpperCase(), 'unknown@example.com');
+    const firstNameOnly = await add('d', C.customer_name.split(' ')[0], 'nobody@example.com');
+    const ourOwn = await add('e', C.customer_name, 'agent@urbanmop.ca');
+    const k1 = (await db.query('INSERT INTO contacts (name, l27_customer_id) VALUES ($1, $2) RETURNING id', ['Whoever', A.l27_customer_id])).rows[0].id;
+    await db.query("INSERT INTO contact_identities (contact_id, kind, value) VALUES ($1, 'email', 'other-address@example.com')", [k1]);
+    const k2 = (await db.query('INSERT INTO contacts (name) VALUES ($1) RETURNING id', [B.customer_name])).rows[0].id;
+    await db.query("INSERT INTO contact_identities (contact_id, kind, value) VALUES ($1, 'email', 'second-address@example.com')", [k2]);
+
+    await complaints.run({ from, to });
+    const get = async (id) => (await db.query('SELECT l27_customer_id, client_match FROM complaint_cases WHERE id = $1', [id])).rows[0];
+    assert.deepEqual([Number((await get(viaContact)).l27_customer_id), (await get(viaContact)).client_match], [Number(A.l27_customer_id), 'contact']);
+    assert.deepEqual([Number((await get(viaContactName)).l27_customer_id), (await get(viaContactName)).client_match], [Number(B.l27_customer_id), 'contact_name']);
+    assert.deepEqual([Number((await get(viaName)).l27_customer_id), (await get(viaName)).client_match], [Number(C.l27_customer_id), 'name']);
+    assert.equal((await get(firstNameOnly)).l27_customer_id, null, 'a first name alone never matches');
+    assert.equal((await get(ourOwn)).l27_customer_id, null, 'our own staff are not clients');
+    // Tied outside the run's dates, they still get a journey and an outcome.
+    const d = await complaints.getCase(viaContact);
+    assert.ok(d.journey, 'journey computed for the newly tied case');
+    assert.ok(d.outcomes.length > 0, 'and an outcome');
+    const cov = await complaints.coverage();
+    assert.equal(cov.totals.matched_client, cov0.totals.matched_client + 3);
+    assert.deepEqual([cov.matched_how.contact, cov.matched_how.contact_name, cov.matched_how.name], [1, 1, 1]);
+    assert.equal(cov.unmatched_have.from_our_own_address, 1);
+    await db.close();
+  });
+});
