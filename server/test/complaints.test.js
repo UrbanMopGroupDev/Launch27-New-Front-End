@@ -1339,3 +1339,35 @@ describe('complaints: tying unmatched cases to clients', () => {
     await db.close();
   });
 });
+
+describe('complaints: step 0 diagnostics', () => {
+  test('per-response snapshot, month counts and the unmatched sample log no names or addresses', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await schedule.sync();
+    await reports.sync();
+    const to = (await reports.visitsSnapshot()).to;
+    const from = new Date(Date.parse(to) - 182 * 86_400_000).toISOString().slice(0, 10);
+    const lines = [];
+    const complaints = createComplaints({ db, config, reports, fetchImpl, log: { ...quiet, info: (msg, a) => lines.push([msg, a]) } });
+    await complaints.run({ from, to });
+    await db.query(`INSERT INTO complaint_cases (brand, source, source_id, opened_at, status, category, customer_name, customer_email, classified_by) VALUES ('residential', 'gmail', 'test:diag', now() - interval '80 days', 'resolved', 'quality_missed', 'Zed Unknownperson', 'zed.unknown@gmail.com', 'rules')`);
+    lines.length = 0;
+    const c = await complaints.logCoverage();
+    assert.ok(Object.keys(c.by_month).every((k) => /^\d{4}_[A-Z][a-z]{2}$/.test(k)), Object.keys(c.by_month).join(','));
+    assert.ok(Object.keys(c.per_response_before).some((k) => /^recurring /.test(k)));
+    const first = Object.values(c.per_response_before)[0];
+    assert.deepEqual(Object.keys(first), ['cases', 'decided', 'kept', 'partly', 'lost', 'avg_cost', 'with_cost', 'threat_review', 'threat_leave']);
+    const sample = lines.filter(([m]) => m === 'complaints unmatched case').map(([, a]) => JSON.parse(a.value));
+    const row = sample.find((r) => r.email === 'personal_mail' && r.sender_name_words === 2);
+    assert.ok(row, JSON.stringify(sample).slice(0, 300));
+    assert.deepEqual([row.sender_name_residential_clients, row.contacts_with_this_email, row.name_looks_like, row.l27_email_lookup], [0, 0, 'a_full_name', 'no_login']);
+    const text = JSON.stringify(lines);
+    assert.ok(!/zed|unknownperson|gmail\.com/i.test(text), 'no names or addresses in the log');
+    assert.ok(!text.includes('"error"'), text.slice(0, 400));
+    await db.close();
+  });
+});
