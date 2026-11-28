@@ -1245,3 +1245,30 @@ describe('complaints: Google reviews', () => {
     await db.close();
   });
 });
+
+describe('complaints: coverage summary', () => {
+  test('counts only: every section answers, with no names in it', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await schedule.sync();
+    await reports.sync();
+    const to = (await reports.visitsSnapshot()).to;
+    const from = new Date(Date.parse(to) - 182 * 86_400_000).toISOString().slice(0, 10);
+    const lines = [];
+    const complaints = createComplaints({ db, config, reports, fetchImpl, log: { ...quiet, info: (msg, a) => lines.push([msg, a]) } });
+    await complaints.run({ from, to });
+    const all = await complaints.listCases({ from, to });
+    const c = await complaints.coverage();
+    assert.equal(c.totals.cases, all.length);
+    assert.equal(Object.values(c.by_source).reduce((a, b) => a + b, 0), all.length);
+    assert.equal(Object.values(c.outcome_60).reduce((a, b) => a + b, 0), all.length, 'every case has one 60-day answer or "no_outcome_row"');
+    assert.ok(!JSON.stringify(c).includes('"error"'), JSON.stringify(c).slice(0, 400));
+    for (const n of all.map((x) => x.customer_name).filter(Boolean)) assert.ok(!JSON.stringify(c).includes(n), 'no client names');
+    await complaints.logCoverage();
+    assert.ok(lines.some(([m, a]) => m === 'complaints coverage' && a.section === 'totals'));
+    await db.close();
+  });
+});
