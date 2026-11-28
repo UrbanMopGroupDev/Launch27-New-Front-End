@@ -16,6 +16,7 @@ import { parseGmailMessage } from '../inbox/email/mime.js';
 import { classifyRules, mergeClassification, amountsIn, causeFacts, categoryLabel, CAUSE_KEYS } from './taxonomy.js';
 import { formatThread, normalizeSolution, offerToResolution } from './solutions.js';
 import { caseRows, rankResponses } from './rank.js';
+import { parseTakeout, matchCase, nameKey as reviewerKey } from './reviews.js';
 import { redact } from './redact.js';
 import { journeyAt, outcomeAt, oneTimeOutcomeAt, cleanerStatsIndex, cleanerLastWorkedIndex, recleanCost, unitEconomics } from './journey.js';
 import { normalizeSettings, rungForRefund } from './settings.js';
@@ -166,6 +167,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
       if (config.slackBotToken) await guarded('Slack', () => fromSlack(from, to, ctx, note));
       else note('warn', 'Slack refund history skipped: SLACK_BOT_TOKEN is not set');
 
+      await linkReviews().catch((err) => note('warn', `Google reviews not matched: ${err.message}`));
       await enrich(refreshFrom && refreshFrom < from ? refreshFrom : from, to, ctx, settings, note);
       if (solutionReader) await guarded('Solutions', () => mineSolutions({ note }));
       // 'partial': it finished, but a source failed (shown on the page with the reason).
@@ -482,6 +484,9 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
   async function enrich(from, to, ctx, settings, note) {
     const rows = await many(db, `SELECT * FROM complaint_cases WHERE merged_into IS NULL AND opened_at >= $1 AND opened_at < $2::date + 1 ORDER BY opened_at`, [from, to]);
     const allCases = await many(db, 'SELECT id, l27_customer_id, opened_at FROM complaint_cases WHERE merged_into IS NULL');
+    // The Google review that followed each complaint, if one was matched (the lowest, if several).
+    const reviewOf = new Map();
+    for (const r of await many(db, 'SELECT case_id, stars FROM google_reviews WHERE case_id IS NOT NULL ORDER BY stars DESC')) reviewOf.set(Number(r.case_id), { stars: Number(r.stars), platform: 'google' });
     const todayMs = now();
     let refundsFound = 0;
     let recleans = 0;
@@ -580,7 +585,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
         const days = oneTime ? [90, 120] : [30, 60, 90];
         await db.query('DELETE FROM complaint_outcomes WHERE case_id = $1 AND NOT (day = ANY($2::int[]))', [c.id, days]);
         for (const day of days) {
-          const o = oneTime ? oneTimeOutcomeAt(paid, at, day, { today: todayMs, repeatCaseId: repeat?.id || null }) : outcomeAt(paid, at, day, { today: todayMs, repeatCaseId: repeat?.id || null });
+          const o = oneTime ? oneTimeOutcomeAt(paid, at, day, { today: todayMs, repeatCaseId: repeat?.id || null }) : outcomeAt(paid, at, day, { today: todayMs, repeatCaseId: repeat?.id || null, negativeReview: reviewOf.get(Number(c.id)) || null });
           await db.query(
             `INSERT INTO complaint_outcomes (case_id, day, still_booking, next_booking_on, last_booking_on, public_review_stars, public_review_platform, repeat_case_id, outcome, checked_at)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
@@ -802,6 +807,58 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     return rankResponses(await rankingRows(), { category, cause, one_time, threat, value }, { now: now() });
   }
 
+  // ---------- Google reviews ----------
+  /** Store the reviews of one export file (idempotent: a review imported twice is updated). */
+  async function importReviews(file, userId = null) {
+    const rows = parseTakeout(file);
+    let added = 0;
+    for (const r of rows) {
+      const res = await one(
+        db,
+        `INSERT INTO google_reviews (review_id, reviewer_name, stars, comment, created_at, updated_at, reply, reply_at, imported_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         ON CONFLICT (review_id) DO UPDATE SET reviewer_name = EXCLUDED.reviewer_name, stars = EXCLUDED.stars, comment = EXCLUDED.comment,
+           updated_at = EXCLUDED.updated_at, reply = EXCLUDED.reply, reply_at = EXCLUDED.reply_at
+         RETURNING (xmax = 0) AS inserted`,
+        [r.review_id, r.reviewer_name, r.stars, r.comment, r.created_at, r.updated_at, r.reply, r.reply_at, userId],
+      );
+      if (res?.inserted) added++;
+    }
+    const linked = await linkReviews();
+    if (userId != null) await db.query("INSERT INTO audit_log (actor_id, action, object_type, object_id, detail) VALUES ($1, 'complaint.reviews_imported', 'google_reviews', $2, $3::jsonb)", [userId, String(rows.length), json({ read: rows.length, added })]).catch(() => {});
+    rankCache = null;
+    return { read: rows.length, added, updated: rows.length - added, ...linked };
+  }
+
+  /** Match every review to the complaint it followed, and to a contact of exactly that name. */
+  async function linkReviews() {
+    const reviews = await many(db, 'SELECT review_id, reviewer_name, created_at, case_id FROM google_reviews');
+    if (!reviews.length) return { matched: 0 };
+    const cases = await many(db, 'SELECT id, customer_name, opened_at FROM complaint_cases WHERE merged_into IS NULL AND excluded_at IS NULL AND customer_name IS NOT NULL');
+    const contacts = new Map();
+    for (const c of await many(db, 'SELECT id, name FROM contacts WHERE name IS NOT NULL')) {
+      const k = reviewerKey(c.name);
+      if (k) contacts.set(k, contacts.has(k) ? null : Number(c.id)); // two contacts of one name: no link
+    }
+    let matched = 0;
+    for (const r of reviews) {
+      const caseId = matchCase(r, cases);
+      if (caseId) matched++;
+      const contactId = contacts.get(reviewerKey(r.reviewer_name)) ?? null;
+      await db.query('UPDATE google_reviews SET case_id = $2, contact_id = $3 WHERE review_id = $1', [r.review_id, caseId, contactId]);
+    }
+    return { matched };
+  }
+
+  /** What's imported, and the low reviews with what they were matched to (for a person to check). */
+  async function reviewsSummary() {
+    const t = await one(db, `SELECT count(*)::int AS imported, count(*) FILTER (WHERE stars <= 2)::int AS negative, count(*) FILTER (WHERE case_id IS NOT NULL)::int AS matched,
+      count(*) FILTER (WHERE stars <= 2 AND case_id IS NOT NULL)::int AS negative_matched, min(created_at) AS first_at, max(created_at) AS last_at FROM google_reviews`);
+    const low = await many(db, `SELECT g.review_id, g.reviewer_name, g.stars, g.comment, g.created_at, g.reply IS NOT NULL AS replied, g.case_id, g.contact_id, c.opened_at AS case_opened_at, c.category AS case_category
+      FROM google_reviews g LEFT JOIN complaint_cases c ON c.id = g.case_id WHERE g.stars <= 3 ORDER BY g.created_at DESC LIMIT 200`);
+    return { ...t, low };
+  }
+
   async function status() {
     const last = await one(db, 'SELECT id, started_at, finished_at, status, window_from, window_to, log FROM complaint_runs ORDER BY id DESC LIMIT 1');
     // Which periods have been mined (finished runs), so the page can say what a date range covers.
@@ -904,7 +961,9 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     }
     const byId = await visitIndex();
     for (const c of cases) c.one_time = visitInfo(byId.get(Number(c.l27_booking_id)), c.frequency).client_type === 'one_time';
-    return buildPlaybook({ cases, resolutions, costs, outcomes, solutions, visits, from, to, settings, today: isoDay(now()), mining: !!solutionReader });
+    const reviews = ids.length ? await many(db, 'SELECT case_id, stars FROM google_reviews WHERE case_id = ANY($1::bigint[])', [ids]) : [];
+    const reviewTotals = await one(db, 'SELECT count(*)::int AS imported, count(*) FILTER (WHERE stars <= 2)::int AS negative, min(created_at) AS first_at, max(created_at) AS last_at FROM google_reviews');
+    return buildPlaybook({ cases, resolutions, costs, outcomes, solutions, reviews, reviewTotals, visits, from, to, settings, today: isoDay(now()), mining: !!solutionReader });
   }
 
   // Clients view: who complains repeatedly, and who looks at risk of leaving right now.
@@ -991,7 +1050,7 @@ export function createComplaints({ db, config, reports, fetchImpl = fetch, gmail
     return buildReviewStats(rows, waiting);
   }
 
-  return { rankFor, mineSolutions, getSettings, saveSettings, kustomerDiscover, start, run, status, markInterrupted, maybeRun, listCases, getCase, setCategory, playbook, clients, sources, reviewQueue, reviewCase, reviewStats };
+  return { importReviews, linkReviews, reviewsSummary, rankFor, mineSolutions, getSettings, saveSettings, kustomerDiscover, start, run, status, markInterrupted, maybeRun, listCases, getCase, setCategory, playbook, clients, sources, reviewQueue, reviewCase, reviewStats };
 }
 
 // Measured accuracy from hand checks: of the cases the engine put in a category, how many a
