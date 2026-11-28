@@ -57,7 +57,8 @@ export interface GoogleStatus { configured: boolean; connected?: boolean; email?
 /** Google Places public data: exact review counts, stars only for the reviews Google shows. */
 export interface PlacesStatus { source: 'places'; total: number | null; rating: number | null; title: string | null; refreshed_at: string | null; error: string | null }
 export interface ManualReviews { new_reviews: number; avg_rating: number; alltime_avg: number; alltime_count: number }
-export interface DrillColumn { key: string; label: string; kind?: 'money' | 'pct' | 'num' }
+/** `link` names the row field holding the cell's link (a portal path or a https:// address). `text` is long text that wraps. */
+export interface DrillColumn { key: string; label: string; kind?: 'money' | 'pct' | 'num' | 'text'; link?: string }
 export type DrillRow = Record<string, string | number | boolean | null> & { counted?: boolean; outcome?: string };
 export interface Drill { title: string; tabs: { key: string; label: string; columns: DrillColumn[]; rows: DrillRow[]; defaultFilter?: string }[] }
 
