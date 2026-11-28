@@ -252,22 +252,22 @@ function loadGoogleExport(name) {
  * Google reviews: the Business Profile API when configured (full history, every star), with
  * Google Places public data (exact counts, some stars) behind it, then the dated export.
  */
-function googleReviews({ db, config, brand, fetchImpl, log, now }) {
+function googleReviews({ db, config, brand, fetchImpl, log, now, onGoogleReviews = null }) {
   const exported = createGoogleExportKpi({ brand });
   const places = config.places ? createGooglePlacesKpi({ db, places: config.places, brand, loadExport: loadGoogleExport, fetchImpl, log, now }) : null;
-  if (config.gbp) return createGoogleBusinessKpi({ db, gbp: config.gbp, secret: config.sessionSecret, brand, fallback: places || exported, fetchImpl, log, now });
+  if (config.gbp) return createGoogleBusinessKpi({ db, gbp: config.gbp, secret: config.sessionSecret, brand, fallback: places || exported, onReviews: onGoogleReviews, fetchImpl, log, now });
   return places || exported;
 }
 
 const notConnected = (key, note) => ({ key, label: KPI_SOURCES[key].label, mode: 'not_connected', pull: async () => ({ refreshed_at: null, note }) });
 
 /** Production connectors: Launch27, Kustomer, Syft (Gmail) and Google live; QuickBooks not connected yet. */
-export function createLiveKpiConnectors({ db, config, fetchImpl, syncBearer, brand, log, now, gmail = null }) {
+export function createLiveKpiConnectors({ db, config, fetchImpl, syncBearer, brand, log, now, gmail = null, onGoogleReviews = null }) {
   const syft = gmail && config.kpiSyftMailbox && brand.syftReport ? createSyftKpi({ db, gmail, mailbox: config.kpiSyftMailbox, brand, log, now }) : notConnected('syft', gmail ? 'no mailbox set for the Syft report (KPI_SYFT_MAILBOX)' : 'Gmail is not connected');
   return [
     createLaunch27Kpi({ db, config, fetchImpl, syncBearer, brand, log, now }),
     createKustomerKpi({ db, brand }),
-    googleReviews({ db, config, brand, fetchImpl, log, now }),
+    googleReviews({ db, config, brand, fetchImpl, log, now, onGoogleReviews }),
     notConnected('qbo', 'QuickBooks is not connected yet'),
     syft,
   ];

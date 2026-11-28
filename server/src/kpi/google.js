@@ -85,7 +85,7 @@ function explain(status, data) {
  * Live Google reviews connector for one brand. `gbp` is config.gbp ({ clientId, clientSecret,
  * refreshToken?, location? }); `fallback` (the dated export) serves until the first sync.
  */
-export function createGoogleBusinessKpi({ db, gbp, secret, brand, fallback = null, fetchImpl = fetch, log = { info() {}, warn() {}, error() {} }, now = () => Date.now() }) {
+export function createGoogleBusinessKpi({ db, gbp, secret, brand, fallback = null, onReviews = null, fetchImpl = fetch, log = { info() {}, warn() {}, error() {} }, now = () => Date.now() }) {
   let running = null;
   let lastAttempt = 0;
   let lastError = null;
@@ -166,12 +166,14 @@ export function createGoogleBusinessKpi({ db, gbp, secret, brand, fallback = nul
     try {
       const loc = await findLocation();
       const reviews = [];
+      const full = []; // as Google sent them, for onReviews only: never stored by the scorecard
       let summary = null;
       let pageToken;
       do {
         const page = await get(`${REVIEWS}/${loc.name}/reviews?${new URLSearchParams({ pageSize: '50', orderBy: 'updateTime desc', ...(pageToken ? { pageToken } : {}) })}`);
         summary = summary || { total: Number(page.totalReviewCount) || 0, average: Number(page.averageRating) || null };
         for (const r of page.reviews || []) {
+          if (onReviews) full.push(r);
           const rating = STARS[r.starRating];
           if (!rating || !r.createTime) continue; // no rating: nothing to count
           reviews.push({ id: String(r.reviewId || r.name || reviews.length), date: localDate(Date.parse(r.createTime)), rating });
@@ -179,6 +181,9 @@ export function createGoogleBusinessKpi({ db, gbp, secret, brand, fallback = nul
         pageToken = page.nextPageToken;
       } while (pageToken && reviews.length < 20_000);
       reviews.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+      // The complaint engine matches reviews to complaints (complaints/reviews.js): hand it the
+      // full reviews each time they are read. Its failure never fails the scorecard's refresh.
+      if (onReviews && full.length) Promise.resolve().then(() => onReviews(full)).catch((err) => log.warn('google reviews: complaint matching failed', { error: err.message }));
       const taken = new Date(now()).toISOString();
       const data = { location: loc.name, title: loc.title, reviews, total: summary?.total ?? reviews.length, average: summary?.average ?? null };
       await db.query(

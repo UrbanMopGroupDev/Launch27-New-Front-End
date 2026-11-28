@@ -121,7 +121,10 @@ if (config.twilioSms) {
 }
 // Complaint Resolution Engine (Phase 1: history miner + playbook). Read-only on every source.
 // KPI scorecard. In production it reads the Syft report with the same read-only Gmail client.
-const kpi = createKpi({ db, config, log, fetchImpl, syncBearer: createSyncBearer({ config, fetchImpl }), gmail: gmailForComplaints?.client || null });
+// Every time the scorecard reads Google's reviews (Connect Google on the KPI page), the
+// complaint engine gets them too and matches them to complaints. Bound once it exists, below.
+const googleReviewSink = { take: null };
+const kpi = createKpi({ db, config, log, fetchImpl, syncBearer: createSyncBearer({ config, fetchImpl }), gmail: gmailForComplaints?.client || null, onGoogleReviews: (reviews) => googleReviewSink.take?.(reviews) });
 const complaints = createComplaints({
   db,
   config,
@@ -134,6 +137,7 @@ const complaints = createComplaints({
   syncBearer: createSyncBearer({ config, fetchImpl }),
   log,
 });
+googleReviewSink.take = (reviews) => complaints.importReviews({ reviews }, null);
 await complaints.markInterrupted().then((n) => n && log.warn('complaints: marked runs cut off by the restart as interrupted', { runs: n })).catch(() => {});
 // Kustomer historical migration: export (read-only), dry run, and the import (every conversation
 // onto someone's Story). Production reads Kustomer with KUSTOMER_API_KEY; dev and QA read a
