@@ -94,7 +94,7 @@ export function ComplaintsPage() {
           </button>
         ))}
       </div>
-      {tab === 'playbook' && period && <PlaybookTab period={period} />}
+      {tab === 'playbook' && period && <PlaybookTab period={period} isAdmin={isAdmin} />}
       {tab === 'cases' && period && <CasesTab period={period} />}
       {tab === 'clients' && <ClientsTab />}
       {tab === 'check' && <CheckTab />}
@@ -341,7 +341,7 @@ function DrillDialog({ drill, cases, loading, onClose }: { drill: Drill; cases: 
   );
 }
 
-function PlaybookTab({ period }: { period: Period }) {
+function PlaybookTab({ period, isAdmin }: { period: Period; isAdmin: boolean }) {
   const q = useQuery({ queryKey: ['complaints', 'playbook', period.from, period.to], queryFn: () => complaintsApi.playbook({ from: period.from, to: period.to }), retry: false, placeholderData: (prev) => prev });
   const [drill, setDrill] = useState<Drill | null>(null);
   const cases = useQuery({ queryKey: ['complaints', 'cases', '', period.from, period.to], queryFn: () => complaintsApi.cases({ from: period.from, to: period.to }), retry: false, enabled: !!drill });
@@ -412,6 +412,8 @@ function PlaybookTab({ period }: { period: Period }) {
       <WhatWeOffered p={p} open={open} labels={L} />
 
       <Threats p={p} open={open} labels={L} />
+
+      <GoogleReviews p={p} open={open} isAdmin={isAdmin} />
 
       <ValueTiers p={p} open={open} labels={L} />
 
@@ -572,6 +574,79 @@ function WhatWeOffered({ p, open, labels }: { p: Playbook; open: Open; labels: R
   );
 }
 
+// Google reviews: imported from a Google Business Profile export and matched to complaints by
+// the reviewer's full name and the dates. Shows which threats became reviews, and what we did first.
+function GoogleReviews({ p, open, isAdmin }: { p: Playbook; open: Open; isAdmin: boolean }) {
+  const qc = useQueryClient();
+  const q = useQuery({ queryKey: ['complaints', 'reviews'], queryFn: complaintsApi.reviews, retry: false });
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [show, setShow] = useState(false);
+  const r = p.reviews;
+  const s = q.data;
+  const upload = async (files: FileList | null) => {
+    if (!files?.length) return;
+    setBusy(true);
+    setMsg(null);
+    let read = 0;
+    let added = 0;
+    const bad: string[] = [];
+    for (const f of Array.from(files)) {
+      try {
+        const out = await complaintsApi.importReviews(JSON.parse(await f.text()));
+        read += out.read;
+        added += out.added;
+        if (!out.read) bad.push(f.name);
+      } catch {
+        bad.push(f.name);
+      }
+    }
+    setBusy(false);
+    setMsg(`${read} reviews read, ${added} new.${bad.length ? ` ${bad.length} ${bad.length === 1 ? 'file had' : 'files had'} no reviews (account files don't): ${bad.slice(0, 3).join(', ')}${bad.length > 3 ? '…' : ''}.` : ''} Outcomes pick up matched reviews on the next update.`);
+    qc.invalidateQueries({ queryKey: ['complaints'] });
+  };
+  if (!r) return null;
+  return (
+    <section className="card">
+      <h2>Google reviews</h2>
+      <p className="muted small">Reviews from your Google Business Profile export, matched to the complaint they followed by the reviewer's full name and the dates (a complaint up to 60 days before the review). A matched 1–2★ review counts that client as lost. Reviews posted under initials, a first name only or a business name can't be matched.</p>
+      {r.imported === 0 ? <p className="muted">No reviews imported yet.</p> : (
+        <div className="cmp-arms">
+          <div className="cmp-arm"><span className="small muted">Reviews imported</span><span className="cmp-arm-value">{r.imported}</span><span className="small muted">{day(r.first_at)} to {day(r.last_at)} · {r.imported_negative} at 1–2★</span></div>
+          <div className="cmp-arm"><span className="small muted">Complaints followed by a 1–2★ review</span><span className="cmp-arm-value"><Num ids={r.low_ids} title="Complaints followed by a 1-2 star Google review" open={open}>{r.low_ids.length}</Num></span><span className="small muted"><Num ids={r.low_without_threat_ids} title="Low review with no threat first" open={open}>{r.low_without_threat_ids.length}</Num> gave no warning</span></div>
+          <div className="cmp-arm"><span className="small muted">Threatened a review</span><span className="cmp-arm-value"><Num ids={r.threatened_ids} title="Threatened a public review" open={open}>{r.threatened_ids.length}</Num></span><span className="small muted"><Num ids={r.threatened_posted_ids} title="Threatened a review and posted 1-2 stars" open={open}>{r.threatened_posted_ids.length}</Num> posted 1–2★ · <Num ids={r.threatened_not_posted_ids} title="Threatened a review, none matched" open={open}>{r.threatened_not_posted_ids.length}</Num> didn't (that we can match)</span></div>
+          <div className="cmp-arm"><span className="small muted">Complaints followed by 4–5★</span><span className="cmp-arm-value"><Num ids={r.high_ids} title="Complaints followed by a 4-5 star Google review" open={open}>{r.high_ids.length}</Num></span><span className="small muted">won back, publicly</span></div>
+        </div>
+      )}
+      {r.low_by_response.length > 0 && <p className="small">What we had done before a 1–2★ review: {r.low_by_response.map((x, i) => <span key={x.response}>{i ? ' · ' : ''}{x.label} <Num ids={x.ids} title={`1-2 star review after: ${x.label}`} open={open}>{x.n}</Num></span>)}</p>}
+      <div className="cmp-check-actions">
+        {isAdmin && <label className="link">{busy ? 'Importing…' : 'Import review files (reviews-….json)'}<input type="file" accept=".json,application/json" multiple hidden disabled={busy} onChange={(e) => { upload(e.target.files); e.target.value = ''; }} /></label>}
+        {s && s.low.length > 0 && <button type="button" className="link" onClick={() => setShow(!show)}>{show ? 'Hide' : 'Show'} the {s.low.length} reviews at 3★ or under</button>}
+      </div>
+      {msg && <p className="small cmp-note">{msg}</p>}
+      {show && s && (
+        <div className="table-scroll">
+          <table>
+            <thead><tr><th>Posted</th><th>Reviewer</th><th>Review</th><th>Stars</th><th>Matched to</th><th>We replied</th></tr></thead>
+            <tbody>
+              {s.low.map((x) => (
+                <tr key={x.review_id} className="static">
+                  <td>{day(x.created_at)}</td>
+                  <td>{x.reviewer_name || '—'}</td>
+                  <td className="small">{x.comment ? (x.comment.length > 240 ? `${x.comment.slice(0, 240)}…` : x.comment) : <span className="muted">no text</span>}</td>
+                  <td>{x.stars}★</td>
+                  <td className="small">{x.case_id ? <Num ids={[x.case_id]} title={`Complaint before ${x.reviewer_name || 'this'} review`} open={open}>{catLabel(x.case_category || 'other')} complaint, {day(x.case_opened_at)}</Num> : x.contact_id ? <span className="muted">a contact, no complaint on file</span> : <span className="muted">nobody</span>}</td>
+                  <td>{x.replied ? 'Yes' : <span className="warn">No</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 // Client value: do we lose our best clients more often, and what keeps them?
 function ValueTiers({ p, open, labels }: { p: Playbook; open: Open; labels: Record<ExcludedReason, string> }) {
   const levels = (p.value_tiers || []).filter((t) => t.n > 0);
@@ -594,7 +669,7 @@ function Threats({ p, open, labels }: { p: Playbook; open: Open; labels: Record<
   return (
     <SplitSection
       title="When clients threaten to leave or post a review"
-      intro="The same responses, split by how hard the client pushed. A threat is read from the complaint's tone, or from the client saying in the conversation that they'd leave. Compare a response's Saved rate under a threat with the same response under no threat: that is whether giving more actually keeps them. Google reviews aren't connected yet, so this shows who stayed, not which threats became reviews."
+      intro="The same responses, split by how hard the client pushed. A threat is read from the complaint's tone, or from the client saying in the conversation that they'd leave. Compare a response's Saved rate under a threat with the same response under no threat: that is whether giving more actually keeps them. Which threats became real reviews is in Google reviews below."
       levels={levels}
       open={open}
       labels={labels}

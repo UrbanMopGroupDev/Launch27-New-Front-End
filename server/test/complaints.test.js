@@ -10,6 +10,7 @@ import { normalizeSettings, canApprove, rungForRefund, budgetStatus, DEFAULT_SET
 import { buildPlaybook } from '../src/complaints/playbook.js';
 import { formatThread, offerToResolution, normalizeSolution } from '../src/complaints/solutions.js';
 import { caseRows, rankResponses, threatOf, valueTier } from '../src/complaints/rank.js';
+import { parseTakeout, matchCase, nameKey } from '../src/complaints/reviews.js';
 import { mapStatus, toCase, discover, createKustomerClient, findListing } from '../src/complaints/sources/kustomer.js';
 import { createComplaints, buildReviewStats } from '../src/complaints/service.js';
 import { createReports } from '../src/reports/service.js';
@@ -1164,5 +1165,83 @@ describe('complaints: client value', () => {
     const by = Object.fromEntries(pb.value_tiers.map((t) => [t.key, t]));
     assert.deepEqual([by.low.n, by.mid.n, by.high.n, by.high.avg_spend, by.high.saved_n], [1, 0, 2, 7000, 2]);
     assert.deepEqual(pb.value_unknown_ids, [4]);
+  });
+});
+
+describe('complaints: Google reviews', () => {
+  // Made-up reviewers, in the format of a Google Business Profile export (reviews-….json).
+  const file = (rows) => ({ reviews: rows.map(([name, stars, at, comment], i) => ({ reviewer: { displayName: name }, starRating: stars, comment, createTime: at, updateTime: at, reviewReply: i === 0 ? { comment: 'Sorry to hear this.', updateTime: at } : undefined, name: `accounts/1/locations/2/reviews/r${name.replace(/\W/g, '')}${at.slice(0, 10)}` })) });
+
+  test('an export file is read; account files and broken rows give nothing', () => {
+    const rows = parseTakeout(file([['Avery Sample', 'ONE', '2026-09-10T12:00:00Z', 'Missed everything.'], ['Blake Example', 'FIVE', '2026-09-11T12:00:00Z', undefined]]));
+    assert.deepEqual(rows.map((r) => [r.reviewer_name, r.stars, r.comment, !!r.reply]), [['Avery Sample', 1, 'Missed everything.', true], ['Blake Example', 5, null, false]]);
+    assert.deepEqual(parseTakeout({ name: 'accounts/1', accountName: 'Sample Parent', type: 'LOCATION_GROUP' }), []);
+    assert.deepEqual(parseTakeout({ reviews: [{ reviewer: { displayName: 'No Id' }, starRating: 'ONE', createTime: '2026-01-01T00:00:00Z' }, { name: 'x', starRating: 'SIX', createTime: '2026-01-01T00:00:00Z' }, { name: 'y', starRating: 'TWO', createTime: 'not a date' }] }), []);
+  });
+
+  test('a review is matched by full name and date; single names and far-off dates are not', () => {
+    assert.equal(nameKey('  Zoë  O\'Brien-Sample '), "zoe o'brien-sample");
+    assert.deepEqual([nameKey('Isaac'), nameKey('FL'), nameKey('X')], [null, null, null]);
+    const cases = [{ id: 1, customer_name: 'Avery Sample', opened_at: '2026-08-20T12:00:00Z' }, { id: 2, customer_name: 'AVERY  SAMPLE', opened_at: '2026-09-05T12:00:00Z' }, { id: 3, customer_name: 'Avery', opened_at: '2026-09-05T12:00:00Z' }];
+    const rev = (name, at) => ({ reviewer_name: name, created_at: at });
+    assert.equal(matchCase(rev('Avery Sample', '2026-09-10T12:00:00Z'), cases), 2, 'the closest complaint');
+    assert.equal(matchCase(rev('Avery Sample', '2026-08-15T12:00:00Z'), cases), 1, 'posted first, complained a few days later');
+    assert.equal(matchCase(rev('Avery Sample', '2027-02-01T12:00:00Z'), cases), null, 'months later is not about this complaint');
+    assert.equal(matchCase(rev('Avery', '2026-09-10T12:00:00Z'), cases), null, 'a first name alone never matches');
+    assert.equal(matchCase(rev('Someone Else', '2026-09-10T12:00:00Z'), cases), null);
+  });
+
+  test('the playbook: which threats became reviews, and what we had done first', () => {
+    const cases = [];
+    const resolutions = [];
+    const add = (tone, rung) => {
+      const id = cases.length + 1;
+      cases.push({ id, source: 'kustomer', opened_at: '2026-06-10T12:00:00Z', category: 'quality_missed', tone, l27_customer_id: 900 + id, classified_by: 'claude' });
+      if (rung) resolutions.push({ case_id: id, rung, action: 'x' });
+    };
+    add('threat_review', 'L3');
+    add('threat_review', 'L5');
+    add('mild', null);
+    add('mild', 'L3');
+    const pb = buildPlaybook({ cases, resolutions, costs: [], outcomes: [], reviews: [{ case_id: 1, stars: 1 }, { case_id: 3, stars: 2 }, { case_id: 4, stars: 5 }], reviewTotals: { imported: 40, negative: 3, first_at: '2026-01-01T00:00:00Z', last_at: '2026-10-01T00:00:00Z' }, visits: [], from: '2026-05-01', to: '2026-10-31', settings: normalizeSettings({}), today: '2026-11-27' });
+    const r = pb.reviews;
+    assert.deepEqual([r.imported, r.imported_negative], [40, 3]);
+    assert.deepEqual([r.low_ids, r.high_ids, r.threatened_posted_ids, r.threatened_not_posted_ids, r.low_without_threat_ids], [[1, 3], [4], [1], [2], [3]]);
+    assert.deepEqual(r.low_by_response.map((x) => [x.response, x.n]).sort(), [['apology', 1], ['reclean', 1]]);
+    assert.ok(pb.gaps.some((g) => /40 Google reviews imported/.test(g)));
+  });
+
+  test('importing matches reviews to cases, is safe to repeat, and a matched 1★ review makes the client LOST', async () => {
+    const db = await openDb();
+    const config = loadConfig({ APP_ENV: 'development', L27_MODE: 'mock', MOCK_PASSWORD: 'demo' });
+    const fetchImpl = createMockLaunch27({ password: 'demo' });
+    const schedule = createSchedule({ db, config, fetchImpl, log: quiet });
+    const reports = createReports({ db, config, fetchImpl, schedule, log: quiet });
+    await schedule.sync();
+    await reports.sync();
+    const to = (await reports.visitsSnapshot()).to;
+    const from = new Date(Date.parse(to) - 182 * 86_400_000).toISOString().slice(0, 10);
+    const complaints = createComplaints({ db, config, reports, fetchImpl, log: quiet });
+    await complaints.run({ from, to });
+    const all = await complaints.listCases({ from, to });
+    const target = all.find((c) => c.client_type === 'recurring' && /\s/.test(c.customer_name || '') && all.filter((x) => x.customer_name === c.customer_name).length === 1);
+    assert.ok(target, 'needs a recurring client with a full name and one case');
+    const after = new Date(Date.parse(target.opened_at) + 5 * 86_400_000).toISOString();
+    const upload = file([[target.customer_name.toUpperCase(), 'ONE', after, 'Never again.'], ['Nobody Known', 'TWO', after, 'Bad.'], ['Happy Person', 'FIVE', after, 'Great.']]);
+    let r = await complaints.importReviews(upload, null);
+    assert.deepEqual([r.read, r.added, r.matched], [3, 3, 1]);
+    r = await complaints.importReviews(upload, null);
+    assert.deepEqual([r.read, r.added, r.updated, r.matched], [3, 0, 3, 1], 'importing the same file again adds nothing');
+    const s = await complaints.reviewsSummary();
+    assert.deepEqual([s.imported, s.negative, s.matched, s.negative_matched], [3, 2, 1, 1]);
+    assert.equal(s.low.find((x) => x.stars === 1).case_id, target.id);
+    assert.equal(s.low.find((x) => x.stars === 2).case_id, null);
+    await complaints.run({ from, to });
+    const d = await complaints.getCase(target.id);
+    assert.ok(d.outcomes.length > 0);
+    assert.ok(d.outcomes.every((o) => o.outcome === 'lost' && o.public_review_stars === 1), 'a 1★ Google review is a lost client, whatever the bookings say');
+    const pb = await complaints.playbook({ from, to });
+    assert.deepEqual(pb.reviews.low_ids, [target.id]);
+    await db.close();
   });
 });
