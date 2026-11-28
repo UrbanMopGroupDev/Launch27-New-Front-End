@@ -17,10 +17,10 @@ export function canSeeKpi(config, email) {
   return (config.kpiEmails || []).includes(String(email || '').toLowerCase());
 }
 
-export function createKpi({ db, config, log = { info() {}, warn() {}, error() {} }, now = () => Date.now(), fetchImpl = fetch, syncBearer = null, gmail = null, connectors = null }) {
+export function createKpi({ db, config, log = { info() {}, warn() {}, error() {} }, now = () => Date.now(), fetchImpl = fetch, syncBearer = null, gmail = null, connectors = null, onGoogleReviews = null }) {
   const synthetic = !config.production;
   // Dev and QA: synthetic. Production: live Launch27 and Kustomer; the rest read "No data" until connected.
-  connectors = connectors || (synthetic || !syncBearer ? createKpiConnectors({ synthetic }) : createLiveKpiConnectors({ db, config, fetchImpl, syncBearer, brand: KPI_BRANDS[0], log, now, gmail }));
+  connectors = connectors || (synthetic || !syncBearer ? createKpiConnectors({ synthetic }) : createLiveKpiConnectors({ db, config, fetchImpl, syncBearer, brand: KPI_BRANDS[0], log, now, gmail, onGoogleReviews }));
   const jobs = connectors.map((c) => c.job).filter(Boolean);
   // Live Google reviews, when configured (src/kpi/google.js): connected from this page.
   const google = connectors.find((c) => c.key === 'google' && c.connectUrl) || null;
