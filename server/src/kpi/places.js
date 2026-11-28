@@ -7,7 +7,8 @@
 //   - counts are exact: each day's rise in the total is that day's new reviews;
 //   - stars are known for a new review only when Google includes it in those 5;
 //   - history up to the dated Google Takeout export comes from the export (exact).
-// Kept: review ids, dates and stars only. No names or comments.
+// Kept per review shown: id, date, stars, the reviewer's public name, the comment and its Google
+// link, for the KPI drill-down (the page is limited to KPI_EMAILS in production).
 import { localDate } from '../schedule/rules.js';
 import { KPI_SOURCES } from './config.js';
 
@@ -40,7 +41,7 @@ export function placesReviews(state, exp) {
   const expTo = exp?.reviews_to || '0000-00-00';
   const seen = Object.values(state.seen || {}).filter((r) => r.date > expTo).sort((a, b) => (a.date < b.date ? -1 : 1));
   const checks = [...(state.checks || [])].sort((a, b) => (a.day < b.day ? -1 : 1));
-  const out = [...expReviews, ...seen.map((r) => ({ id: r.id, date: r.date, rating: r.rating }))];
+  const out = [...expReviews, ...seen.map((r) => ({ id: r.id, date: r.date, rating: r.rating, reviewer: r.reviewer || '', comment: r.comment || '', link: r.link || null }))];
   let undated = 0;
   if (checks.length) {
     const first = checks[0];
@@ -118,7 +119,14 @@ export function createGooglePlacesKpi({ db, places, brand, loadExport = () => nu
         const at = Date.parse(r.publishTime || '');
         const rid = String(r.name || '').split('/').pop();
         if (!rid || !Number.isFinite(at) || !(r.rating >= 1 && r.rating <= 5)) continue;
-        seen[rid] = { id: rid, date: localDate(at), rating: Math.round(r.rating) };
+        seen[rid] = {
+          id: rid,
+          date: localDate(at),
+          rating: Math.round(r.rating),
+          reviewer: String(r.authorAttribution?.displayName || '').slice(0, 120),
+          comment: String(r.originalText?.text || r.text?.text || '').slice(0, 4000),
+          link: typeof r.googleMapsUri === 'string' && r.googleMapsUri.startsWith('https://') ? r.googleMapsUri : null,
+        };
       }
       const today = localDate(now());
       const checks = (prev.checks || []).filter((c) => c.day !== today);
@@ -162,7 +170,7 @@ export function createGooglePlacesKpi({ db, places, brand, loadExport = () => nu
       return {
         refreshed_at: memo.taken_at,
         note: lastError ? `last refresh failed: ${lastError}` : `Google public data: ${memo.total} reviews, ${memo.rating ?? '—'} ★`,
-        reviews: reviews.map((r) => ({ ...r, reviewer: '', comment: '' })),
+        reviews: reviews.map((r) => ({ reviewer: '', comment: '', link: null, replied: null, reply: null, ...r })),
         // Reviews between the export and the first live read that Google never showed: counted all time, no date or stars.
         reviewBaseline: { count: undated, avg: null },
       };

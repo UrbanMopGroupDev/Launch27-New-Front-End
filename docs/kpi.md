@@ -96,8 +96,9 @@ Production:
 - Only bookings at the Ottawa location count for UrbanMop Residential (`locations` in `KPI_BRANDS`).
 
 - **Google reviews, live** (`server/src/kpi/google.js`): read once a day from the Google Business
-  Profile API (and by Refresh now) into `kpi_snapshots` (source `google`): each review's id, date
-  and star rating only, no names or comments. Read-only: the only calls after sign-in are GETs.
+  Profile API (and by Refresh now) into `kpi_snapshots` (source `google`): each review's id, date,
+  stars, the reviewer's public name, the comment and our reply (for the drill-down). Read-only: the
+  only calls after sign-in are GETs.
   - **Set up (once).** Google approves one Google Cloud project per business for the API. In that
     project: turn on the My Business Account Management API, My Business
     Business Information API and Google My Business API; create an OAuth client (Web application)
@@ -118,7 +119,8 @@ Production:
   (New) on and billing set; production only). The listing is found once by name (`googlePlaceQuery`)
   or set with `GOOGLE_PLACES_PLACE_ID`. Read once a day (and by Refresh now) into `kpi_snapshots`
   (source `google_places`): the listing's total and rating, and the up to 5 reviews Google shows
-  (picked as "most relevant", not newest), as ids, dates and stars.
+  (picked as "most relevant", not newest): id, date, stars, the reviewer's public name, the comment
+  and its Google link. Every review Google has shown is kept, so the list grows over time.
   - **Counts are exact:** each day's rise in Google's total is that day's new reviews.
   - **Stars are partial:** known only for new reviews Google shows; the tile says "stars known for
     X of Y", and averages use the known stars.
@@ -131,6 +133,24 @@ Production:
 
 Not built yet: the QuickBooks connector, the email alert when a refresh fails or
 a source is stale, and per-brand roles for office managers.
+
+## Google review drill-down
+
+Click the Google reviews tile, or one of its details, to see the reviews for the period
+(`server/src/kpi/review-details.js`, the reviews drill in `calc.js`):
+
+- **All reviews,** newest first: date, stars, reviewer, comment, the Launch27 client the reviewer's
+  name points to (same full name, or first name and last initial when only one client fits;
+  "(likely)"), the cleaners the comment names, our reply (Business Profile API only) and a link to
+  the review on Google (Places only).
+- **Low stars (1–3★)**, **Not replied to** (Business Profile API only, oldest first),
+  **Cleaners mentioned** and **Stars** (count per star; reviews Google showed without stars apart).
+- **Cleaners** are matched by first name, whole words only. When two cleaners share it, the one who
+  worked for the matched client is picked, otherwise the review says how many share the name.
+- Client and cleaner are suggestions from names. Nothing is written anywhere: the Google review
+  bonus is still recorded by a person (Cleaner reports).
+- With Places data, reviewer and comment exist only for the reviews Google has shown; the
+  Business Profile API fills in every review.
 
 ## Who sees it
 
