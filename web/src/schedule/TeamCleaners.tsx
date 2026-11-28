@@ -91,7 +91,7 @@ export function TeamCleaners({ term }: { term: string }) {
               <tbody>
                 {rows.map((c) => (
                   <tr key={c.id} className="static">
-                    <td className="team-name"><Link to={`/cleaners/${c.id}`}>{c.name}</Link>{!c.assignable && <span className="muted small"> · {c.status_label}</span>}</td>
+                    <td className="team-name"><Link to={`/cleaners/${c.id}`}>{c.name}</Link>{!c.assignable && <span className="muted small"> · {c.status_label}</span>}{c.excluded && <span className="small warn"> · Excluded</span>}</td>
                     {c.days.map((d) => <DayCell key={d.date} d={d} />)}
                   </tr>
                 ))}
@@ -120,7 +120,7 @@ export function TeamCleaners({ term }: { term: string }) {
                     <tr key={c.id} className="static">
                       <td><Link to={`/cleaners/${c.id}`}>{c.name}</Link></td>
                       <td>{c.phone ? displayIdentity(c.phone) : '—'}</td>
-                      <td>{c.status_label}</td>
+                      <td>{c.status_label}{c.excluded && <span className="chip neg" style={{ marginLeft: 6 }}>Excluded</span>}</td>
                       <td className="muted small">{c.area || '—'}</td>
                       <td className={offToday(c) ? 'warn' : t?.state === 'none' ? 'muted' : ''}>{offToday(c) ? 'Day off' : t?.hours || 'Not working'}</td>
                       <td className="num">{c.week.booked_h}h of {c.week.capacity_h}h</td>

@@ -47,3 +47,27 @@ The team in one place (`/contacts?list=cleaners`), read from the planner's copy 
 - **Team**: name, phone, status, area, today, hours booked of available and days off over the next 7 days.
 - Search by name or phone; on hold and not ready cleaners are hidden unless ticked. Each name opens the
   cleaner's page, where days off are changed. API: `GET /api/schedule/team-availability?from&days` (max 28).
+
+## Default availability, Exclude from Schedule, week and day views
+
+Laid out like Launch27's Team Availability page. **Change availability** has: Default availability,
+Specific date, Request time off, Exclude from schedule / Put back on schedule, View history. The
+calendar has Month, Week (each day's visits listed) and Day (the day in full, with its changes).
+
+- **Default availability** (usual weekly hours): each weekday works or is off, with one or more blocks
+  (a split day). Visits from today on that the new hours would leave outside are listed first.
+  `POST /api/schedule/cleaner/:id/weekly` `{ week: [{ weekday, dayoff } | { weekday, blocks }], confirm }`.
+- **Exclude from schedule**: Launch27's `options.excluded_from_spots` on the cleaner (not offered in
+  booking spots). Shown on the cleaner's calendar and in Contacts › Cleaners.
+  `PUT /api/schedule/cleaner/:id/excluded` `{ excluded }`. Booked visits are not changed.
+- Both go in the write log, the audit log and the portal's history.
+
+### Waiting for a recording
+
+The Launch27 requests for these two saves (`weeklyRequest`, `excludeRequest` in
+`server/src/schedule/availability.js`) were not recorded from Launch27's own screens. They run
+against the test Launch27 (dev, QA, tests) and are **refused against the live Launch27** until
+`VERIFIED.weekly` / `VERIFIED.exclude` are set to `true`, after each request is matched to a recording
+of Launch27's own save (Team Availability › Change Availability › Default Availability, and Exclude
+from Schedule; DevTools › Network › the request › Copy as fetch, with the bearer token removed). The
+refusal is logged as `blocked` with "request not yet checked against a recording of Launch27".

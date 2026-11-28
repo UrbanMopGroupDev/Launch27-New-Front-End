@@ -510,6 +510,8 @@ export function createMockLaunch27({ password = 'demo', now = () => Date.now(), 
   let nextId = 900_000;
   // Availability saved through the API (one-off changes by team, then date).
   const availSaved = new Map();
+  const weeklySaved = new Map(); // team id -> weekly rows saved through the API
+  const excludedSaved = new Map(); // team id -> excluded from schedule
   let nextAvailId = 500_000;
 
   function bookingsForDay(date) {
@@ -807,7 +809,8 @@ export function createMockLaunch27({ password = 'demo', now = () => Date.now(), 
     // Teams
     // ?filter=active as Launch27 does: the QA copy holds every cleaner ever, most no longer active.
     const teamList = () => (q.get('filter') === 'active' ? teams.filter((t) => t.active !== false) : teams);
-    if (path === '/v1/staff/teams') return [200, page(teamList(), q)];
+    const withExcluded = (t) => (excludedSaved.has(t.id) ? { ...t, options: { ...(t.options || {}), excluded_from_spots: excludedSaved.get(t.id) } } : t);
+    if (path === '/v1/staff/teams') return [200, page(teamList().map(withExcluded), q)];
     if (path === '/v1/staff/teams/count') return [200, { count: teamList().length }];
     // Time-off notes: one made-up note for some cleaners, so the calendar shows how they look.
     if ((m = path.match(/^\/v1\/staff\/teams\/(\d+)\/availability\/notes$/)) && method === 'GET') {
@@ -824,7 +827,16 @@ export function createMockLaunch27({ password = 'demo', now = () => Date.now(), 
       if (method === 'POST') {
         if (!Array.isArray(body)) return [400, { error: 'json: cannot unmarshal object into Go value of type []validator.Availability' }];
         const out = [];
-        for (const r of body) {
+        // Weekly rows (no date): replace the usual hours of the weekdays sent. (Not yet recorded from
+        // Launch27 itself; see docs/availability.md.)
+        const weeklyRows = body.filter((r) => r && !r.date && r.weekday != null);
+        if (weeklyRows.length) {
+          const kept = (weeklySaved.get(Number(m[1])) || (snap ? copyAvailability(m[1], snapHours) : mockAvailability(m[1]))).filter((r) => !weeklyRows.some((w) => Number(w.weekday) === Number(r.weekday)));
+          const rows = weeklyRows.map((r) => ({ id: nextAvailId++, date: null, weekday: Number(r.weekday), dayoff: !!r.dayoff, start_time: r.dayoff ? null : r.start_time, end_time: r.dayoff ? null : r.end_time }));
+          weeklySaved.set(Number(m[1]), [...kept, ...rows].sort((a, b) => a.weekday - b.weekday));
+          out.push(...rows);
+        }
+        for (const r of body.filter((x) => !(x && !x.date && x.weekday != null))) {
           if (!/^\d{4}-\d{2}-\d{2}$/.test(String(r?.date || ''))) return [400, { error: 'date: invalid' }];
           const row = r.dayoff ? { id: nextAvailId++, date: r.date, start_time: null, end_time: null, weekday: null, dayoff: true } : { id: nextAvailId++, date: r.date, start_time: r.start_time, end_time: r.end_time, weekday: null, dayoff: false };
           saved.set(r.date, row);
@@ -833,7 +845,7 @@ export function createMockLaunch27({ password = 'demo', now = () => Date.now(), 
         availSaved.set(Number(m[1]), saved);
         return [200, out];
       }
-      const weekly = snap ? copyAvailability(m[1], snapHours) : mockAvailability(m[1]);
+      const weekly = weeklySaved.get(Number(m[1])) || (snap ? copyAvailability(m[1], snapHours) : mockAvailability(m[1]));
       // Like Launch27: one-day changes (a day off, a short day) only come back with a date range.
       const from = q.get('from');
       const to = q.get('to');
@@ -851,7 +863,13 @@ export function createMockLaunch27({ password = 'demo', now = () => Date.now(), 
       const inRange = [...saved.values()].filter((r) => r.date >= from && r.date <= to);
       return [200, [...weekly, ...dated.filter((r) => !saved.has(r.date)), ...inRange]];
     }
-    if ((m = path.match(/^\/v1\/staff\/teams\/(\d+)$/))) return (t => (t ? [200, t] : [404, { error: 'Not found' }]))(teams.find((t) => t.id === Number(m[1])));
+    if ((m = path.match(/^\/v1\/staff\/teams\/(\d+)$/))) {
+      const t = teams.find((x) => x.id === Number(m[1]));
+      if (!t) return [404, { error: 'Not found' }];
+      // Exclude from Schedule (options.excluded_from_spots). Not yet recorded from Launch27 itself.
+      if (method === 'PUT' && body?.options && 'excluded_from_spots' in body.options) excludedSaved.set(t.id, !!body.options.excluded_from_spots);
+      return [200, withExcluded(t)];
+    }
 
     // Customers
     if (path === '/v1/staff/customers') return [200, page(customersFor(q), q)];

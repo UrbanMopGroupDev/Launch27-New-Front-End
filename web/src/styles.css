@@ -2148,6 +2148,7 @@ a.rep-factor:hover b { text-decoration: underline; }
 .sc-sources { display: flex; flex-direction: column; gap: 10px; border-radius: var(--radius-lg); }
 .sc-sources h2 { margin: 0; font-size: 15px; }
 .sc-sources p { margin: 0; }
+.sc-google { display: flex; flex-direction: column; gap: 2px; padding-top: 8px; border-top: 1px solid var(--border); }
 .sc-source-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; }
 .sc-source-list div { display: flex; flex-direction: column; gap: 1px; }
 .sc-dev { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; padding: 12px; border: 1px dashed var(--border-strong); border-radius: var(--radius); }

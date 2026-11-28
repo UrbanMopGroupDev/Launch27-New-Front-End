@@ -14,7 +14,7 @@ import { EMAIL_READ_ONLY_MESSAGE, EMAIL_SENDING_ENABLED, connectedChannels, send
 import { formatPhone, normalizeEmail, normalizeIdentity, normalizePhone, kindForChannel } from './normalize.js';
 import * as svc from './service.js';
 import { CHANNELS, canEditSettings, getSettings, normalizeCapacity, validateSettings } from './workforce.js';
-import { checkChanges, createAvailabilityHistory, dateRange, toRows, visitsAffected } from '../schedule/availability.js';
+import { checkChanges, checkWeekly, createAvailabilityHistory, dateRange, toRows, visitsAffected, VERIFIED } from '../schedule/availability.js';
 
 const one = async (q, sql, p) => (await q.query(sql, p)).rows[0] || null;
 
@@ -1478,7 +1478,8 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
         dateRange(from, to);
         const live = await schedule.readAvailability(c.id, from, to, req.bearer).catch((err) => { throw l27Read(err); });
         const days = await schedule.availabilityDays(c.id, from, to, live);
-        res.json({ cleaner: c, editable: true, today: torontoDate(), weekly: live.weekly, days });
+        const ready = (kind) => VERIFIED[kind] || config.l27Mode === 'mock';
+        res.json({ cleaner: c, editable: true, today: torontoDate(), weekly: live.weekly, days, excluded: await schedule.isExcluded(c.id), can: { weekly: ready('weekly'), exclude: ready('exclude') } });
       }));
       r.post('/schedule/cleaner/:id/availability', sched(async (req, res) => {
         const b = req.body || {};
@@ -1486,6 +1487,41 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
         const out = await applyAvailability(req, req.params.id, changes, { confirm: !!b.confirm, note: b.note ? String(b.note).slice(0, 300) : null });
         if (out.needs_confirm) return res.status(409).json({ code: 'visits', error: `${out.affected.length} visit${out.affected.length === 1 ? '' : 's'} would be outside their hours.`, affected: out.affected });
         res.json(out);
+      }));
+      // Usual weekly hours (Launch27's Default Availability). 409 { code: 'visits' } lists the visits
+      // from today on the new hours would leave outside, until sent again with confirm.
+      r.post('/schedule/cleaner/:id/weekly', sched(async (req, res) => {
+        const c = await plannerCleaner(req.params.id);
+        const rows = checkWeekly(req.body?.week);
+        const affected = await schedule.weeklyAffected(c.id, rows);
+        if (affected.length && !req.body?.confirm) return res.status(409).json({ code: 'visits', error: `${affected.length} visit${affected.length === 1 ? '' : 's'} would be outside their hours.`, affected });
+        const live = await schedule.readAvailability(c.id, torontoDate(), torontoDate(), req.bearer).catch(() => null);
+        const entry = (extra) => ({ cleaner_id: c.id, cleaner_name: c.name, date: torontoDate(), before: live ? { weekly: live.weekly } : null, after: { weekly: rows }, note: req.body?.note ? String(req.body.note).slice(0, 300) : null, source: 'weekly', by_id: req.user.id, by_name: req.user.name || req.user.email || null, ...extra });
+        try {
+          await schedule.saveWeekly(c.id, rows, req.bearer, req.user.email || null);
+        } catch (err) {
+          await availHistory.record([entry({ outcome: 'failed', error: err.message })]).catch(() => {});
+          throw err;
+        }
+        await availHistory.record([entry({ outcome: 'saved' })]);
+        await svc.audit(db, req.user.id, 'schedule.cleaner.weekly_hours', 'cleaner', c.id, { affected: affected.length });
+        res.json({ weekly: rows, affected });
+      }));
+      // Exclude from Schedule (Launch27's booking spots), or put back.
+      r.put('/schedule/cleaner/:id/excluded', sched(async (req, res) => {
+        const c = await plannerCleaner(req.params.id);
+        const on = !!req.body?.excluded;
+        const was = await schedule.isExcluded(c.id);
+        const entry = (extra) => ({ cleaner_id: c.id, cleaner_name: c.name, date: torontoDate(), before: { excluded: was }, after: { excluded: on }, source: 'exclude', by_id: req.user.id, by_name: req.user.name || req.user.email || null, ...extra });
+        try {
+          await schedule.setExcluded(c.id, on, req.bearer, req.user.email || null);
+        } catch (err) {
+          await availHistory.record([entry({ outcome: 'failed', error: err.message })]).catch(() => {});
+          throw err;
+        }
+        await availHistory.record([entry({ outcome: 'saved' })]);
+        await svc.audit(db, req.user.id, 'schedule.cleaner.excluded', 'cleaner', c.id, { excluded: on });
+        res.json({ excluded: on });
       }));
       r.get('/schedule/cleaner/:id/availability/history', sched(async (req, res) => res.json({ changes: await availHistory.list(req.params.id) })));
     }
@@ -1625,9 +1661,47 @@ export function createInboxRouter({ db, sessions, cookieName, config, l27, conne
       }
     });
     const q = (req) => ({ brand: req.query.brand ? String(req.query.brand) : null, month: req.query.month ? String(req.query.month) : null, mode: String(req.query.mode || 'month'), outage: req.query.outage ? String(req.query.outage) : null, from: req.query.from ? String(req.query.from) : null, to: req.query.to ? String(req.query.to) : null });
-    r.get('/kpi/scorecard', k((req) => kpi.scorecard(q(req))));
+    r.get('/kpi/scorecard', k(async (req) => ({ ...(await kpi.scorecard(q(req))), can_connect_google: req.user.role === 'admin' })));
     r.get('/kpi/drill', k((req) => kpi.drill({ ...q(req), kpi: String(req.query.kpi || '') })));
     r.post('/kpi/refresh', k((req) => kpi.refresh({ bearer: req.bearer })));
+    // Live Google reviews: an admin who can see the scorecard signs in to Google once (docs/kpi.md).
+    // Google sends the person back to the callback with a code; nothing is sent to Google but GETs after that.
+    const googleRedirect = (req) => `${req.protocol}://${req.get('host')}/api/kpi/google/callback`;
+    const kpiAdmin = (req, res) => {
+      if (!canSeeKpi(config, req.user.email)) return res.status(404).json({ error: 'Not found' }), false;
+      if (req.user.role !== 'admin') return res.status(403).json({ error: 'Only admins can connect Google' }), false;
+      return true;
+    };
+    r.get('/kpi/google/connect', wrap(async (req, res) => {
+      if (!kpiAdmin(req, res)) return;
+      try {
+        res.redirect(kpi.googleConnectUrl({ redirectUri: googleRedirect(req), userId: req.user.id }));
+      } catch (err) {
+        res.redirect(`/reports/kpi?google_error=${encodeURIComponent(err.message)}`);
+      }
+    }));
+    r.get('/kpi/google/callback', wrap(async (req, res) => {
+      if (!kpiAdmin(req, res)) return;
+      if (req.query.error) return res.redirect(`/reports/kpi?google_error=${encodeURIComponent(req.query.error === 'access_denied' ? 'Google sign-in was cancelled' : String(req.query.error))}`);
+      try {
+        await kpi.googleFinishConnect({ code: String(req.query.code || ''), state: String(req.query.state || ''), redirectUri: googleRedirect(req), userId: req.user.id, userEmail: req.user.email });
+        await svc.audit(db, req.user.id, 'kpi.google_connect', 'kpi', 'google', {}).catch(() => {});
+        res.redirect('/reports/kpi?google=connected');
+      } catch (err) {
+        res.redirect(`/reports/kpi?google_error=${encodeURIComponent(err.message)}`);
+      }
+    }));
+    r.post('/kpi/google/disconnect', wrap(async (req, res) => {
+      if (!kpiAdmin(req, res)) return;
+      try {
+        const out = await kpi.googleDisconnect();
+        await svc.audit(db, req.user.id, 'kpi.google_disconnect', 'kpi', 'google', {}).catch(() => {});
+        res.json(out);
+      } catch (err) {
+        if (err.status) return res.status(err.status).json({ error: err.message });
+        throw err;
+      }
+    }));
     // Manual Google review entry: the service refuses it in production.
     r.put('/kpi/reviews/:month', k((req) => kpi.saveManualReviews({ brand: req.body?.brand, month: req.params.month, entry: req.body, email: req.user.email })));
     r.delete('/kpi/reviews/:month', k((req) => kpi.clearManualReviews({ brand: req.query.brand ? String(req.query.brand) : null, month: req.params.month })));
